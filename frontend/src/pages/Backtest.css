@@ -1,0 +1,60 @@
+.backtest-container {
+  padding: 24px;
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+  min-height: 100vh;
+}
+
+.backtest-header {
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 2px solid rgba(255, 255, 255, 0.1);
+}
+
+.page-title {
+  font-size: 28px;
+  font-weight: 700;
+  color: #fff;
+  margin: 0 0 8px 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.page-title .anticon {
+  color: #faad14;
+}
+
+.page-subtitle {
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 14px;
+  margin: 0;
+}
+
+.config-card,
+.info-card {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  margin-bottom: 24px;
+}
+
+.config-card .ant-card-head-title {
+  color: #fff;
+  font-weight: 600;
+}
+
+.config-card .ant-form-item-label > label {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.info-card h3 {
+  color: #fff;
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+
+.info-card ul li {
+  color: rgba(255, 255, 255, 0.75);
+  line-height: 2;
+}

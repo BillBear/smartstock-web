@@ -1,0 +1,492 @@
+/* ============================================
+   SmartStock AI - Professional Financial Terminal
+   Dark Mode Theme - Bloomberg/Robinhood Style
+   ============================================ */
+
+/* === CSS Variables === */
+:root {
+  /* Dark Background System */
+  --bg-primary: #0B0E11;
+  --bg-card: #151A21;
+  --bg-elevated: #1A1F28;
+  --bg-hover: #1F242E;
+
+  /* Neon Accent Colors */
+  --bull-color: #00C076;
+  --bull-glow: rgba(0, 192, 118, 0.3);
+  --bear-color: #FF5550;
+  --bear-glow: rgba(255, 85, 80, 0.3);
+
+  /* Neutral Grays */
+  --text-primary: #E8EAED;
+  --text-secondary: #9AA0A6;
+  --text-muted: #5F6368;
+  --border-primary: #2A2F38;
+  --border-hover: #3A3F48;
+
+  /* Accent Colors */
+  --accent-blue: #4DA3FF;
+  --accent-amber: #FFB020;
+  --accent-purple: #A78BFA;
+
+  /* Shadows & Glows */
+  --glow-sm: 0 0 10px;
+  --glow-md: 0 0 20px;
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
+
+  /* Typography */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'IBM Plex Mono', 'Roboto Mono', 'Consolas', monospace;
+
+  /* Spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+}
+
+/* === Global Reset === */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* === Layout === */
+.ant-layout {
+  background: var(--bg-primary) !important;
+  min-height: 100vh;
+}
+
+.ant-layout-sider {
+  background: var(--bg-card) !important;
+  border-right: 1px solid var(--border-primary) !important;
+}
+
+.ant-layout-content {
+  background: var(--bg-primary) !important;
+  padding: 0 !important;
+}
+
+/* === Logo === */
+.logo {
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 var(--space-6);
+  background: var(--bg-card) !important;
+  border-bottom: 1px solid var(--border-primary);
+  gap: var(--space-2);
+}
+
+.logo-icon {
+  font-size: 24px;
+  color: var(--bull-color);
+  filter: drop-shadow(0 0 8px var(--bull-glow));
+}
+
+.logo-text {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+.route-loading {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+}
+
+/* === Sidebar Menu === */
+.ant-menu {
+  background: var(--bg-card) !important;
+  border: none !important;
+  padding: var(--space-2) 0;
+}
+
+.ant-menu-item {
+  color: var(--text-secondary) !important;
+  margin: var(--space-1) var(--space-3) !important;
+  border-radius: 8px !important;
+  height: 44px !important;
+  line-height: 44px !important;
+  font-size: 14px !important;
+  font-weight: 500 !important;
+  transition: all 0.2s !important;
+}
+
+.ant-menu-item-selected {
+  background: rgba(0, 192, 118, 0.1) !important;
+  color: var(--bull-color) !important;
+  border-left: 3px solid var(--bull-color);
+}
+
+.ant-menu-item:hover {
+  background: var(--bg-hover) !important;
+  color: var(--text-primary) !important;
+}
+
+/* === Cards === */
+.ant-card {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border-primary) !important;
+  border-radius: 8px !important;
+  box-shadow: var(--shadow-sm) !important;
+  margin-bottom: var(--space-4);
+}
+
+.ant-card:hover {
+  border-color: var(--border-hover) !important;
+  box-shadow: var(--shadow-md) !important;
+}
+
+.ant-card-head {
+  background: var(--bg-card) !important;
+  border-bottom: 1px solid var(--border-primary) !important;
+  padding: var(--space-4) var(--space-6) !important;
+  color: var(--text-primary) !important;
+}
+
+.ant-card-head-title {
+  color: var(--text-primary) !important;
+  font-size: 16px !important;
+  font-weight: 600 !important;
+}
+
+.ant-card-body {
+  background: var(--bg-card) !important;
+  padding: var(--space-6) !important;
+  color: var(--text-primary) !important;
+}
+
+/* 强制所有卡片内的文字颜色 */
+.ant-card .ant-descriptions-item-label,
+.ant-card .ant-descriptions-item-content,
+.ant-card p,
+.ant-card div {
+  color: var(--text-primary) !important;
+}
+
+/* === Tables === */
+.ant-table {
+  background: var(--bg-card) !important;
+  color: var(--text-primary) !important;
+}
+
+.ant-table-thead > tr > th {
+  background: var(--bg-elevated) !important;
+  color: var(--text-secondary) !important;
+  font-weight: 600 !important;
+  font-size: 12px !important;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border-primary) !important;
+  padding: var(--space-3) var(--space-4) !important;
+}
+
+.ant-table-tbody > tr > td {
+  background: var(--bg-card) !important;
+  border-bottom: 1px solid var(--border-primary) !important;
+  padding: var(--space-3) var(--space-4) !important;
+  color: var(--text-primary) !important;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.ant-table-tbody > tr:hover > td {
+  background: var(--bg-hover) !important;
+  cursor: pointer;
+}
+
+/* === Buttons === */
+.ant-btn {
+  border-radius: 6px !important;
+  font-weight: 500 !important;
+  transition: all 0.2s !important;
+}
+
+.ant-btn-primary {
+  background: var(--bull-color) !important;
+  border-color: var(--bull-color) !important;
+  color: #000 !important;
+  font-weight: 600 !important;
+}
+
+.ant-btn-primary:hover {
+  background: var(--bull-color) !important;
+  box-shadow: 0 0 20px var(--bull-glow) !important;
+  transform: translateY(-1px);
+}
+
+.ant-btn-default {
+  background: var(--bg-elevated) !important;
+  border-color: var(--border-primary) !important;
+  color: var(--text-primary) !important;
+}
+
+.ant-btn-default:hover {
+  border-color: var(--bull-color) !important;
+  color: var(--bull-color) !important;
+}
+
+/* === Form Inputs === */
+.ant-input,
+.ant-input-number,
+.ant-select-selector {
+  background: var(--bg-elevated) !important;
+  border-color: var(--border-primary) !important;
+  color: var(--text-primary) !important;
+  border-radius: 6px !important;
+}
+
+.ant-input::placeholder,
+.ant-select-selection-placeholder {
+  color: var(--text-muted) !important;
+}
+
+.ant-input:hover,
+.ant-select-selector:hover {
+  border-color: var(--border-hover) !important;
+}
+
+.ant-input:focus,
+.ant-input-focused,
+.ant-select-focused .ant-select-selector {
+  border-color: var(--bull-color) !important;
+  box-shadow: 0 0 0 2px rgba(0, 192, 118, 0.1) !important;
+}
+
+/* === Tags === */
+.ant-tag {
+  border-radius: 4px !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  padding: 2px var(--space-2) !important;
+  border: none !important;
+  font-family: var(--font-mono);
+}
+
+/* === Tabs === */
+.ant-tabs-tab {
+  color: var(--text-secondary) !important;
+  font-weight: 500 !important;
+}
+
+.ant-tabs-tab-active .ant-tabs-tab-btn {
+  color: var(--bull-color) !important;
+  font-weight: 600 !important;
+}
+
+.ant-tabs-ink-bar {
+  background: var(--bull-color) !important;
+  height: 3px !important;
+  box-shadow: 0 0 8px var(--bull-glow);
+}
+
+/* === Market Colors === */
+.price-up,
+.up,
+.bull {
+  color: var(--bull-color) !important;
+  font-weight: 600;
+  font-family: var(--font-mono);
+}
+
+.price-down,
+.down,
+.bear {
+  color: var(--bear-color) !important;
+  font-weight: 600;
+  font-family: var(--font-mono);
+}
+
+.bg-up {
+  background: rgba(0, 192, 118, 0.15) !important;
+  color: var(--bull-color) !important;
+  border: 1px solid rgba(0, 192, 118, 0.3);
+}
+
+.bg-down {
+  background: rgba(255, 85, 80, 0.15) !important;
+  color: var(--bear-color) !important;
+  border: 1px solid rgba(255, 85, 80, 0.3);
+}
+
+/* === Neon Glow Effects === */
+.glow-bull {
+  box-shadow: 0 0 20px var(--bull-glow);
+}
+
+.glow-bear {
+  box-shadow: 0 0 20px var(--bear-glow);
+}
+
+/* === Spotlight Search === */
+.spotlight-search {
+  position: relative;
+  max-width: 600px;
+  margin: 0 auto var(--space-6);
+}
+
+.spotlight-search input {
+  background: var(--bg-elevated) !important;
+  border: 1px solid var(--border-primary) !important;
+  padding: var(--space-4) var(--space-6) !important;
+  font-size: 16px !important;
+  color: var(--text-primary) !important;
+  border-radius: 12px !important;
+  transition: all 0.3s !important;
+}
+
+.spotlight-search input:focus {
+  border-color: var(--bull-color) !important;
+  box-shadow: 0 0 0 3px rgba(0, 192, 118, 0.1),
+              0 0 30px rgba(0, 192, 118, 0.2) !important;
+  transform: translateY(-2px);
+}
+
+/* === Page Containers === */
+.dashboard-container,
+.smart-screen-container,
+.watchlist-container,
+.stock-detail-container,
+.backtest-container {
+  padding: var(--space-6);
+  background: var(--bg-primary) !important;
+  min-height: calc(100vh - 64px);
+}
+
+/* === Statistics === */
+.ant-statistic {
+  font-family: var(--font-mono) !important;
+}
+
+.ant-statistic-title {
+  color: var(--text-secondary) !important;
+  font-size: 12px !important;
+  font-family: var(--font-sans) !important;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.ant-statistic-content {
+  color: var(--text-primary) !important;
+  font-size: 24px !important;
+  font-weight: 700 !important;
+}
+
+/* === Monospace for Numbers === */
+.stock-code,
+.stock-price,
+.percentage,
+.volume,
+.amount {
+  font-family: var(--font-mono) !important;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* === Skeleton Loader === */
+.skeleton-grid {
+  background: linear-gradient(
+    90deg,
+    var(--bg-elevated) 25%,
+    var(--bg-hover) 50%,
+    var(--bg-elevated) 75%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-loading 1.5s ease-in-out infinite;
+  border-radius: 4px;
+}
+
+@keyframes skeleton-loading {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* === Scrollbar === */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-primary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-primary);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-hover);
+}
+
+/* === Loading States === */
+.ant-spin {
+  color: var(--bull-color) !important;
+}
+
+/* === Accessibility === */
+.ant-btn:focus-visible,
+.ant-input:focus-visible {
+  outline: 2px solid var(--bull-color);
+  outline-offset: 2px;
+}
+
+/* === Responsive === */
+@media (max-width: 768px) {
+  .dashboard-container,
+  .smart-screen-container,
+  .watchlist-container,
+  .stock-detail-container,
+  .backtest-container {
+    padding: var(--space-4);
+  }
+}
+
+/* === Animations === */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fade-in {
+  animation: fadeIn 0.3s ease-out;
+}
+
+/* === Reduced Motion === */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

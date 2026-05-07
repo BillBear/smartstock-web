@@ -1,0 +1,156 @@
+.technical-panel-card {
+  margin-bottom: 24px;
+}
+
+.signal-summary {
+  background: var(--bg-elevated);
+  padding: 20px;
+  border-radius: 12px;
+  margin-bottom: 20px;
+  border: 1px solid var(--border-primary);
+}
+
+.signal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.signal-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 18px;
+}
+
+.signal-title {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.signal-score {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.score-up {
+  color: #FF5550;
+  font-size: 20px;
+}
+
+.score-down {
+  color: #00C076;
+  font-size: 20px;
+}
+
+.signal-trend {
+  margin-bottom: 16px;
+}
+
+.signal-details-title {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 12px;
+  font-size: 15px;
+}
+
+.signal-item {
+  padding: 8px 0;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  display: flex;
+  align-items: flex-start;
+}
+
+.signal-bullet {
+  margin-right: 8px;
+  color: #00C076;
+  font-weight: bold;
+}
+
+.indicator-group {
+  background: var(--bg-elevated);
+  padding: 16px;
+  border-radius: 8px;
+  border-left: 3px solid #00C076;
+  height: 100%;
+}
+
+.indicator-group-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+}
+
+.indicator-group-title::before {
+  content: '';
+  width: 4px;
+  height: 14px;
+  background: #00C076;
+  margin-right: 8px;
+  border-radius: 2px;
+}
+
+.rsi-display {
+  padding: 8px 0;
+}
+
+.rsi-value {
+  font-size: 32px;
+  font-weight: 700;
+  text-align: center;
+  margin-bottom: 12px;
+}
+
+.rsi-bar {
+  position: relative;
+  width: 100%;
+  height: 24px;
+  background: linear-gradient(to right, #00C076 0%, #FFB020 30%, #FFB020 70%, #FF5550 100%);
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.rsi-bar-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.3);
+  transition: width 0.3s ease;
+}
+
+.rsi-mark {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.rsi-tips {
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-weight: 500;
+  margin-top: 8px;
+}
+
+@media (max-width: 768px) {
+  .signal-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .signal-main {
+    font-size: 16px;
+  }
+}

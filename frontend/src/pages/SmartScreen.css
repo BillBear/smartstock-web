@@ -1,0 +1,488 @@
+.smart-screen-container {
+  padding: 24px;
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+  min-height: calc(100vh - 64px);
+  overflow-anchor: none;
+}
+
+.screen-header {
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 2px solid rgba(255, 255, 255, 0.1);
+}
+
+.page-title {
+  font-size: 28px;
+  font-weight: 700;
+  color: #fff;
+  margin: 0 0 8px 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.page-title .anticon {
+  color: #faad14;
+}
+
+.page-subtitle {
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 14px;
+  margin: 0;
+}
+
+.trade-plan-hero {
+  margin-bottom: 18px;
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at 12% 20%, rgba(34, 211, 238, 0.18), transparent 30%),
+    linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(17, 24, 39, 0.78));
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.32);
+  overflow: hidden;
+}
+
+.plan-hero-main {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: flex-start;
+  margin-bottom: 18px;
+}
+
+.plan-kicker {
+  color: rgba(148, 163, 184, 0.96);
+  font-size: 13px;
+  letter-spacing: 0.18em;
+  margin-bottom: 8px;
+}
+
+.plan-hero-main h2 {
+  font-size: clamp(28px, 4vw, 46px);
+  line-height: 1.05;
+  margin: 0 0 10px;
+  letter-spacing: -0.05em;
+}
+
+.plan-hero-main p {
+  color: rgba(226, 232, 240, 0.82);
+  margin: 0;
+  max-width: 760px;
+  line-height: 1.75;
+}
+
+.plan-badge {
+  min-width: 148px;
+  text-align: center;
+  padding: 12px 16px;
+  border: 1px solid;
+  border-radius: 999px;
+  background: rgba(2, 6, 23, 0.48);
+  font-weight: 800;
+}
+
+.plan-metrics {
+  margin-bottom: 14px;
+}
+
+.plan-metrics .ant-statistic-title {
+  color: rgba(203, 213, 225, 0.72);
+}
+
+.plan-metrics .ant-statistic-content {
+  color: #fff;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.probability-warning {
+  border-radius: 14px;
+}
+
+.core-plan-row {
+  margin-bottom: 18px;
+}
+
+.core-pick-card {
+  height: 100%;
+  border-radius: 18px;
+  background: linear-gradient(145deg, rgba(15, 23, 42, 0.88), rgba(2, 6, 23, 0.64));
+  border: 1px solid rgba(34, 211, 238, 0.18);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.24);
+}
+
+.core-pick-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.core-pick-head strong {
+  display: block;
+  color: #f8fafc;
+  font-size: 18px;
+}
+
+.core-pick-head span {
+  color: rgba(148, 163, 184, 0.9);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+}
+
+.core-pick-score {
+  margin: 16px 0 12px;
+  color: #67e8f9;
+  font-size: 38px;
+  font-weight: 900;
+  line-height: 1;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.core-pick-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.core-pick-grid span {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(148, 163, 184, 0.08);
+  color: rgba(226, 232, 240, 0.88);
+  font-size: 12px;
+}
+
+.core-pick-card p {
+  min-height: 44px;
+  color: rgba(203, 213, 225, 0.78);
+  line-height: 1.6;
+}
+
+/* 统计卡片 */
+.stats-row {
+  margin-bottom: 24px;
+}
+
+.stat-card {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.stat-card .ant-statistic-title {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.stat-card .ant-statistic-content {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* 排行榜卡片 */
+.ranking-card {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  margin-bottom: 24px;
+}
+
+.ranking-card-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: baseline;
+  margin-bottom: 16px;
+}
+
+.ranking-card-title h3 {
+  color: #fff;
+  margin: 0;
+}
+
+.ranking-card-title span {
+  color: rgba(203, 213, 225, 0.68);
+  font-size: 13px;
+}
+
+.ranking-card .ant-tabs-nav {
+  margin-bottom: 16px;
+}
+
+.ranking-card .ant-tabs-tab {
+  color: rgba(255, 255, 255, 0.65);
+  font-weight: 500;
+}
+
+.ranking-card .ant-tabs-tab-active .ant-tabs-tab-btn {
+  color: #1890ff;
+}
+
+.ranking-card .ant-tabs-ink-bar {
+  background: #1890ff;
+}
+
+/* 表格样式 */
+.ranking-table .ant-table {
+  background: transparent;
+}
+
+.ranking-table .ant-table-thead > tr > th {
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.85);
+  border-bottom: 2px solid rgba(255, 255, 255, 0.1);
+  font-weight: 600;
+}
+
+.ranking-table .ant-table-tbody > tr > td {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  background: transparent;
+}
+
+.ranking-table .ant-table-tbody > tr:hover > td {
+  background: rgba(255, 255, 255, 0.05) !important;
+}
+
+/* 排名单元格 */
+.rank-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.rank-number {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+/* 股票单元格 */
+.stock-cell {
+  padding: 8px 0;
+}
+
+.stock-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.stock-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.stock-code {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
+  font-family: 'JetBrains Mono', monospace;
+  margin-bottom: 6px;
+}
+
+.stock-tags {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.stock-tag {
+  font-size: 11px;
+  padding: 0 6px;
+  margin: 0;
+  border-radius: 4px;
+  background: rgba(24, 144, 255, 0.15);
+  border: 1px solid rgba(24, 144, 255, 0.3);
+  color: #1890ff;
+}
+
+/* 价格单元格 */
+.price-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.price-value {
+  font-size: 16px;
+  font-weight: 600;
+  color: #fff;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.price-change {
+  font-size: 13px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.price-change.up {
+  color: #ff4d4f;
+}
+
+.price-change.down {
+  color: #52c41a;
+}
+
+/* 评分单元格 */
+.score-cell {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.score-level {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+/* 信息卡片 */
+.info-card {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.info-card h3 {
+  color: #fff;
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 20px;
+}
+
+.score-explain h4 {
+  color: #1890ff;
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+.score-explain ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.score-explain li {
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 13px;
+  line-height: 2;
+  padding-left: 12px;
+  position: relative;
+}
+
+.score-explain li::before {
+  content: '•';
+  position: absolute;
+  left: 0;
+  color: #1890ff;
+}
+
+.disclaimer {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  color: #faad14;
+  font-size: 13px;
+  text-align: center;
+}
+
+.news-panel-summary {
+  display: grid;
+  gap: 10px;
+}
+
+.news-panel-stat {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.news-panel-stat span {
+  display: block;
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.news-panel-stat strong {
+  color: #fff;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.news-panel-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.news-panel-list {
+  display: grid;
+  gap: 10px;
+}
+
+.news-panel-item {
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.news-panel-item-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.news-panel-item-title {
+  color: rgba(255, 255, 255, 0.9);
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.news-panel-item-title a {
+  color: rgba(255, 255, 255, 0.9);
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.28);
+}
+
+.news-panel-item-title a:hover {
+  color: #ffd666;
+  border-bottom-color: rgba(255, 214, 102, 0.7);
+}
+
+.news-panel-item-time {
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+/* 响应式 */
+@media (max-width: 768px) {
+  .smart-screen-container {
+    padding: 16px;
+  }
+
+  .page-title {
+    font-size: 22px;
+  }
+
+  .ranking-table {
+    font-size: 12px;
+  }
+
+  .plan-hero-main,
+  .ranking-card-title {
+    flex-direction: column;
+  }
+
+  .plan-badge {
+    width: 100%;
+  }
+}

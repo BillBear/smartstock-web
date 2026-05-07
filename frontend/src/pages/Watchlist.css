@@ -1,0 +1,238 @@
+.watchlist-container {
+  padding: 24px;
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+  min-height: 100vh;
+}
+
+.watchlist-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.page-title {
+  font-size: 28px;
+  font-weight: 700;
+  color: #fff;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.group-tabs {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+
+.group-tab {
+  padding: 12px 20px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.65);
+  cursor: pointer;
+  transition: all 0.3s;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.group-tab:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: #1890ff;
+}
+
+.group-tab.active {
+  background: #1890ff;
+  border-color: #1890ff;
+  color: #fff;
+}
+
+.watchlist-card {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.review-card {
+  margin-bottom: 16px;
+  border: 1px solid rgba(34, 211, 238, 0.22);
+  background:
+    radial-gradient(circle at 8% 0%, rgba(34, 211, 238, 0.16), transparent 34%),
+    linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(17, 24, 39, 0.92));
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.22);
+}
+
+.review-card-main {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.2fr) minmax(360px, 1fr);
+  gap: 20px;
+  align-items: stretch;
+}
+
+.section-eyebrow {
+  color: #22d3ee;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  margin-bottom: 8px;
+}
+
+.review-card h2 {
+  color: #fff;
+  font-size: 22px;
+  margin: 0 0 10px;
+}
+
+.review-card p {
+  color: rgba(255, 255, 255, 0.68);
+  line-height: 1.7;
+  margin: 0 0 12px;
+}
+
+.review-metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(92px, 1fr));
+  gap: 10px;
+}
+
+.review-metrics > div {
+  min-height: 76px;
+  padding: 13px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.review-metrics span {
+  display: block;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.review-metrics strong {
+  color: #fff;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.review-metrics .metric-up {
+  color: #ff4d4f;
+}
+
+.review-metrics .metric-down {
+  color: #52c41a;
+}
+
+.review-table {
+  margin-top: 16px;
+}
+
+.watchlist-stock.compact .stock-name {
+  font-size: 14px;
+}
+
+.watchlist-card .ant-table {
+  background: transparent;
+}
+
+.watchlist-card .ant-table-thead > tr > th {
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.85);
+  border-bottom: 2px solid rgba(255, 255, 255, 0.1);
+}
+
+.watchlist-card .ant-table-tbody > tr > td {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.watchlist-card .ant-table-tbody > tr:hover > td {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.review-card .ant-table,
+.review-card .ant-table-container,
+.review-card .ant-table-content {
+  background: transparent;
+}
+
+.review-card .ant-table-thead > tr > th {
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.72);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.review-card .ant-table-tbody > tr > td {
+  color: rgba(255, 255, 255, 0.82);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.watchlist-stock {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stock-name {
+  font-weight: 600;
+  color: #fff;
+  font-size: 15px;
+}
+
+.stock-code {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.group-tag {
+  margin-top: 4px;
+  font-size: 11px;
+}
+
+.price-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.price {
+  font-size: 16px;
+  font-weight: 600;
+  color: #fff;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.change {
+  font-size: 13px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.change.up {
+  color: #ff4d4f;
+}
+
+.change.down {
+  color: #52c41a;
+}
+
+@media (max-width: 1100px) {
+  .review-card-main {
+    grid-template-columns: 1fr;
+  }
+
+  .review-metrics {
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
+  }
+}

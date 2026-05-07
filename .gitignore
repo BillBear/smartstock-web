@@ -1,0 +1,31 @@
+.DS_Store
+__claude_write_test__.txt
+.playwright-cli/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+backend/venv/
+
+# Node / Vite
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Local runtime data
+*.log
+runtime/
+frontend/*.log
+backend/*.log
+postgres/*.log
+postgres/data/
+backend/data/*.db
+backend/data/*.sqlite*
+
+# Local secrets
+.env
+*.env
+!*.env.example

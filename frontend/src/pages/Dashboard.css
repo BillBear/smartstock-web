@@ -1,0 +1,419 @@
+.dashboard-container {
+  padding: 24px;
+  background: linear-gradient(135deg, #0a1929 0%, #1a2332 100%);
+  min-height: 100vh;
+}
+
+.dashboard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 2px solid rgba(255, 255, 255, 0.1);
+}
+
+.page-title {
+  font-size: 28px;
+  font-weight: 700;
+  color: #fff;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.page-title .anticon {
+  color: #faad14;
+  font-size: 32px;
+}
+
+.update-time {
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 14px;
+}
+
+.coach-workbench-card {
+  margin-bottom: 18px;
+  border-radius: 18px;
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  background:
+    radial-gradient(circle at 8% 12%, rgba(14, 165, 233, 0.2), transparent 28%),
+    radial-gradient(circle at 92% 16%, rgba(250, 204, 21, 0.12), transparent 24%),
+    linear-gradient(135deg, rgba(8, 15, 31, 0.98), rgba(15, 23, 42, 0.94));
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.32);
+}
+
+.coach-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #38bdf8;
+  font-size: 13px;
+  letter-spacing: 0.1em;
+  margin-bottom: 10px;
+}
+
+.coach-workbench-card h2 {
+  color: #fff;
+  font-size: 26px;
+  line-height: 1.2;
+  margin: 0 0 10px;
+}
+
+.coach-workbench-card p {
+  color: rgba(255, 255, 255, 0.68);
+  line-height: 1.7;
+  margin: 0 0 14px;
+}
+
+.coach-steps {
+  display: grid;
+  gap: 10px;
+}
+
+.coach-step {
+  display: grid;
+  grid-template-columns: 34px 1fr;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.055);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.coach-step > span {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #07111f;
+  font-weight: 800;
+  background: linear-gradient(135deg, #22d3ee, #fde047);
+}
+
+.coach-step strong {
+  color: #fff;
+}
+
+.coach-step p {
+  margin: 4px 0 0;
+  font-size: 13px;
+}
+
+.lesson-card {
+  min-height: 170px;
+  padding: 16px;
+  border-radius: 16px;
+  background: rgba(2, 6, 23, 0.38);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.lesson-title {
+  color: #fff;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.lesson-mistakes {
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 13px;
+  line-height: 1.7;
+  margin-top: auto;
+}
+
+/* 市场情绪卡片 */
+.sentiment-card {
+  background: linear-gradient(135deg, #1e3a5f 0%, #2d4a6f 100%);
+  border-radius: 16px;
+  margin-bottom: 24px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+.sentiment-card .ant-card-body {
+  padding: 32px;
+}
+
+.sentiment-label {
+  font-size: 18px;
+  font-weight: 600;
+  color: #fff;
+  margin-bottom: 16px;
+}
+
+.sentiment-status {
+  text-align: center;
+}
+
+/* 指数卡片 */
+.indices-section {
+  margin-bottom: 24px;
+}
+
+.section-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: #fff;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.section-title .anticon {
+  color: #faad14;
+}
+
+.index-card {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  transition: all 0.3s ease;
+  height: 100%;
+}
+
+.index-card:hover {
+  background: rgba(255, 255, 255, 0.08);
+  transform: translateY(-4px);
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3);
+}
+
+.index-card .ant-card-body {
+  padding: 20px;
+}
+
+.index-name {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.65);
+  margin-bottom: 8px;
+}
+
+.index-value {
+  font-size: 28px;
+  font-weight: 700;
+  color: #fff;
+  font-family: 'JetBrains Mono', monospace;
+  margin-bottom: 8px;
+}
+
+.index-change {
+  font-size: 16px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.index-change.up {
+  color: #ff4d4f;
+}
+
+.index-change.down {
+  color: #52c41a;
+}
+
+.index-amount {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
+  margin-top: 8px;
+}
+
+/* 统计卡片 */
+.statistics-card {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.statistics-card .ant-statistic-title {
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 13px;
+}
+
+.statistics-card .ant-statistic-content {
+  color: #fff;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* 数据表格卡片 */
+.data-table-card {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.data-table-card .ant-card-head {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.data-table-card .ant-card-head-title {
+  color: #fff;
+  font-weight: 600;
+}
+
+.data-table-card .ant-table {
+  background: transparent;
+}
+
+.data-table-card .ant-table-thead > tr > th {
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.85);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.data-table-card .ant-table-tbody > tr > td {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.data-table-card .ant-table-tbody > tr:hover > td {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* AI观点卡片 */
+.ai-insight-card {
+  background: linear-gradient(135deg, #2d1b47 0%, #3d2b57 100%);
+  border-radius: 12px;
+  border: 1px solid rgba(147, 51, 234, 0.3);
+}
+
+.ai-insight-card h3 {
+  color: #fff;
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+
+.ai-insight-content p {
+  color: rgba(255, 255, 255, 0.85);
+  line-height: 1.8;
+  margin-bottom: 16px;
+}
+
+.ai-insight-content strong {
+  color: #faad14;
+}
+
+.insight-tips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.news-matrix {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.news-matrix-item {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.news-matrix-label {
+  display: block;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.news-matrix-item strong {
+  color: #fff;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.news-source-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.news-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin: 4px 0 18px;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(9, 18, 33, 0.32);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.news-event-list {
+  display: grid;
+  gap: 10px;
+}
+
+.news-event-row {
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(9, 18, 33, 0.36);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.news-event-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.news-event-title {
+  color: rgba(255, 255, 255, 0.92);
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.news-event-title a {
+  color: rgba(255, 255, 255, 0.92);
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.28);
+}
+
+.news-event-title a:hover {
+  color: #ffd666;
+  border-bottom-color: rgba(255, 214, 102, 0.7);
+}
+
+.news-event-time {
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+.news-pagination {
+  margin-top: 14px;
+  text-align: right;
+}
+
+/* 响应式 */
+@media (max-width: 768px) {
+  .dashboard-container {
+    padding: 16px;
+  }
+
+  .page-title {
+    font-size: 22px;
+  }
+
+  .index-value {
+    font-size: 24px;
+  }
+
+  .coach-workbench-card h2 {
+    font-size: 22px;
+  }
+}

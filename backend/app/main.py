@@ -1,0 +1,1218 @@
+"""
+FastAPI主应用程序
+"""
+import sys
+from pathlib import Path
+
+# 添加项目根目录到Python路径
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from fastapi import FastAPI, HTTPException
+from fastapi.concurrency import run_in_threadpool
+from fastapi.middleware.cors import CORSMiddleware
+from app.core.config import settings
+from app.models.schemas import (
+    StockQueryRequest,
+    HistoryQueryRequest,
+    TechnicalAnalysisRequest,
+    SignalRequest,
+    AdviceRequest,
+    MoneyFlowRequest,
+    AIDecisionRequest,
+    FullAnalysisRequest,
+    CoachRiskProfileRequest,
+    CoachPickActionRequest,
+    CoachBacktestRunRequest,
+    CoachStrategyConfigApplyRequest,
+    CoachModelTrainRequest,
+    StockRealtimeResponse,
+    ApiResponse,
+    ErrorResponse
+)
+from app.services.stock_service import StockDataService
+from app.services.technical_analyzer import TechnicalAnalyzer
+from app.services.advice_service import AdviceService
+from app.services.money_flow_service import MoneyFlowService
+from app.services.ai_decision_service import AIDecisionEngine
+from app.services.mock_data import MockDataService
+from app.services.akshare_service import AKShareService
+from app.services.tencent_service import TencentService
+from app.services.data_source_manager import DataSourceManager
+from app.services.fundamental_service import FundamentalService
+from app.services.coach_service import CoachService
+from app.services.coach_store import CoachStore
+from app.services.news_factor_service import NewsFactorService
+from app.services.ml_model_service import MLModelService
+from app.services.ml_explain_service import MLExplainService
+import logging
+from datetime import datetime
+import threading
+import pandas as pd
+import numpy as np
+
+try:
+    from app.services.tushare_service import TuShareService
+    TUSHARE_IMPORT_ERROR = None
+except Exception as e:
+    TuShareService = None
+    TUSHARE_IMPORT_ERROR = str(e)
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# 初始化服务
+stock_service = StockDataService()
+technical_analyzer = TechnicalAnalyzer()
+advice_service = AdviceService()
+money_flow_service = MoneyFlowService()
+ai_decision_engine = AIDecisionEngine()
+mock_service = MockDataService()
+
+# 初始化数据源（多数据源容错策略）
+tushare_service = (
+    TuShareService(settings.TUSHARE_TOKEN)
+    if (
+        not settings.USE_MOCK_DATA
+        and settings.TUSHARE_TOKEN
+        and TuShareService is not None
+    )
+    else None
+)
+akshare_service = (
+    AKShareService(disable_system_proxy=settings.DISABLE_SYSTEM_PROXY_FOR_DATA_SOURCE)
+    if not settings.USE_MOCK_DATA
+    else None
+)
+tencent_service = TencentService() if not settings.USE_MOCK_DATA else None
+
+# 创建数据源管理器
+data_source_manager = DataSourceManager(
+    tushare_service=tushare_service,
+    tencent_service=tencent_service,
+    akshare_service=akshare_service,
+    mock_service=mock_service,
+    allow_mock_fallback=settings.ENABLE_MOCK_FALLBACK,
+)
+coach_store = CoachStore(settings.COACH_DB_URL)
+news_factor_service = NewsFactorService(
+    store=coach_store,
+    refresh_seconds=settings.NEWS_REFRESH_SECONDS,
+    symbol_refresh_seconds=settings.NEWS_SYMBOL_REFRESH_SECONDS,
+)
+ml_model_service = MLModelService(
+    data_source_manager=data_source_manager,
+    store=coach_store,
+)
+ml_explain_service = MLExplainService()
+coach_service = CoachService(
+    data_source_manager,
+    store=coach_store,
+    news_service=news_factor_service,
+    ml_model_service=ml_model_service,
+    ml_explain_service=ml_explain_service,
+    today_picks_cache_ttl_seconds=settings.COACH_PICKS_CACHE_TTL_SECONDS,
+    universe_refresh_seconds=settings.COACH_UNIVERSE_REFRESH_SECONDS,
+    universe_intraday_refresh_seconds=settings.COACH_UNIVERSE_INTRADAY_REFRESH_SECONDS,
+    universe_min_amount_yi=settings.COACH_UNIVERSE_MIN_AMOUNT_YI,
+    universe_max_analyze_count=settings.COACH_UNIVERSE_MAX_ANALYZE_COUNT,
+    universe_industry_cap=settings.COACH_UNIVERSE_INDUSTRY_CAP,
+    universe_min_price=settings.COACH_UNIVERSE_MIN_PRICE,
+)
+
+logger.info("=" * 60)
+logger.info("数据源配置完成:")
+logger.info(f"  - TuShare服务: {'已启用' if tushare_service else '未启用'}")
+if not settings.USE_MOCK_DATA and not settings.TUSHARE_TOKEN:
+    logger.warning("  - TuShare未配置 TUSHARE_TOKEN，将使用其他真实数据源")
+if TUSHARE_IMPORT_ERROR:
+    logger.warning(f"  - TuShare不可用，将自动降级到其他数据源: {TUSHARE_IMPORT_ERROR}")
+logger.info(f"  - AKShare服务: {'已启用（备用）' if akshare_service else '未启用'}")
+logger.info(f"  - Tencent服务: {'已启用（备用）' if tencent_service else '未启用'}")
+logger.info(
+    f"  - 代理处理: {'禁用系统代理' if settings.DISABLE_SYSTEM_PROXY_FOR_DATA_SOURCE else '沿用系统代理'}"
+)
+logger.info(
+    f"  - Mock服务: {'已启用（兜底）' if settings.ENABLE_MOCK_FALLBACK else '已禁用（避免假数据）'}"
+)
+logger.info(
+    f"  - 容错策略: {'TuShare -> Tencent -> AKShare -> Mock' if settings.ENABLE_MOCK_FALLBACK else 'TuShare -> Tencent -> AKShare（无Mock兜底）'}"
+)
+logger.info("=" * 60)
+
+# 辅助函数：清理NaN/Infinity值
+def clean_nan_values(data):
+    """清理字典或列表中的NaN/Infinity值"""
+    if isinstance(data, dict):
+        return {k: clean_nan_values(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [clean_nan_values(item) for item in data]
+    elif isinstance(data, float):
+        if np.isnan(data) or np.isinf(data):
+            return None
+        return data
+    return data
+
+
+def get_quote_price(quote: dict) -> float:
+    """兼容不同数据源字段，统一获取最新价格。"""
+    if not quote:
+        raise ValueError("实时行情为空")
+    price = quote.get("price")
+    if price is None:
+        price = quote.get("current_price")
+    if price is None:
+        raise ValueError("实时行情缺少价格字段")
+    return float(price)
+
+
+def build_money_flow_payload(money_flow_raw: dict) -> dict:
+    """构造资金流向统一响应结构。"""
+    flow_signal = {
+        'overall': money_flow_raw['trend'],
+        'score': int(money_flow_raw['main_net_inflow'] / 10000000),
+        'signals': [
+            f"✓ 主力净流入 {abs(money_flow_raw['main_net_inflow']/100000000):.2f}亿" if money_flow_raw['main_net_inflow'] > 0 else f"✗ 主力净流出 {abs(money_flow_raw['main_net_inflow']/100000000):.2f}亿",
+            f"✓ 超大单净流入 {abs(money_flow_raw['super_large_net']/100000000):.2f}亿" if money_flow_raw['super_large_net'] > 0 else f"✗ 超大单净流出 {abs(money_flow_raw['super_large_net']/100000000):.2f}亿",
+            f"✓ 大单净流入 {abs(money_flow_raw['large_net']/100000000):.2f}亿" if money_flow_raw['large_net'] > 0 else f"✗ 大单净流出 {abs(money_flow_raw['large_net']/100000000):.2f}亿"
+        ]
+    }
+
+    money_flow = {
+        **money_flow_raw,
+        'analysis': {
+            'conclusion': '主力资金持续流入，短期看涨' if money_flow_raw['main_net_inflow'] > 0 else '主力资金持续流出，短期承压',
+            'details': [
+                f"主力资金合计: {money_flow_raw['main_net_inflow']/100000000:.2f}亿",
+                f"超大单: {money_flow_raw['super_large_net']/100000000:.2f}亿",
+                f"大单: {money_flow_raw['large_net']/100000000:.2f}亿"
+            ]
+        }
+    }
+
+    return {"money_flow": money_flow, "signal": flow_signal}
+
+
+def serialize_news_event(item: dict) -> dict:
+    """输出前端需要的资讯字段，避免暴露数据库内部JSON字段。"""
+    return {
+        "id": item.get("id"),
+        "source": item.get("source"),
+        "event_level": item.get("event_level"),
+        "event_type": item.get("event_type"),
+        "title": item.get("title"),
+        "summary": item.get("summary"),
+        "url": item.get("url"),
+        "publish_time": item.get("publish_time"),
+        "symbol": item.get("symbol"),
+        "symbol_name": item.get("symbol_name"),
+        "industry_tags": item.get("industry_tags") or [],
+        "direction": item.get("direction"),
+        "impact_score": item.get("impact_score"),
+        "confidence_score": item.get("confidence_score"),
+        "event_score": item.get("event_score"),
+    }
+
+
+def resolve_stock_or_404(symbol_or_name: str) -> dict:
+    """支持股票代码或名称输入，统一解析为标准标的。"""
+    query = str(symbol_or_name or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="股票代码或名称不能为空")
+    resolved = data_source_manager.resolve_stock(query)
+    if not resolved or not resolved.get("symbol"):
+        raise HTTPException(status_code=404, detail=f"未找到匹配股票: {query}")
+    return resolved
+
+# 创建FastAPI应用
+app = FastAPI(
+    title=settings.APP_NAME,
+    version=settings.APP_VERSION,
+    description=settings.APP_DESCRIPTION,
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+# 配置CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+def _warmup_coach_cache():
+    """后台预热投资教练缓存，避免用户首次打开页面时等待完整选股计算。"""
+    try:
+        news_factor_service.refresh_if_needed(force=True)
+        coach_service.get_market_state_today()
+        coach_service.get_today_picks(max_count=30, user_id="default", risk_level="medium")
+        logger.info("✅ 投资教练轻量缓存预热完成")
+    except Exception as e:
+        logger.warning(f"⚠️ 投资教练缓存预热失败: {str(e)}")
+
+
+@app.on_event("startup")
+def startup_warmup() -> None:
+    threading.Thread(target=_warmup_coach_cache, daemon=True, name="coach-cache-warmup").start()
+
+
+# ========== 健康检查 ==========
+
+@app.get("/")
+async def root():
+    """根路径"""
+    return {
+        "app": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "status": "running",
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+
+@app.get("/health")
+async def health_check():
+    """健康检查"""
+    return {"status": "healthy"}
+
+
+# ========== 股票数据接口 ==========
+
+@app.get(f"{settings.API_PREFIX}/stock/realtime")
+async def get_stock_realtime(symbol: str):
+    """
+    获取股票实时行情（多数据源容错）
+
+    Args:
+        symbol: 股票代码，如 000001
+
+    Returns:
+        实时行情数据
+    """
+    try:
+        resolved = resolve_stock_or_404(symbol)
+        symbol = resolved["symbol"]
+        logger.info(f"获取实时行情: {symbol}")
+
+        # 使用数据源管理器（自动容错）
+        data = await run_in_threadpool(data_source_manager.get_realtime_quote, symbol)
+        if not data:
+            raise HTTPException(
+                status_code=503,
+                detail="真实实时行情暂不可用，请检查网络/代理配置后重试"
+            )
+        data["code"] = symbol
+        data["name"] = data.get("name") or resolved.get("name") or symbol
+
+        return ApiResponse(code=200, message="success", data=data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取实时行情失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/stock/search")
+async def search_stocks(q: str, limit: int = 8):
+    """股票名称/代码模糊搜索。"""
+    try:
+        items = data_source_manager.search_stocks(q, limit=limit)
+        return ApiResponse(code=200, message="success", data={"items": items})
+    except Exception as e:
+        logger.error(f"搜索股票失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/stock/history")
+async def get_stock_history(
+    symbol: str,
+    period: str = "daily",
+    start_date: str = None,
+    end_date: str = None,
+    adjust: str = "qfq"
+):
+    """
+    获取股票历史K线数据
+
+    Args:
+        symbol: 股票代码
+        period: 周期 daily/weekly/monthly
+        start_date: 开始日期 YYYY-MM-DD
+        end_date: 结束日期 YYYY-MM-DD
+        adjust: 复权类型 qfq/hfq/空
+
+    Returns:
+        历史K线数据
+    """
+    try:
+        resolved = resolve_stock_or_404(symbol)
+        symbol = resolved["symbol"]
+        logger.info(f"获取历史数据: {symbol}, period={period}")
+
+        # 使用数据源管理器（自动容错）
+        df = data_source_manager.get_history_data(symbol, days=120)
+        if df.empty:
+            raise HTTPException(
+                status_code=503,
+                detail="真实历史行情暂不可用，请检查网络/代理配置后重试"
+            )
+
+        # 转换为JSON格式
+        data = df.to_dict(orient='records')
+
+        return ApiResponse(
+            code=200,
+            message="success",
+            data={
+                "symbol": symbol,
+                "period": period,
+                "count": len(data),
+                "data": data
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取历史数据失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========== 技术分析接口 ==========
+
+@app.post(f"{settings.API_PREFIX}/analysis/technical")
+async def analyze_technical(request: TechnicalAnalysisRequest):
+    """
+    技术指标分析
+
+    Args:
+        request: 技术分析请求
+
+    Returns:
+        技术指标分析结果
+    """
+    try:
+        resolved = resolve_stock_or_404(request.symbol)
+        symbol = resolved["symbol"]
+        logger.info(f"技术分析: {symbol}")
+
+        # 获取历史数据
+        df = data_source_manager.get_history_data(symbol, days=request.days)
+        if df.empty:
+            raise HTTPException(
+                status_code=503,
+                detail="真实历史行情暂不可用，无法完成技术分析"
+            )
+
+        # 限制数据量
+        if len(df) > request.days:
+            df = df.tail(request.days)
+
+        # 计算技术指标
+        df = TechnicalAnalyzer.analyze_all_indicators(df)
+
+        # 获取最新指标
+        latest_indicators = TechnicalAnalyzer.get_latest_indicators(df)
+
+        # 获取股票名称
+        realtime = data_source_manager.get_realtime_quote(symbol) or {}
+        name = realtime.get("name") or resolved.get("name") or StockDataService.get_stock_name(symbol)
+
+        # 转换为JSON格式（包含所有历史数据和指标）
+        history_data = df.replace([np.inf, -np.inf], np.nan).to_dict(orient='records')
+        # 清理NaN值
+        history_data = clean_nan_values(history_data)
+        latest_indicators = clean_nan_values(latest_indicators)
+
+        return ApiResponse(
+            code=200,
+            message="success",
+            data={
+                "symbol": symbol,
+                "name": name,
+                "latest_indicators": latest_indicators,
+                "history_data": history_data
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"技术分析失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(f"{settings.API_PREFIX}/analysis/full")
+async def analyze_full(request: FullAnalysisRequest):
+    """
+    聚合分析接口（单次取数，复用计算）
+
+    说明:
+    - 一次请求返回核心数据 + 高级分析，避免前端多次重复请求导致的慢加载。
+    """
+    try:
+        resolved = resolve_stock_or_404(request.symbol)
+        symbol = resolved["symbol"]
+        logger.info(f"聚合分析: {symbol}")
+
+        realtime = data_source_manager.get_realtime_quote(symbol)
+        if not realtime:
+            raise HTTPException(status_code=503, detail="无法获取实时行情数据")
+        price = get_quote_price(realtime)
+
+        df = data_source_manager.get_history_data(symbol, days=request.days)
+        if df.empty:
+            raise HTTPException(status_code=503, detail="无法获取历史K线数据")
+
+        if len(df) > request.days:
+            df = df.tail(request.days)
+
+        df = TechnicalAnalyzer.analyze_all_indicators(df)
+        latest_indicators = TechnicalAnalyzer.get_latest_indicators(df)
+        signal_analysis = TechnicalAnalyzer.generate_signals(latest_indicators)
+
+        money_flow_raw = data_source_manager.get_money_flow(symbol, request.money_flow_days)
+        if not money_flow_raw:
+            raise HTTPException(status_code=503, detail="无法获取资金流向数据")
+        money_flow_payload = build_money_flow_payload(money_flow_raw)
+        industry = resolved.get("industry")
+        news_context = news_factor_service.get_symbol_news_summary(symbol, industry=industry, allow_remote=False)
+        fundamental_data = FundamentalService.get_fundamental_data(symbol)
+        fundamental_data["pe"] = realtime.get("pe") or fundamental_data.get("pe")
+        fundamental_data["pb"] = realtime.get("pb") or fundamental_data.get("pb")
+        fundamental_analysis = FundamentalService.analyze_fundamental(fundamental_data)
+
+        advice = AdviceService.generate_advice(
+            symbol=symbol,
+            name=realtime.get("name", resolved.get("name", symbol)),
+            price=price,
+            signal_analysis=signal_analysis,
+            holding_period=request.holding_period,
+            risk_level=request.risk_level,
+            target_return=request.target_return
+        )
+
+        decision = AIDecisionEngine.make_decision(
+            symbol=symbol,
+            name=realtime.get("name", resolved.get("name", symbol)),
+            price=price,
+            technical_signals=signal_analysis,
+            money_flow_data=money_flow_raw,
+            user_profile={
+                "risk_level": request.risk_level,
+                "holding_period": request.holding_period
+            }
+        )
+
+        history_data = df.replace([np.inf, -np.inf], np.nan).to_dict(orient='records')
+        history_data = clean_nan_values(history_data)
+        latest_indicators = clean_nan_values(latest_indicators)
+        signal_analysis = clean_nan_values(signal_analysis)
+        advice = clean_nan_values(advice)
+        decision = clean_nan_values(decision)
+        realtime = clean_nan_values(realtime)
+        money_flow_payload = clean_nan_values(money_flow_payload)
+        fundamental_data = clean_nan_values(fundamental_data)
+        fundamental_analysis = clean_nan_values(fundamental_analysis)
+
+        return ApiResponse(
+            code=200,
+            message="success",
+            data={
+                "symbol": symbol,
+                "name": realtime.get("name", resolved.get("name", symbol)),
+                "realtime": realtime,
+                "technical": {
+                    "latest_indicators": latest_indicators,
+                    "history_data": history_data
+                },
+                "signal_analysis": signal_analysis,
+                "money_flow": money_flow_payload,
+                "fundamental": {
+                    "data": fundamental_data,
+                    "analysis": fundamental_analysis,
+                },
+                "advice": advice,
+                "ai_decision": decision,
+                "news": news_context,
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"聚合分析失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(f"{settings.API_PREFIX}/analysis/signal")
+async def get_trade_signal(request: SignalRequest):
+    """
+    获取交易信号
+
+    Args:
+        request: 信号请求
+
+    Returns:
+        交易信号分析
+    """
+    try:
+        resolved = resolve_stock_or_404(request.symbol)
+        symbol = resolved["symbol"]
+        logger.info(f"生成交易信号: {symbol}")
+
+        # 使用数据源管理器（自动容错）
+        realtime = data_source_manager.get_realtime_quote(symbol)
+        if not realtime:
+            raise HTTPException(status_code=503, detail="无法获取实时行情数据")
+        name = realtime.get("name", resolved.get("name", symbol))
+        df = data_source_manager.get_history_data(symbol, days=120)
+        if df.empty:
+            raise HTTPException(status_code=503, detail="无法获取历史K线数据")
+
+        # 计算技术指标
+        df = TechnicalAnalyzer.analyze_all_indicators(df)
+
+        # 获取最新指标
+        latest_indicators = TechnicalAnalyzer.get_latest_indicators(df)
+
+        # 生成交易信号
+        signal_analysis = TechnicalAnalyzer.generate_signals(latest_indicators)
+
+        # 清理NaN/Infinity值
+        latest_indicators = clean_nan_values(latest_indicators)
+        signal_analysis = clean_nan_values(signal_analysis)
+
+        return ApiResponse(
+            code=200,
+            message="success",
+            data={
+                "symbol": symbol,
+                "name": name,
+                "indicators": latest_indicators,
+                "signal_analysis": signal_analysis
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"生成交易信号失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========== 投资建议接口 ==========
+
+@app.post(f"{settings.API_PREFIX}/advice")
+async def get_investment_advice(request: AdviceRequest):
+    """
+    获取投资建议
+
+    Args:
+        request: 投资建议请求
+
+    Returns:
+        个性化投资建议
+    """
+    try:
+        resolved = resolve_stock_or_404(request.symbol)
+        symbol = resolved["symbol"]
+        logger.info(f"生成投资建议: {symbol}")
+
+        # 获取实时行情
+        realtime = data_source_manager.get_realtime_quote(symbol)
+        if not realtime:
+            raise HTTPException(status_code=503, detail="无法获取实时行情数据")
+        df = data_source_manager.get_history_data(symbol, days=120)
+        if df.empty:
+            raise HTTPException(status_code=503, detail="无法获取历史K线数据")
+        price = get_quote_price(realtime)
+
+        # 计算技术指标
+        df = TechnicalAnalyzer.analyze_all_indicators(df)
+
+        # 获取最新指标
+        latest_indicators = TechnicalAnalyzer.get_latest_indicators(df)
+
+        # 生成交易信号
+        signal_analysis = TechnicalAnalyzer.generate_signals(latest_indicators)
+
+        # 生成投资建议
+        advice = AdviceService.generate_advice(
+            symbol=symbol,
+            name=realtime.get("name", resolved.get("name", symbol)),
+            price=price,
+            signal_analysis=signal_analysis,
+            holding_period=request.holding_period,
+            risk_level=request.risk_level,
+            target_return=request.target_return
+        )
+
+        return ApiResponse(code=200, message="success", data=advice)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"生成投资建议失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========== 资金流向接口 ==========
+
+@app.post(f"{settings.API_PREFIX}/money-flow")
+async def get_money_flow(request: MoneyFlowRequest):
+    """
+    获取资金流向分析
+
+    Args:
+        request: 资金流向请求
+
+    Returns:
+        资金流向分析数据
+    """
+    try:
+        resolved = resolve_stock_or_404(request.symbol)
+        symbol = resolved["symbol"]
+        logger.info(f"获取资金流向: {symbol}")
+
+        # 获取资金流向数据
+        money_flow_raw = data_source_manager.get_money_flow(symbol, request.days)
+
+        if not money_flow_raw:
+            raise HTTPException(status_code=404, detail="未找到资金流向数据")
+
+        payload = build_money_flow_payload(money_flow_raw)
+
+        return ApiResponse(
+            code=200,
+            message="success",
+            data=payload
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取资金流向失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========== AI决策接口 ==========
+
+@app.post(f"{settings.API_PREFIX}/ai-decision")
+async def get_ai_decision(request: AIDecisionRequest):
+    """
+    获取AI智能决策
+
+    Args:
+        request: AI决策请求
+
+    Returns:
+        AI决策分析结果
+    """
+    try:
+        resolved = resolve_stock_or_404(request.symbol)
+        symbol = resolved["symbol"]
+        logger.info(f"生成AI决策: {symbol}")
+
+        # 获取实时行情
+        realtime = data_source_manager.get_realtime_quote(symbol)
+        if not realtime:
+            raise HTTPException(status_code=503, detail="无法获取实时行情数据")
+        df = data_source_manager.get_history_data(symbol, days=120)
+        if df.empty:
+            raise HTTPException(status_code=503, detail="无法获取历史K线数据")
+        price = get_quote_price(realtime)
+
+        # 计算技术指标
+        df = TechnicalAnalyzer.analyze_all_indicators(df)
+        latest_indicators = TechnicalAnalyzer.get_latest_indicators(df)
+
+        # 生成技术信号
+        technical_signals = TechnicalAnalyzer.generate_signals(latest_indicators)
+
+        # 获取资金流向
+        money_flow = data_source_manager.get_money_flow(symbol, 5)
+        if not money_flow:
+            raise HTTPException(status_code=503, detail="无法获取资金流向数据")
+
+        # 生成AI决策
+        user_profile = {
+            "risk_level": request.risk_level,
+            "holding_period": request.holding_period
+        }
+
+        decision = AIDecisionEngine.make_decision(
+            symbol=symbol,
+            name=realtime.get("name", resolved.get("name", symbol)),
+            price=price,
+            technical_signals=technical_signals,
+            money_flow_data=money_flow,
+            user_profile=user_profile
+        )
+
+        # 清理NaN/Infinity值
+        decision = clean_nan_values(decision)
+
+        return ApiResponse(code=200, message="success", data=decision)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"生成AI决策失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========== 投资教练接口（V1） ==========
+
+@app.get(f"{settings.API_PREFIX}/coach/market-state/today")
+async def coach_market_state_today():
+    """获取今日市场状态（投资教练）"""
+    try:
+        state = await run_in_threadpool(coach_service.get_market_state_today)
+        return ApiResponse(code=200, message="success", data=state)
+    except Exception as e:
+        logger.error(f"获取市场状态失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/news/events")
+async def coach_news_events(
+    page: int = 1,
+    page_size: int = 10,
+    keyword: str = None,
+    event_level: str = None,
+    source: str = None,
+):
+    """官方资讯事件列表，支持分页、搜索和来源/层级筛选。"""
+    try:
+        await run_in_threadpool(news_factor_service.refresh_if_needed, False)
+        safe_page = max(1, int(page or 1))
+        safe_page_size = max(1, min(int(page_size or 10), 50))
+        offset = (safe_page - 1) * safe_page_size
+        use_market_levels = not event_level and not keyword and not source
+        items = await run_in_threadpool(
+            coach_store.list_news_events,
+            event_level=event_level,
+            event_levels=["macro", "industry"] if use_market_levels else None,
+            limit=safe_page_size,
+            offset=offset,
+            keyword=keyword,
+            source=source,
+            relevant_only=use_market_levels,
+        )
+        # 多取一条判断是否还有下一页，避免全表count拖慢页面。
+        next_items = await run_in_threadpool(
+            coach_store.list_news_events,
+            event_level=event_level,
+            event_levels=["macro", "industry"] if use_market_levels else None,
+            limit=1,
+            offset=offset + safe_page_size,
+            keyword=keyword,
+            source=source,
+            relevant_only=use_market_levels,
+        )
+        return ApiResponse(
+            code=200,
+            message="success",
+            data={
+                "items": [serialize_news_event(item) for item in items],
+                "page": safe_page,
+                "page_size": safe_page_size,
+                "has_next": bool(next_items),
+            },
+        )
+    except Exception as e:
+        logger.error(f"获取资讯列表失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/news/symbol/{{symbol}}")
+async def coach_symbol_news(symbol: str, limit: int = 8):
+    """获取个股关联资讯，用于个股分析页。"""
+    try:
+        resolved = resolve_stock_or_404(symbol)
+        code = resolved["symbol"]
+        summary = await run_in_threadpool(
+            news_factor_service.get_symbol_news_summary,
+            code,
+            resolved.get("industry"),
+            False,
+        )
+        summary["latest_events"] = (summary.get("latest_events") or [])[: max(1, min(int(limit or 8), 20))]
+        return ApiResponse(code=200, message="success", data=summary)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取个股资讯失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/symbol-strategy/{{symbol}}")
+async def coach_symbol_strategy(symbol: str, user_id: str = "default", risk_level: str = None):
+    """获取个股在智能选股策略中的评分上下文，供详情页复用同一套分数。"""
+    try:
+        resolved = resolve_stock_or_404(symbol)
+        data = await run_in_threadpool(
+            coach_service.get_symbol_strategy_context,
+            resolved["symbol"],
+            user_id,
+            risk_level,
+        )
+        return ApiResponse(code=200, message="success", data=data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取个股策略评分失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/picks/today")
+async def coach_picks_today(
+    max_count: int = 5,
+    risk_level: str = "medium",
+    user_id: str = "default"
+):
+    """获取今日可投推荐列表（投资教练）"""
+    try:
+        data = await run_in_threadpool(
+            coach_service.get_today_picks,
+            max_count=max_count,
+            user_id=user_id,
+            risk_level=risk_level
+        )
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取今日推荐失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/picks/history")
+async def coach_picks_history(
+    start_date: str = None,
+    end_date: str = None,
+    symbol: str = None,
+    action: str = None,
+):
+    """历史推荐查询（投资教练）"""
+    try:
+        data = await run_in_threadpool(
+            coach_service.get_picks_history,
+            start_date=start_date,
+            end_date=end_date,
+            symbol=symbol,
+            action=action,
+        )
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取推荐历史失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/watchlist")
+async def coach_watchlist(user_id: str = "default"):
+    """获取用户自选候选池（由推荐动作沉淀）"""
+    try:
+        data = await run_in_threadpool(coach_service.get_watchlist, user_id=user_id)
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取自选池失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/paper-portfolio")
+async def coach_paper_portfolio(user_id: str = "default"):
+    """获取模拟持仓（投资教练）"""
+    try:
+        data = await run_in_threadpool(coach_service.get_paper_portfolio, user_id=user_id)
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取模拟持仓失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/paper-trades")
+async def coach_paper_trades(user_id: str = "default", limit: int = 200):
+    """获取模拟交易流水（投资教练）"""
+    try:
+        data = await run_in_threadpool(coach_service.get_paper_trades, user_id=user_id, limit=limit)
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取模拟交易流水失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/paper-review")
+async def coach_paper_review(user_id: str = "default"):
+    """获取模拟交易复盘摘要（投资教练）"""
+    try:
+        data = await run_in_threadpool(coach_service.get_paper_review, user_id=user_id)
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取模拟复盘失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/picks/{{pick_id}}")
+async def coach_pick_detail(
+    pick_id: str,
+    risk_level: str = "medium",
+    user_id: str = "default"
+):
+    """获取单票推荐详情（投资教练）"""
+    try:
+        detail = await run_in_threadpool(
+            coach_service.get_pick_detail,
+            pick_id=pick_id,
+            user_id=user_id,
+            risk_level=risk_level
+        )
+        if not detail:
+            raise HTTPException(status_code=404, detail="推荐不存在或已过期")
+        detail = clean_nan_values(detail)
+        return ApiResponse(code=200, message="success", data=detail)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取推荐详情失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/picks/{{pick_id}}/explain")
+async def coach_pick_explain(
+    pick_id: str,
+    risk_level: str = "medium",
+    user_id: str = "default",
+):
+    """获取单票推荐的机器学习概率与因子贡献解释。"""
+    try:
+        detail = await run_in_threadpool(
+            coach_service.get_pick_detail,
+            pick_id=pick_id,
+            user_id=user_id,
+            risk_level=risk_level,
+        )
+        if not detail:
+            raise HTTPException(status_code=404, detail="推荐不存在或已过期")
+        data = ml_explain_service.build_pick_explanation(detail)
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取推荐解释失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(f"{settings.API_PREFIX}/coach/risk-profile")
+async def coach_set_risk_profile(
+    request: CoachRiskProfileRequest,
+    user_id: str = "default"
+):
+    """设置投资教练风险偏好"""
+    try:
+        payload = await run_in_threadpool(coach_service.set_risk_profile, user_id=user_id, profile=request.dict())
+        return ApiResponse(code=200, message="success", data=payload)
+    except Exception as e:
+        logger.error(f"设置风险偏好失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/strategy-config/options")
+async def coach_strategy_config_options(
+    strategy_code: str = "trend_breakout",
+    user_id: str = "default",
+):
+    """获取策略配置模板与当前用户配置"""
+    try:
+        data = await run_in_threadpool(coach_service.get_strategy_config_options, user_id=user_id, strategy_code=strategy_code)
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取策略配置模板失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(f"{settings.API_PREFIX}/coach/strategy-config/apply")
+async def coach_strategy_config_apply(
+    request: CoachStrategyConfigApplyRequest,
+    user_id: str = "default",
+):
+    """应用策略配置到智能选股（并设置为激活策略）"""
+    try:
+        data = await run_in_threadpool(
+            coach_service.apply_strategy_config,
+            user_id=user_id,
+            strategy_code=request.strategy_code,
+            profile_key=request.profile_key,
+            config_overrides=request.config,
+            set_active=bool(request.set_active),
+        )
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"应用策略配置失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/strategy/{{strategy_code}}/evidence")
+async def coach_strategy_evidence(strategy_code: str, state_tag: str = "neutral"):
+    """获取策略证据摘要（投资教练）"""
+    try:
+        data = await run_in_threadpool(coach_service.get_strategy_evidence, strategy_code=strategy_code, state_tag=state_tag)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取策略证据失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(f"{settings.API_PREFIX}/coach/models/train")
+async def coach_model_train(request: CoachModelTrainRequest, user_id: str = "default"):
+    """训练可解释概率模型。"""
+    try:
+        payload = request.model_dump()
+        payload["user_id"] = user_id
+        data = await run_in_threadpool(ml_model_service.train_model, payload, user_id)
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"训练可解释概率模型失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/models/latest")
+async def coach_model_latest():
+    """获取最新可解释概率模型。"""
+    try:
+        data = await run_in_threadpool(ml_model_service.get_latest_model)
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取最新模型失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/models/{{model_id}}/metrics")
+async def coach_model_metrics(model_id: str):
+    """获取模型指标、校准结果和因子重要性。"""
+    try:
+        data = await run_in_threadpool(ml_model_service.get_model_metrics, model_id)
+        if not data.get("available"):
+            raise HTTPException(status_code=404, detail=data.get("message") or "模型不存在")
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取模型指标失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(f"{settings.API_PREFIX}/coach/backtest/run")
+async def coach_backtest_run(request: CoachBacktestRunRequest, user_id: str = "default"):
+    """提交策略回溯任务（投资教练）"""
+    try:
+        payload = request.dict()
+        payload["user_id"] = user_id
+        data = await run_in_threadpool(coach_service.run_backtest, payload)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"提交回溯任务失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/backtest/{{run_id}}")
+async def coach_backtest_result(run_id: str):
+    """查询策略回溯结果（投资教练）"""
+    try:
+        data = await run_in_threadpool(coach_service.get_backtest_result, run_id)
+        if not data:
+            raise HTTPException(status_code=404, detail="回溯任务不存在")
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"查询回溯结果失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/lessons/weekly/latest")
+async def coach_weekly_lesson_latest(user_id: str = "default"):
+    """获取最新每周复盘课程（投资教练）"""
+    try:
+        data = await run_in_threadpool(coach_service.get_weekly_lesson_latest, user_id=user_id)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取周复盘失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(f"{settings.API_PREFIX}/coach/picks/{{pick_id}}/actions")
+async def coach_record_pick_action(
+    pick_id: str,
+    request: CoachPickActionRequest,
+    user_id: str = "default"
+):
+    """记录用户对推荐的执行动作（投资教练）"""
+    try:
+        record = await run_in_threadpool(
+            coach_service.record_pick_action,
+            user_id=user_id,
+            pick_id=pick_id,
+            payload=request.dict()
+        )
+        return ApiResponse(code=200, message="success", data=record)
+    except Exception as e:
+        logger.error(f"记录推荐动作失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========== 异常处理 ==========
+
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    """HTTP异常处理"""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "code": exc.status_code,
+            "message": exc.detail
+        }
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request, exc):
+    """通用异常处理"""
+    logger.error(f"未处理的异常: {str(exc)}")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "code": 500,
+            "message": "Internal server error",
+            "detail": str(exc)
+        }
+    )
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    logger.info(f"启动 {settings.APP_NAME} v{settings.APP_VERSION}")
+    logger.info(f"API文档: http://{settings.API_HOST}:{settings.API_PORT}/docs")
+
+    uvicorn.run(
+        "main:app",
+        host=settings.API_HOST,
+        port=settings.API_PORT,
+        reload=True,
+        log_level="info"
+    )
