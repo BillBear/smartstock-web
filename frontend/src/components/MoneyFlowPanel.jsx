@@ -13,8 +13,47 @@ const MoneyFlowPanel = ({ data }) => {
     )
   }
 
-  const { money_flow, signal } = data
-  const isInflow = money_flow.main_net_inflow > 0
+  const { money_flow = {}, signal = {} } = data
+  const isAvailable = data.available !== false && money_flow.available !== false && data.display_mode !== 'unavailable'
+  const isProxy = data.display_mode === 'proxy' || money_flow.display_mode === 'proxy'
+  const isInflow = Number(money_flow.main_net_inflow || 0) > 0
+
+  if (!isAvailable) {
+    const details = money_flow.analysis?.details || signal.signals || []
+    return (
+      <Card
+        title="💰 资金流向分析"
+        variant="borderless"
+        style={{ marginTop: 16 }}
+      >
+        <div style={{
+          padding: '20px',
+          borderRadius: 12,
+          background: 'linear-gradient(135deg, rgba(250, 173, 20, 0.12), rgba(24, 144, 255, 0.08))',
+          border: '1px solid rgba(250, 173, 20, 0.25)'
+        }}>
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+            <Tag color="gold" style={{ fontSize: 14 }}>资金流数据暂不可用</Tag>
+            <Tag color="blue" style={{ fontSize: 14 }}>未评分</Tag>
+            <Tag color="default" style={{ fontSize: 14 }}>不展示 0 值</Tag>
+          </div>
+          <div style={{ color: 'rgba(255,255,255,0.86)', fontWeight: 600, marginBottom: 8 }}>
+            {money_flow.analysis?.conclusion || signal.overall || '真实资金流数据源暂不可用'}
+          </div>
+          <div style={{ color: 'rgba(255,255,255,0.68)', lineHeight: 1.8 }}>
+            {data.reason || money_flow.reason || '资金流接口当前没有返回有效数据，系统不会把缺失数据当作净流入或净流出。'}
+          </div>
+          <Timeline style={{ marginTop: 16 }}>
+            {details.map((sig, index) => (
+              <Timeline.Item key={index} color="gold">
+                {sig}
+              </Timeline.Item>
+            ))}
+          </Timeline>
+        </div>
+      </Card>
+    )
+  }
 
   return (
     <Card
@@ -49,6 +88,11 @@ const MoneyFlowPanel = ({ data }) => {
             <Tag color={isInflow ? 'red' : 'green'} style={{ fontSize: 16 }}>
               {money_flow.trend} ({money_flow.strength})
             </Tag>
+            {isProxy && (
+              <Tag color="orange" style={{ fontSize: 13, marginLeft: 8 }}>
+                代理数据
+              </Tag>
+            )}
           </div>
         </Col>
       </Row>
@@ -61,11 +105,11 @@ const MoneyFlowPanel = ({ data }) => {
           <DollarOutlined /> 资金面评价
         </h4>
         <div style={{ marginTop: 8 }}>
-          <Tag color={signal.score > 0 ? 'red' : 'green'} style={{ fontSize: 14 }}>
+          <Tag color={Number(signal.score || 0) > 0 ? 'red' : 'green'} style={{ fontSize: 14 }}>
             {signal.overall}
           </Tag>
           <span style={{ marginLeft: 8, color: '#666' }}>
-            评分: {signal.score}
+            评分: {signal.score ?? '未评分'}
           </span>
         </div>
 

@@ -58,6 +58,121 @@
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
+.monitor-hero-card {
+  margin-bottom: 16px;
+  overflow: hidden;
+  border: 1px solid rgba(251, 191, 36, 0.24);
+  background:
+    linear-gradient(115deg, rgba(2, 6, 23, 0.92), rgba(15, 23, 42, 0.96)),
+    radial-gradient(circle at 88% 12%, rgba(251, 191, 36, 0.24), transparent 34%);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.34);
+}
+
+.monitor-hero-card h2 {
+  color: #fff;
+  margin: 0 0 10px;
+  font-size: 26px;
+  letter-spacing: -0.02em;
+}
+
+.monitor-hero-card p {
+  color: rgba(255, 255, 255, 0.68);
+  line-height: 1.7;
+  margin: 0 0 14px;
+}
+
+.health-meter {
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  padding: 14px 0;
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.monitor-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(96px, 1fr));
+  gap: 10px;
+}
+
+.monitor-kpi-grid > div {
+  min-height: 92px;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.monitor-kpi-grid span {
+  display: block;
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+
+.monitor-kpi-grid strong {
+  color: #fff;
+  font-size: 24px;
+}
+
+.monitor-table-card {
+  margin-bottom: 16px;
+  border-color: rgba(34, 211, 238, 0.18);
+}
+
+.monitor-price-stack,
+.monitor-reason {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.monitor-price-stack span,
+.monitor-reason span {
+  color: rgba(255, 255, 255, 0.58);
+}
+
+.monitor-price-stack strong {
+  color: #fff;
+}
+
+.monitor-expand {
+  display: grid;
+  grid-template-columns: minmax(360px, 1fr) 340px;
+  gap: 18px;
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(2, 6, 23, 0.38);
+}
+
+.monitor-expand-chart {
+  min-height: 170px;
+}
+
+.monitor-expand-notes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.monitor-expand-notes > div {
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.monitor-expand-notes span {
+  display: block;
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.monitor-expand-notes strong {
+  color: #fff;
+}
+
 .review-card {
   margin-bottom: 16px;
   border: 1px solid rgba(34, 211, 238, 0.22);
@@ -234,5 +349,13 @@
 
   .review-metrics {
     grid-template-columns: repeat(2, minmax(120px, 1fr));
+  }
+
+  .monitor-kpi-grid {
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
+  }
+
+  .monitor-expand {
+    grid-template-columns: 1fr;
   }
 }

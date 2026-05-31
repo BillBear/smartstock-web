@@ -6,6 +6,8 @@ import {
   Col,
   Descriptions,
   Divider,
+  Drawer,
+  Empty,
   Modal,
   Progress,
   Row,
@@ -126,20 +128,37 @@ const PLAN_ACTION_META = {
   no_trade: { label: '今日不交易', color: '#94a3b8' },
 }
 
+const MONEY_FLOW_QUALITY_META = {
+  real: { text: '真实资金流', color: 'green' },
+  proxy: { text: '代理资金', color: 'orange' },
+  unavailable: { text: '资金缺失', color: 'default' },
+}
+
 const SmartScreen = () => {
   const [loading, setLoading] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const [actionLoading, setActionLoading] = useState('')
   const [error, setError] = useState('')
   const [riskLevel, setRiskLevel] = useState('medium')
+  const [summary, setSummary] = useState(null)
+  const [themeData, setThemeData] = useState(null)
+  const [moneyCoverage, setMoneyCoverage] = useState(null)
   const [result, setResult] = useState(null)
   const [loadedAt, setLoadedAt] = useState('')
+  const [selectedTheme, setSelectedTheme] = useState(null)
+  const [themeDrawerOpen, setThemeDrawerOpen] = useState(false)
+  const [themeStocks, setThemeStocks] = useState([])
+  const [themeStockMeta, setThemeStockMeta] = useState(null)
+  const [themeStocksLoading, setThemeStocksLoading] = useState(false)
+  const [themeStockCache, setThemeStockCache] = useState({})
   const [detailOpen, setDetailOpen] = useState(false)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailData, setDetailData] = useState(null)
+  const [diagnosticOpen, setDiagnosticOpen] = useState(false)
   const latestLoadReqRef = useRef(0)
   const mountedRef = useRef(false)
 
-  const loadPicks = async (targetRisk = null) => {
+  const loadDashboard = async (targetRisk = null) => {
     const reqId = latestLoadReqRef.current + 1
     latestLoadReqRef.current = reqId
     if (mountedRef.current) {
@@ -154,12 +173,21 @@ const SmartScreen = () => {
       if (targetRisk) {
         params.risk_level = targetRisk
       }
-      const data = await coachApi.getTodayPicks({
-        ...params,
-      })
+      const [summaryData, themes, coverage, cachedPicks] = await Promise.all([
+        coachApi.getSmartScreenSummary({ user_id: 'default', risk_level: targetRisk || riskLevel }),
+        coachApi.getTodayThemes({ limit: 10 }),
+        coachApi.getMoneyFlowCoverage?.() || Promise.resolve(null),
+        coachApi.getTodayPicks({ ...params, cached_only: true }),
+      ])
       if (!mountedRef.current || reqId !== latestLoadReqRef.current) return
-      setResult(data)
-      const nextRisk = data?.risk_profile?.risk_level
+      setSummary(summaryData)
+      setThemeData(themes)
+      setMoneyCoverage(coverage)
+      setResult(cachedPicks?.picks?.length ? cachedPicks : null)
+      if (!cachedPicks?.picks?.length && !summaryData?.is_refreshing) {
+        coachApi.refreshTodayPicks({ user_id: 'default', max_count: 30, risk_level: targetRisk || riskLevel }).catch(() => {})
+      }
+      const nextRisk = cachedPicks?.risk_profile?.risk_level || summaryData?.risk_profile?.risk_level
       if (nextRisk && ['low', 'medium', 'high'].includes(nextRisk)) {
         setRiskLevel(nextRisk)
       }
@@ -174,29 +202,50 @@ const SmartScreen = () => {
     }
   }
 
+  const triggerRefresh = async () => {
+    setRefreshing(true)
+    setError('')
+    try {
+      await coachApi.refreshTodayPicks({ user_id: 'default', max_count: 30, risk_level: riskLevel })
+      message.success('已开始后台刷新，完成后会更新候选池')
+      setTimeout(() => loadDashboard(riskLevel), 3000)
+      setTimeout(() => loadDashboard(riskLevel), 9000)
+    } catch (err) {
+      console.error('刷新智能选股失败', err)
+      setError(err?.response?.data?.message || err?.message || '刷新失败')
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
   useEffect(() => {
     mountedRef.current = true
-    loadPicks()
+    loadDashboard()
     return () => {
       mountedRef.current = false
     }
   }, [])
 
-  const pickList = useMemo(() => result?.picks || [], [result])
-  const marketNews = result?.market_state?.news_context || {}
-  const tradePlan = result?.trade_plan || {}
+  const pickList = useMemo(() => result?.picks || summary?.top_picks || [], [result, summary])
+  const universeMeta = result?.universe_meta || summary?.data_diagnostics?.universe_meta || {}
+  const pipelineCounts = universeMeta.pipeline_counts || {}
+  const themeWatchlist = result?.theme_watchlist || []
+  const excludedExamples = result?.excluded_examples || []
+  const isFallbackUniverse = String(universeMeta.source || '').startsWith('fallback_')
+  const marketNews = result?.market_state?.news_context || summary?.market_state?.news_context || {}
+  const tradePlan = summary?.trade_plan || result?.trade_plan || {}
   const planMeta = PLAN_ACTION_META[tradePlan.primary_action] || PLAN_ACTION_META.watch
   const corePicks = useMemo(
     () => pickList.filter((item) => ['A', 'B'].includes(item?.decision?.grade)).slice(0, 3),
     [pickList]
   )
 
-  const stateTag = result?.market_state?.state_tag
+  const stateTag = summary?.market_state?.state_tag || result?.market_state?.state_tag
   const stateMeta = STATE_META[stateTag] || STATE_META.neutral
 
   const handleRiskChange = async (value) => {
     setRiskLevel(value)
-    await loadPicks(value)
+    await loadDashboard(value)
   }
 
   const reportAction = async (pick, actionType) => {
@@ -217,9 +266,9 @@ const SmartScreen = () => {
     try {
       await coachApi.recordPickAction(pick.pick_id, payload, 'default')
       message.success('动作已记录并同步')
-      await loadPicks(riskLevel)
+      await loadDashboard(riskLevel)
       if (detailData?.pick_id === pick.pick_id) {
-        await openDetail(pick.pick_id)
+        await openDetail(pick.pick_id, pick)
       }
     } catch (err) {
       console.error('记录动作失败', err)
@@ -229,10 +278,10 @@ const SmartScreen = () => {
     }
   }
 
-  const openDetail = async (pickId) => {
+  const openDetail = async (pickId, seedData = null) => {
     setDetailOpen(true)
-    setDetailLoading(true)
-    setDetailData(null)
+    setDetailLoading(!seedData)
+    setDetailData(seedData ? { trade_date: result?.trade_date, market_state: result?.market_state, ...seedData } : null)
     try {
       const detail = await coachApi.getPickDetail(pickId, {
         user_id: 'default',
@@ -244,6 +293,50 @@ const SmartScreen = () => {
       message.error(err?.response?.data?.message || err?.message || '详情加载失败')
     } finally {
       setDetailLoading(false)
+    }
+  }
+
+  const openThemeDrawer = async (theme) => {
+    if (!theme?.theme_id) return
+    setSelectedTheme(theme)
+    setThemeDrawerOpen(true)
+    const cached = themeStockCache[theme.theme_id]
+    if (cached) {
+      setThemeStocks(cached.stocks || [])
+      setThemeStockMeta(cached)
+      setThemeStocksLoading(false)
+      return
+    }
+    const leaderRows = (theme.top_symbols || []).map((item) => ({
+      symbol: item.symbol || '',
+      name: item.name,
+      pct_change: item.pct_change,
+      amount_yi: item.amount_yi,
+      money_flow_quality: 'unavailable',
+      selected: false,
+      exclusion_reason: '先展示领涨代表股，成分股列表加载中。',
+    }))
+    setThemeStocks(leaderRows)
+    setThemeStockMeta({
+      status: leaderRows.length ? 'loading_partial' : 'loading',
+      theme,
+      message: leaderRows.length ? '先展示领涨代表股，正在加载成分股。' : '正在加载成分股。',
+    })
+    setThemeStocksLoading(leaderRows.length === 0)
+    try {
+      const data = await coachApi.getThemeStocks(theme.theme_id, {
+        user_id: 'default',
+        limit: 80,
+      })
+      setSelectedTheme(data?.theme || theme)
+      setThemeStocks(data?.stocks || [])
+      setThemeStockMeta(data || null)
+      setThemeStockCache((prev) => ({ ...prev, [theme.theme_id]: data || null }))
+    } catch (err) {
+      console.error('获取主题成分股失败', err)
+      message.error(err?.response?.data?.message || err?.message || '主题成分股加载失败')
+    } finally {
+      setThemeStocksLoading(false)
     }
   }
 
@@ -271,9 +364,25 @@ const SmartScreen = () => {
       ),
     },
     {
-      title: '决策等级',
+      title: '主题',
+      key: 'theme',
+      width: 160,
+      render: (_, row) => {
+        const tags = row?.theme_tags || row?.matched_theme_names || [row?.industry].filter(Boolean)
+        return (
+          <Space wrap size={[4, 4]}>
+            {tags.slice(0, 2).map((tag) => (
+              <Tag key={tag} color="cyan">{tag}</Tag>
+            ))}
+            {tags.length === 0 && <Tag>未匹配</Tag>}
+          </Space>
+        )
+      },
+    },
+    {
+      title: '决策',
       key: 'decision',
-      width: 140,
+      width: 130,
       render: (_, row) => {
         const meta = DECISION_META[row?.decision?.grade] || DECISION_META.C
         return (
@@ -284,13 +393,16 @@ const SmartScreen = () => {
       },
     },
     {
-      title: '执行状态',
-      key: 'user_action',
-      width: 120,
+      title: '资金状态',
+      key: 'money_flow_quality',
+      width: 130,
       render: (_, row) => {
-        const meta = USER_ACTION_LABEL[row?.user_action?.action_type]
-        if (!meta) return <Tag>未执行</Tag>
-        return <Tag color={meta.color}>{meta.text}</Tag>
+        const meta = MONEY_FLOW_QUALITY_META[row?.money_flow_quality] || MONEY_FLOW_QUALITY_META.proxy
+        return (
+          <Tooltip title={`资金置信度 ${(Number(row?.money_flow_confidence || 0) * 100).toFixed(0)}%`}>
+            <Tag color={meta.color}>{meta.text}</Tag>
+          </Tooltip>
+        )
       },
     },
     {
@@ -312,36 +424,6 @@ const SmartScreen = () => {
       render: (v) => <span style={{ color: '#95de64' }}>{(Number(v || 0) * 100).toFixed(1)}%</span>,
     },
     {
-      title: '模型概率',
-      key: 'model_probability',
-      width: 150,
-      render: (_, row) => {
-        const model = row?.model_probability
-        if (!model) return <Tag color="orange">规则代理</Tag>
-        return (
-          <Tooltip title={`模型 ${row?.model_version_id || '-'}，最终分 ${Number(model.final_score || 0).toFixed(1)}`}>
-            <Tag color={model.status === 'live_ready' ? 'green' : 'cyan'}>
-              ML {(Number(model.model_up_prob || 0) * 100).toFixed(1)}%
-            </Tag>
-          </Tooltip>
-        )
-      },
-    },
-    {
-      title: '预期收益',
-      dataIndex: 'expected_return_pct',
-      key: 'expected_return_pct',
-      width: 120,
-      render: (v) => `${Number(v || 0).toFixed(2)}%`,
-    },
-    {
-      title: '仓位',
-      dataIndex: 'position_pct',
-      key: 'position_pct',
-      width: 120,
-      render: (v) => `${Number(v || 0).toFixed(1)}%`,
-    },
-    {
       title: '综合分',
       key: 'score',
       width: 140,
@@ -354,19 +436,13 @@ const SmartScreen = () => {
       ),
     },
     {
-      title: '资讯分',
-      key: 'news_score',
-      width: 110,
-      render: (_, row) => Number(row?.news_factor?.total_score || 50).toFixed(1),
-    },
-    {
       title: '操作',
       key: 'operation',
-      width: 280,
+      width: 240,
       fixed: 'right',
       render: (_, row) => (
         <Space wrap>
-          <Button size="small" onClick={() => openDetail(row.pick_id)}>
+          <Button size="small" onClick={() => openDetail(row.pick_id, row)}>
             详情
           </Button>
           <Button
@@ -396,6 +472,51 @@ const SmartScreen = () => {
             忽略
           </Button>
         </Space>
+      ),
+    },
+  ]
+
+  const themeStockColumns = [
+    {
+      title: '股票',
+      key: 'stock',
+      width: 160,
+      render: (_, row) => (
+        <div className="stock-cell">
+          <div className="stock-name">{row.name}</div>
+          <div className="stock-code">{row.symbol || '-'}</div>
+        </div>
+      ),
+    },
+    {
+      title: '涨跌幅',
+      dataIndex: 'pct_change',
+      key: 'pct_change',
+      width: 90,
+      render: (v) => <span style={{ color: Number(v || 0) >= 0 ? '#ff7875' : '#95de64' }}>{Number(v || 0).toFixed(2)}%</span>,
+    },
+    {
+      title: '成交额',
+      dataIndex: 'amount_yi',
+      key: 'amount_yi',
+      width: 90,
+      render: (v) => `${Number(v || 0).toFixed(2)}亿`,
+    },
+    {
+      title: '资金',
+      key: 'money_flow_quality',
+      width: 110,
+      render: (_, row) => {
+        const meta = MONEY_FLOW_QUALITY_META[row?.money_flow_quality] || MONEY_FLOW_QUALITY_META.unavailable
+        return <Tag color={meta.color}>{meta.text}</Tag>
+      },
+    },
+    {
+      title: '策略状态',
+      key: 'selected',
+      width: 130,
+      render: (_, row) => (
+        row.selected ? <Tag color="red">已入选 {row.decision_grade || ''}</Tag> : <Tooltip title={row.exclusion_reason}><Tag>未入选</Tag></Tooltip>
       ),
     },
   ]
@@ -485,7 +606,7 @@ const SmartScreen = () => {
                   </div>
                   <p>{pick?.decision?.summary}</p>
                   <Space wrap>
-                    <Button size="small" onClick={() => openDetail(pick.pick_id)}>查看计划</Button>
+                    <Button size="small" onClick={() => openDetail(pick.pick_id, pick)}>查看计划</Button>
                     <Button
                       size="small"
                       type="primary"
@@ -506,7 +627,7 @@ const SmartScreen = () => {
       <Row gutter={16} className="stats-row">
         <Col xs={24} sm={6}>
           <Card className="stat-card">
-            <Statistic title="交易日" value={result?.trade_date || '-'} />
+            <Statistic title="交易日" value={summary?.trade_date || result?.trade_date || '-'} />
           </Card>
         </Col>
         <Col xs={24} sm={6}>
@@ -538,78 +659,118 @@ const SmartScreen = () => {
                 <Option value="medium">中风险</Option>
                 <Option value="high">高风险</Option>
               </Select>
-              <Button icon={<ReloadOutlined />} loading={loading} onClick={() => loadPicks()}>
-                刷新
+              <Button icon={<ReloadOutlined />} loading={refreshing || loading} onClick={triggerRefresh}>
+                后台刷新
+              </Button>
+              <Button size="small" onClick={() => setDiagnosticOpen(true)}>
+                数据诊断
               </Button>
             </Space>
           </Card>
         </Col>
       </Row>
 
-      <Card className="info-card" variant="borderless" style={{ marginBottom: 16 }}>
-        <Space wrap>
-          <Tooltip title={STATE_META.offensive.desc}>
-            <Tag color={STATE_META.offensive.color}>进攻：可提高仓位</Tag>
-          </Tooltip>
-          <Tooltip title={STATE_META.neutral.desc}>
-            <Tag color={STATE_META.neutral.color}>均衡：精选个股</Tag>
-          </Tooltip>
-          <Tooltip title={STATE_META.defensive.desc}>
-            <Tag color={STATE_META.defensive.color}>防守：优先控回撤</Tag>
-          </Tooltip>
-          <Tag color="volcano">
-            当前策略：{STRATEGY_NAME_MAP[result?.strategy_context?.strategy_code] || result?.strategy_context?.strategy_code || '趋势突破'}
-          </Tag>
-          <Tag color="purple">
-            配置模板：{result?.strategy_context?.profile_key || '默认'}
-          </Tag>
-          <Tag color="cyan">
-            阈值：{result?.strategy_context?.config?.score_threshold ?? '-'}
-          </Tag>
-          <Tag color="blue">
-            生效阈值：{result?.strategy_context?.config?.effective_score_threshold ?? result?.strategy_context?.config?.score_threshold ?? '-'}
-          </Tag>
-          <Tag color="geekblue">
-            全A原始池：{result?.universe_meta?.total_universe_count ?? '-'}
-          </Tag>
-          <Tag color="cyan">
-            预筛通过：{result?.universe_meta?.after_prefilter_count ?? '-'}
-          </Tag>
-          <Tag color="green">
-            分析候选：{result?.universe_meta?.candidate_count ?? '-'}
-          </Tag>
-          <Tag color="lime">
-            评分完成：{result?.universe_meta?.analyzed_count ?? '-'}
-          </Tag>
-          <Tag color="gold">
-            策略目标池：{result?.universe_meta?.rules?.strategy_target_size ?? '-'}
-          </Tag>
-          <Tag color="gold">
-            推荐输出：{Array.isArray(result?.picks) ? result.picks.length : '-'}
-          </Tag>
-          <Tag color="purple">
-            行业覆盖：{result?.universe_meta?.industry_count ?? '-'}
-          </Tag>
-          {result?.universe_meta?.full_refresh_at && (
-            <Tag color="orange">全量刷新：{result.universe_meta.full_refresh_at}</Tag>
-          )}
-          {result?.universe_meta?.incremental_refresh_at && (
-            <Tag color="magenta">增量刷新：{result.universe_meta.incremental_refresh_at}</Tag>
-          )}
-          <Tag color="blue">当前数据时间：{loadedAt || '-'}</Tag>
-          <Tag color={result?.market_state?.news_context?.risk_bias === 'positive' ? 'green' : result?.market_state?.news_context?.risk_bias === 'negative' ? 'red' : 'blue'}>
-            资讯温度：{Number(result?.market_state?.news_context?.policy_score || 50).toFixed(1)}
-          </Tag>
-          {result?.market_state?.news_context?.updated_at && (
-            <Tag color="lime">资讯更新：{result.market_state.news_context.updated_at}</Tag>
-          )}
-        </Space>
-      </Card>
+      <Row gutter={[16, 16]} className="market-layers-row">
+        <Col xs={24} xl={15}>
+          <Card className="theme-rank-card" variant="borderless">
+            <div className="section-title-row">
+              <div>
+                <h3>市场主线</h3>
+                <p>来自概念/行业板块涨跌与资金流。点击主题可穿透查看成分股。</p>
+              </div>
+              <Tag color={themeData?.data_quality?.is_reliable ? 'green' : 'orange'}>
+                {themeData?.data_quality?.is_reliable ? '动态识别' : '数据不足'}
+              </Tag>
+            </div>
+            {themeData?.status === 'insufficient_data' && (
+              <Alert
+                style={{ marginBottom: 14 }}
+                type="warning"
+                showIcon
+                message="热点数据不足，暂不展示市场主线"
+                description={themeData?.message || '真实板块/概念样本不足，避免展示误导性热点。'}
+              />
+            )}
+            {(themeData?.theme_rank || []).length > 0 ? (
+              <div className="theme-rank-list">
+                {(themeData?.theme_rank || []).slice(0, 6).map((item, index) => (
+                  <button
+                    type="button"
+                    className="theme-rank-item theme-rank-button"
+                    key={item.theme_id || item.theme_name}
+                    onClick={() => openThemeDrawer(item)}
+                  >
+                    <div className="theme-rank-index">{index + 1}</div>
+                    <div className="theme-rank-body">
+                      <div className="theme-rank-name">
+                        <strong>{item.theme_name}</strong>
+                        <span>{item.category === 'industry' ? '行业' : '概念'} · 涨幅 {Number(item.pct_change || 0).toFixed(2)}%</span>
+                      </div>
+                      <div className="theme-rank-bars">
+                        <Progress percent={Number(item.strength_score || 0)} showInfo={false} strokeColor="#22d3ee" />
+                        <Progress percent={Number(item.money_flow_score || 0)} showInfo={false} strokeColor="#fbbf24" />
+                      </div>
+                      <div className="theme-rank-meta">
+                        <span>上涨广度 {(Number(item.breadth || 0) * 100).toFixed(0)}%</span>
+                        <span>资金 {item.money_net_inflow_yi === null || item.money_net_inflow_yi === undefined ? '-' : `${Number(item.money_net_inflow_yi).toFixed(2)}亿`}</span>
+                        <span>退潮风险 {Number(item.retreat_risk || 0).toFixed(0)}</span>
+                      </div>
+                      <Space wrap size={[4, 4]}>
+                        {(item.top_symbols || []).slice(0, 4).map((stock) => (
+                          <Tag key={stock.symbol || stock.name} color="cyan">
+                            {stock.name} {Number(stock.pct_change || 0).toFixed(1)}%
+                          </Tag>
+                        ))}
+                      </Space>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无可靠市场主线数据" />
+            )}
+          </Card>
+        </Col>
+        <Col xs={24} xl={9}>
+          <Card className="money-quality-card" variant="borderless">
+            <div className="section-title-row compact">
+              <div>
+                <h3>资金状态</h3>
+                <p>资金流是核心因子，但必须先看数据质量。</p>
+              </div>
+              <Tag color={moneyCoverage?.status === 'available' ? 'green' : 'orange'}>
+                {moneyCoverage?.status === 'available' ? '可用' : '降级'}
+              </Tag>
+            </div>
+            <div className="money-quality-grid">
+              <div>
+                <span>真实资金流</span>
+                <strong>{summary?.data_quality?.money_flow_quality?.real ?? result?.data_quality?.money_flow_quality?.real ?? 0}</strong>
+              </div>
+              <div>
+                <span>代理资金</span>
+                <strong>{summary?.data_quality?.money_flow_quality?.proxy ?? result?.data_quality?.money_flow_quality?.proxy ?? 0}</strong>
+              </div>
+              <div>
+                <span>暂不可用</span>
+                <strong>{summary?.data_quality?.money_flow_quality?.unavailable ?? result?.data_quality?.money_flow_quality?.unavailable ?? 0}</strong>
+              </div>
+            </div>
+            <Alert
+              style={{ marginTop: 14 }}
+              type={moneyCoverage?.status === 'available' ? 'info' : 'warning'}
+              showIcon
+              message={moneyCoverage?.coverage_label || '真实资金流优先，代理因子仅作降级展示'}
+              description="资金缺失时不显示 0 分，也不把缺失误判为主力流出。"
+            />
+          </Card>
+        </Col>
+      </Row>
 
       <Card className="ranking-card" variant="borderless">
         <div className="ranking-card-title">
-          <h3>完整候选池</h3>
-          <span>只有 A/B 级才进入交易计划，C 级用于观察学习。</span>
+          <h3>核心候选</h3>
+          <span>只展示通过风险、趋势、流动性和资金质量闸门的股票。</span>
         </div>
         {result?.no_trade ? (
           <Alert
@@ -624,7 +785,7 @@ const SmartScreen = () => {
             columns={columns}
             dataSource={pickList}
             rowKey="pick_id"
-            scroll={{ x: 1850, y: 480 }}
+            scroll={{ x: 1180, y: 480 }}
             pagination={{ pageSize: 10, showSizeChanger: false }}
           />
         )}
@@ -708,6 +869,92 @@ const SmartScreen = () => {
           </Col>
         </Row>
       </Card>
+
+      <Drawer
+        title={selectedTheme ? `${selectedTheme.theme_name} 成分股` : '主题成分股'}
+        open={themeDrawerOpen}
+        onClose={() => setThemeDrawerOpen(false)}
+        width={760}
+      >
+        {selectedTheme && (
+          <div className="theme-drawer-summary">
+            <div>
+              <span>主题强度</span>
+              <strong>{Number(selectedTheme.strength_score || 0).toFixed(1)}</strong>
+            </div>
+            <div>
+              <span>板块涨幅</span>
+              <strong>{Number(selectedTheme.pct_change || 0).toFixed(2)}%</strong>
+            </div>
+            <div>
+              <span>主力净流入</span>
+              <strong>{selectedTheme.money_net_inflow_yi === null || selectedTheme.money_net_inflow_yi === undefined ? '-' : `${Number(selectedTheme.money_net_inflow_yi).toFixed(2)}亿`}</strong>
+            </div>
+            <div>
+              <span>退潮风险</span>
+              <strong>{Number(selectedTheme.retreat_risk || 0).toFixed(0)}</strong>
+            </div>
+          </div>
+        )}
+        <Alert
+          style={{ margin: '14px 0' }}
+          type={themeStockMeta?.status === 'partial' ? 'warning' : 'info'}
+          showIcon
+          message="主题强不等于直接买入"
+          description={themeStockMeta?.message || '成分股是否进入核心候选，还要通过趋势、资金质量、回撤风险和流动性闸门。'}
+        />
+        <Table
+          className="ranking-table"
+          loading={themeStocksLoading}
+          columns={themeStockColumns}
+          dataSource={themeStocks}
+          rowKey={(row) => row.symbol || row.name}
+          pagination={{ pageSize: 12, showSizeChanger: false }}
+          scroll={{ x: 560 }}
+        />
+      </Drawer>
+
+      <Drawer
+        title="数据诊断"
+        open={diagnosticOpen}
+        onClose={() => setDiagnosticOpen(false)}
+        width={520}
+      >
+        {isFallbackUniverse && (
+          <Alert
+            style={{ marginBottom: 16 }}
+            type="warning"
+            showIcon
+            message="候选池处于降级模式"
+            description={universeMeta.fallback_reason || '全A快照暂不可用，系统已使用兜底池生成候选。'}
+          />
+        )}
+        <Descriptions column={1} bordered size="small">
+          <Descriptions.Item label="数据状态">{summary?.status || result?.status || '-'}</Descriptions.Item>
+          <Descriptions.Item label="刷新状态">{summary?.is_refreshing || result?.is_refreshing ? '刷新中' : '空闲'}</Descriptions.Item>
+          <Descriptions.Item label="全A快照">{pipelineCounts.snapshot ?? universeMeta.snapshot_count ?? universeMeta.total_universe_count ?? '-'}</Descriptions.Item>
+          <Descriptions.Item label="预筛通过">{pipelineCounts.prefilter ?? universeMeta.after_prefilter_count ?? '-'}</Descriptions.Item>
+          <Descriptions.Item label="深度分析">{pipelineCounts.analyzed ?? universeMeta.analyzed_count ?? '-'}</Descriptions.Item>
+          <Descriptions.Item label="最终展示">{pipelineCounts.visible_output ?? pickList.length}</Descriptions.Item>
+          <Descriptions.Item label="主题识别">{themeData?.source || '-'}</Descriptions.Item>
+          <Descriptions.Item label="资金流缓存">{moneyCoverage?.cached_symbol_count ?? 0} 只</Descriptions.Item>
+          <Descriptions.Item label="更新时间">{loadedAt || '-'}</Descriptions.Item>
+        </Descriptions>
+        {excludedExamples.length > 0 && (
+          <>
+            <Divider />
+            <h4>强势但未入选</h4>
+            <div className="excluded-list">
+              {excludedExamples.slice(0, 8).map((item) => (
+                <div className="excluded-item" key={item.symbol}>
+                  <span>{item.name} {item.symbol}</span>
+                  <em>{item.reason}</em>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </Drawer>
 
       <Modal
         title="推荐详情"

@@ -41,15 +41,25 @@
 
 .current-price {
   margin: 24px 0;
+}
+
+.stock-price-strip {
   display: flex;
-  align-items: baseline;
-  gap: 16px;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.price-main {
+  min-width: min(100%, 320px);
 }
 
 .price {
-  font-size: 48px;
+  font-size: clamp(38px, 5vw, 56px);
   font-weight: 700;
   line-height: 1;
+  letter-spacing: -0.04em;
+  white-space: nowrap;
 }
 
 .price-up {
@@ -68,6 +78,44 @@
   gap: 8px;
 }
 
+.change-card {
+  display: inline-grid;
+  grid-template-columns: auto auto auto;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  background: rgba(255, 255, 255, 0.04);
+  font-weight: 700;
+  white-space: nowrap;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.change-card-up {
+  color: #cf1322;
+  background: rgba(207, 19, 34, 0.1);
+}
+
+.change-card-down {
+  color: #3f8600;
+  background: rgba(63, 134, 0, 0.1);
+}
+
+.change-direction {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  opacity: 0.92;
+}
+
+.change-percent {
+  font-size: 20px;
+  line-height: 1;
+}
+
 .change-up {
   color: #cf1322;
 }
@@ -79,7 +127,7 @@
 .change-amount {
   font-size: 16px;
   font-weight: 500;
-  margin-left: 4px;
+  font-family: 'JetBrains Mono', monospace;
 }
 
 .stock-stats {
@@ -119,8 +167,23 @@
     font-size: 36px;
   }
 
-  .change {
-    font-size: 16px;
+  .stock-price-strip {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .price-main {
+    min-width: 0;
+  }
+
+  .change-card {
+    grid-template-columns: auto auto;
+    border-radius: 16px;
+    white-space: normal;
+  }
+
+  .change-percent {
+    font-size: 18px;
   }
 
   .change-amount {

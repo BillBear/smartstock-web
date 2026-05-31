@@ -76,8 +76,7 @@ COACH_DB_URL=postgresql+psycopg2://smartstock@127.0.0.1:5432/smartstock
 说明：
 
 - `TUSHARE_TOKEN` 不应写入代码或提交到版本库。
-- `ENABLE_MOCK_FALLBACK=False` 是默认安全策略：真实数据源失败时返回错误，避免展示假数据。
-- `USE_MOCK_DATA=True` 适合离线开发，但不要用于真实决策展示。
+- `USE_MOCK_DATA` 和 `ENABLE_MOCK_FALLBACK` 必须保持 `False`：本项目禁止把 mock 数据作为真实数据展示或用于策略决策；如果开启，后端会拒绝启动。
 - `COACH_DB_URL` 默认连接本地 PostgreSQL。
 
 PostgreSQL 启动脚本默认使用：
@@ -203,6 +202,6 @@ smartstock-web/
 ## 维护原则
 
 - 不把 token、数据库密码、个人路径等敏感配置写入代码。
-- 默认不使用 Mock 兜底，避免真实数据不可用时误导用户。
+- 禁止把 Mock 数据作为本项目的真实行情、资金流、候选池、评分或推荐结果展示和使用；真实数据不可用时必须显示不可用/降级，而不是用假数据兜底。
 - 大型业务模块重构前先补回归测试，保持接口响应结构稳定。
 - 金融决策相关变更优先补充测试和页面验证。

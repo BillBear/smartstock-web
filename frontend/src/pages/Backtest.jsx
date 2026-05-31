@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Alert, Button, Card, Col, DatePicker, Descriptions, Form, InputNumber, Row, Select, Space, Spin, Statistic, Table, Tag, message } from 'antd'
 import { LineChartOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { Line } from '@ant-design/plots'
@@ -37,8 +38,10 @@ const pickConfigFields = (values = {}) => ({
 
 const Backtest = () => {
   const [form] = Form.useForm()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [loadingEvidence, setLoadingEvidence] = useState(false)
   const [runningBacktest, setRunningBacktest] = useState(false)
+  const [loadingBacktestResult, setLoadingBacktestResult] = useState(false)
   const [loadingConfigOptions, setLoadingConfigOptions] = useState(false)
   const [applyingStrategyConfig, setApplyingStrategyConfig] = useState(false)
   const [evidence, setEvidence] = useState(null)
@@ -47,6 +50,8 @@ const Backtest = () => {
   const [recommendedProfileKey, setRecommendedProfileKey] = useState(null)
 
   const strategyCode = Form.useWatch('strategy_code', form) || 'trend_breakout'
+  const queryRunId = searchParams.get('run_id')
+  const queryStrategyCode = searchParams.get('strategy_code') || searchParams.get('strategy')
 
   const loadEvidence = async (code) => {
     setLoadingEvidence(true)
@@ -91,6 +96,57 @@ const Backtest = () => {
     loadEvidence(strategyCode)
     loadStrategyConfigOptions(strategyCode)
   }, [strategyCode])
+
+  useEffect(() => {
+    if (queryStrategyCode && queryStrategyCode !== form.getFieldValue('strategy_code')) {
+      form.setFieldsValue({ strategy_code: queryStrategyCode })
+    }
+  }, [queryStrategyCode, form])
+
+  const loadBacktestResult = async (runId, options = {}) => {
+    if (!runId) return
+    setLoadingBacktestResult(true)
+    try {
+      const data = await coachApi.getBacktestResult(runId)
+      setResult(data)
+      if (data?.strategy_code && data.strategy_code !== form.getFieldValue('strategy_code')) {
+        form.setFieldsValue({ strategy_code: data.strategy_code })
+      }
+      if (data?.config) {
+        const cfg = data.config
+        form.setFieldsValue({
+          profile_key: cfg.profile_key || form.getFieldValue('profile_key'),
+          holding_days: cfg.holding_days,
+          stop_profit_pct: cfg.stop_profit_pct,
+          stop_loss_pct: cfg.stop_loss_pct,
+          score_threshold: cfg.score_threshold,
+          commission: cfg.commission,
+          slippage: cfg.slippage,
+          max_positions: cfg.max_positions,
+          universe_size: cfg.universe_size,
+          period: cfg.test_start && cfg.test_end ? [dayjs(cfg.test_start), dayjs(cfg.test_end)] : form.getFieldValue('period'),
+        })
+      }
+      if (options.syncUrl !== false) {
+        setSearchParams({
+          strategy_code: data?.strategy_code || strategyCode,
+          run_id: runId,
+        })
+      }
+    } catch (err) {
+      console.error('加载回测证据失败', err)
+      message.error(err?.response?.data?.message || err?.message || '回测证据加载失败')
+      setResult(null)
+    } finally {
+      setLoadingBacktestResult(false)
+    }
+  }
+
+  useEffect(() => {
+    if (queryRunId) {
+      loadBacktestResult(queryRunId, { syncUrl: false })
+    }
+  }, [queryRunId])
 
   const waitResult = async (runId) => {
     for (let i = 0; i < 5; i += 1) {
@@ -152,6 +208,10 @@ const Backtest = () => {
       const run = await coachApi.runBacktest(payload)
       const data = await waitResult(run.run_id)
       setResult(data)
+      setSearchParams({
+        strategy_code: data?.strategy_code || values.strategy_code,
+        run_id: run.run_id,
+      })
       message.success(`回测完成：${run.run_id}`)
     } catch (err) {
       console.error('回测失败', err)
@@ -280,6 +340,45 @@ const Backtest = () => {
       key: 'pnl_amount',
       width: 100,
       render: (v) => <span style={{ color: Number(v || 0) >= 0 ? '#ff7875' : '#95de64' }}>{Number(v || 0).toFixed(2)}</span>,
+    },
+  ]
+
+  const runHistoryColumns = [
+    {
+      title: '回测ID',
+      dataIndex: 'run_id',
+      key: 'run_id',
+      width: 180,
+      render: (v, row) => (
+        <Button type="link" size="small" onClick={() => loadBacktestResult(v)}>
+          {v || row.evidence_hash || '-'}
+        </Button>
+      ),
+    },
+    { title: '时间', dataIndex: 'started_at', key: 'started_at', width: 170 },
+    {
+      title: '闭环交易',
+      key: 'closed_roundtrips',
+      width: 100,
+      render: (_, row) => Number(row?.sample_summary?.closed_roundtrips || row?.diagnostics?.closed_roundtrips || 0),
+    },
+    {
+      title: '年化收益',
+      key: 'annual_return',
+      width: 110,
+      render: (_, row) => `${(Number(row?.metrics?.annual_return || 0) * 100).toFixed(2)}%`,
+    },
+    {
+      title: '最大回撤',
+      key: 'max_drawdown',
+      width: 110,
+      render: (_, row) => `${(Number(row?.metrics?.max_drawdown || 0) * 100).toFixed(2)}%`,
+    },
+    {
+      title: '可信度',
+      key: 'credibility',
+      width: 120,
+      render: (_, row) => <Tag color={row?.credibility?.live_ready ? 'green' : 'orange'}>{row?.credibility?.grade || '待验证'}</Tag>,
     },
   ]
 
@@ -418,6 +517,13 @@ const Backtest = () => {
           <Spin tip="策略证据加载中..." />
         ) : evidence ? (
           <>
+            <Alert
+              showIcon
+              type={evidence?.unavailable ? 'warning' : 'info'}
+              style={{ marginBottom: 12 }}
+              message={evidence?.evidence_source?.label || '策略级历史回放证据'}
+              description={`展示口径：${evidence?.evidence_source?.display_scope || 'overall'}；闭环交易合计 ${Number(evidence?.sample_summary?.closed_roundtrips || 0)} 笔；回放次数 ${Number(evidence?.sample_summary?.sample_runs || 0)} 次。`}
+            />
             <Row gutter={16}>
               <Col xs={12} md={6}>
                 <Statistic title="年化收益" value={Number(evidence?.overall?.annual_return || 0) * 100} suffix="%" precision={2} />
@@ -432,6 +538,14 @@ const Backtest = () => {
                 <Statistic title="胜率" value={Number(evidence?.overall?.win_rate || 0) * 100} suffix="%" precision={2} />
               </Col>
             </Row>
+            <Descriptions bordered column={3} size="small" style={{ marginTop: 12 }} title="证据摘要">
+              <Descriptions.Item label="可验证回测ID">{evidence?.display_run?.run_id || '总体聚合证据'}</Descriptions.Item>
+              <Descriptions.Item label="最新回测ID">{evidence?.latest_run?.run_id || '-'}</Descriptions.Item>
+              <Descriptions.Item label="证据指纹">{evidence?.display_run?.evidence_hash || '-'}</Descriptions.Item>
+              <Descriptions.Item label="样本标的">{Number(evidence?.sample_summary?.valid_history_symbols || 0)} / {Number(evidence?.sample_summary?.universe_size || 0)}</Descriptions.Item>
+              <Descriptions.Item label="回测天数">{Number(evidence?.sample_summary?.calendar_days || 0)}</Descriptions.Item>
+              <Descriptions.Item label="可信等级">{evidence?.credibility_summary?.grade || '-'}</Descriptions.Item>
+            </Descriptions>
             <Table
               style={{ marginTop: 12 }}
               pagination={false}
@@ -453,11 +567,29 @@ const Backtest = () => {
                 },
               ]}
             />
+            <Table
+              style={{ marginTop: 12 }}
+              title={() => '历史回测列表'}
+              rowKey={(row) => row.run_id || row.evidence_hash}
+              columns={runHistoryColumns}
+              dataSource={evidence?.recent_runs || []}
+              pagination={false}
+              size="small"
+            />
           </>
         ) : (
           <Alert showIcon type="warning" message="暂无策略证据" />
         )}
       </Card>
+
+      {loadingBacktestResult && (
+        <Card className="config-card" variant="borderless">
+          <Space>
+            <Spin />
+            <span style={{ color: 'rgba(255, 255, 255, 0.78)' }}>正在加载指定回测证据...</span>
+          </Space>
+        </Card>
+      )}
 
       {result && (
         <>
@@ -490,6 +622,27 @@ const Backtest = () => {
               type={result?.live_readiness?.ready ? 'success' : 'error'}
               showIcon
               message={result?.live_readiness?.summary || result?.credibility?.summary || '暂无实盘准入结论'}
+            />
+          </Card>
+
+          <Card className="config-card evidence-package-card" title="证据包" variant="borderless">
+            <Descriptions bordered column={3} size="small">
+              <Descriptions.Item label="证据来源">策略级历史回放</Descriptions.Item>
+              <Descriptions.Item label="回测引擎">{result?.backtest_engine || 'historical_replay_v1'}</Descriptions.Item>
+              <Descriptions.Item label="策略代码">{result?.strategy_code || '-'}</Descriptions.Item>
+              <Descriptions.Item label="回测区间">{result?.config?.test_start || '-'} → {result?.config?.test_end || '-'}</Descriptions.Item>
+              <Descriptions.Item label="有效样本">{Number(result?.diagnostics?.valid_history_symbols || 0)} / {Number(result?.diagnostics?.universe_size || result?.config?.universe_size || 0)}</Descriptions.Item>
+              <Descriptions.Item label="闭环交易">{Number(result?.diagnostics?.closed_roundtrips || 0)} 笔</Descriptions.Item>
+              <Descriptions.Item label="买入规则">信号后下一交易日开盘成交</Descriptions.Item>
+              <Descriptions.Item label="卖出规则">止盈/止损/持有期/评分退出后收盘近似成交</Descriptions.Item>
+              <Descriptions.Item label="成本假设">佣金 {result?.config?.commission ?? '-'}，滑点 {result?.config?.slippage ?? '-'}</Descriptions.Item>
+            </Descriptions>
+            <Alert
+              style={{ marginTop: 12 }}
+              showIcon
+              type="warning"
+              message="证据边界"
+              description="本页展示的是策略级历史回放证据，不是单只股票的确定收益承诺；历史资金流因子包含量价代理，需结合模拟盘继续验证执行一致性。"
             />
           </Card>
 
@@ -631,12 +784,17 @@ const Backtest = () => {
           </Row>
 
           <Card className="config-card" title="交易明细" variant="borderless">
-            <Table rowKey={(row, idx) => `${row.trade_date}-${row.symbol}-${idx}`} columns={tradeColumns} dataSource={result.trades || []} pagination={false} />
+            <Table
+              rowKey={(row) => `${row.trade_date}-${row.symbol}-${row.side}-${row.price}-${row.qty}`}
+              columns={tradeColumns}
+              dataSource={result.trades || []}
+              pagination={false}
+            />
           </Card>
 
           <Card className="config-card" title="闭环交易表现（买卖配对）" variant="borderless">
             <Table
-              rowKey={(row, idx) => `${row.symbol}-${row.entry_date}-${row.exit_date}-${idx}`}
+              rowKey={(row) => `${row.symbol}-${row.entry_date}-${row.exit_date}-${row.return_pct}-${row.holding_days}`}
               columns={roundTripColumns}
               dataSource={result?.closed_roundtrips || []}
               pagination={{ pageSize: 10 }}

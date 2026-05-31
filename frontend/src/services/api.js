@@ -99,6 +99,11 @@ export const moneyFlowApi = {
   getMoneyFlow: (data) => {
     return api.post('/money-flow', data)
   },
+
+  // 获取资金流数据覆盖状态
+  getCoverage: () => {
+    return api.get('/money-flow/coverage')
+  },
 }
 
 /**
@@ -140,6 +145,31 @@ export const coachApi = {
     return api.get('/coach/picks/today', { params })
   },
 
+  // 智能选股首屏摘要（轻量）
+  getSmartScreenSummary: (params) => {
+    return api.get('/coach/smart-screen/summary', { params })
+  },
+
+  // 动态市场主线
+  getTodayThemes: (params) => {
+    return api.get('/coach/themes/today', { params })
+  },
+
+  // 主题成分股穿透
+  getThemeStocks: (themeId, params) => {
+    return api.get(`/coach/themes/${themeId}/stocks`, { params })
+  },
+
+  // 后台刷新推荐
+  refreshTodayPicks: (params) => {
+    return api.post('/coach/picks/refresh', null, { params })
+  },
+
+  // 资金流覆盖状态
+  getMoneyFlowCoverage: () => {
+    return api.get('/money-flow/coverage')
+  },
+
   // 推荐详情
   getPickDetail: (pickId, params) => {
     return api.get(`/coach/picks/${pickId}`, { params })
@@ -173,6 +203,26 @@ export const coachApi = {
   // 模拟复盘摘要
   getPaperReview: (params) => {
     return api.get('/coach/paper-review', { params })
+  },
+
+  // 已选股票监控总览
+  getMonitorOverview: (params) => {
+    return api.get('/coach/monitor/overview', { params })
+  },
+
+  // 已选股票逐票监控
+  getMonitorPositions: (params) => {
+    return api.get('/coach/monitor/positions', { params })
+  },
+
+  // 最新策略反馈
+  getMonitorFeedback: (params) => {
+    return api.get('/coach/monitor/feedback/latest', { params })
+  },
+
+  // 手动触发每日监控复盘
+  runDailyMonitorReview: (params) => {
+    return api.post('/coach/monitor/run-daily-review', null, { params })
   },
 
   // 风险偏好

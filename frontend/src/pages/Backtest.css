@@ -58,3 +58,13 @@
   color: rgba(255, 255, 255, 0.75);
   line-height: 2;
 }
+
+.config-card .ant-descriptions-title,
+.evidence-package-card .ant-alert-description {
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.config-card .ant-table-title {
+  color: rgba(255, 255, 255, 0.88);
+  font-weight: 600;
+}

@@ -34,7 +34,6 @@ from app.services.technical_analyzer import TechnicalAnalyzer
 from app.services.advice_service import AdviceService
 from app.services.money_flow_service import MoneyFlowService
 from app.services.ai_decision_service import AIDecisionEngine
-from app.services.mock_data import MockDataService
 from app.services.akshare_service import AKShareService
 from app.services.tencent_service import TencentService
 from app.services.data_source_manager import DataSourceManager
@@ -44,9 +43,17 @@ from app.services.coach_store import CoachStore
 from app.services.news_factor_service import NewsFactorService
 from app.services.ml_model_service import MLModelService
 from app.services.ml_explain_service import MLExplainService
+from app.services.market_theme_service import MarketThemeService
+from app.services.market_data_snapshot_service import MarketDataSnapshotService
+from app.services.data_quality_service import DataQualityService
+from app.services.recommendation_service import RecommendationService
+from app.services.universe_service import UniverseService
+from app.services.feature_service import FeatureService
+from app.services.scoring_service import ScoringService
 import logging
 from datetime import datetime
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import numpy as np
 
@@ -70,32 +77,26 @@ technical_analyzer = TechnicalAnalyzer()
 advice_service = AdviceService()
 money_flow_service = MoneyFlowService()
 ai_decision_engine = AIDecisionEngine()
-mock_service = MockDataService()
 
 # 初始化数据源（多数据源容错策略）
 tushare_service = (
     TuShareService(settings.TUSHARE_TOKEN)
     if (
-        not settings.USE_MOCK_DATA
-        and settings.TUSHARE_TOKEN
+        settings.TUSHARE_TOKEN
         and TuShareService is not None
     )
     else None
 )
-akshare_service = (
-    AKShareService(disable_system_proxy=settings.DISABLE_SYSTEM_PROXY_FOR_DATA_SOURCE)
-    if not settings.USE_MOCK_DATA
-    else None
-)
-tencent_service = TencentService() if not settings.USE_MOCK_DATA else None
+akshare_service = AKShareService(disable_system_proxy=settings.DISABLE_SYSTEM_PROXY_FOR_DATA_SOURCE)
+tencent_service = TencentService()
 
 # 创建数据源管理器
 data_source_manager = DataSourceManager(
     tushare_service=tushare_service,
     tencent_service=tencent_service,
     akshare_service=akshare_service,
-    mock_service=mock_service,
-    allow_mock_fallback=settings.ENABLE_MOCK_FALLBACK,
+    mock_service=None,
+    allow_mock_fallback=False,
 )
 coach_store = CoachStore(settings.COACH_DB_URL)
 news_factor_service = NewsFactorService(
@@ -108,12 +109,42 @@ ml_model_service = MLModelService(
     store=coach_store,
 )
 ml_explain_service = MLExplainService()
+market_theme_service = MarketThemeService(data_source_manager=data_source_manager, store=coach_store)
+market_snapshot_service = MarketDataSnapshotService(
+    data_source_manager=data_source_manager,
+    store=coach_store,
+)
+data_quality_service = DataQualityService(
+    data_source_manager=data_source_manager,
+    store=coach_store,
+)
+universe_service = UniverseService(
+    data_source_manager=data_source_manager,
+    market_snapshot_service=market_snapshot_service,
+    universe_refresh_seconds=settings.COACH_UNIVERSE_REFRESH_SECONDS,
+    universe_intraday_refresh_seconds=settings.COACH_UNIVERSE_INTRADAY_REFRESH_SECONDS,
+    universe_min_amount_yi=settings.COACH_UNIVERSE_MIN_AMOUNT_YI,
+    universe_max_analyze_count=settings.COACH_UNIVERSE_MAX_ANALYZE_COUNT,
+    universe_industry_cap=settings.COACH_UNIVERSE_INDUSTRY_CAP,
+    universe_min_price=settings.COACH_UNIVERSE_MIN_PRICE,
+)
+feature_service = FeatureService(
+    data_source_manager=data_source_manager,
+    news_service=news_factor_service,
+)
+scoring_service = ScoringService()
 coach_service = CoachService(
     data_source_manager,
     store=coach_store,
     news_service=news_factor_service,
     ml_model_service=ml_model_service,
     ml_explain_service=ml_explain_service,
+    market_snapshot_service=market_snapshot_service,
+    data_quality_service=data_quality_service,
+    universe_service=universe_service,
+    feature_service=feature_service,
+    market_theme_service=market_theme_service,
+    scoring_service=scoring_service,
     today_picks_cache_ttl_seconds=settings.COACH_PICKS_CACHE_TTL_SECONDS,
     universe_refresh_seconds=settings.COACH_UNIVERSE_REFRESH_SECONDS,
     universe_intraday_refresh_seconds=settings.COACH_UNIVERSE_INTRADAY_REFRESH_SECONDS,
@@ -122,25 +153,25 @@ coach_service = CoachService(
     universe_industry_cap=settings.COACH_UNIVERSE_INDUSTRY_CAP,
     universe_min_price=settings.COACH_UNIVERSE_MIN_PRICE,
 )
+recommendation_service = RecommendationService(coach_service)
+coach_refresh_executor = ThreadPoolExecutor(max_workers=1)
+coach_refresh_lock = threading.Lock()
 
 logger.info("=" * 60)
 logger.info("数据源配置完成:")
 logger.info(f"  - TuShare服务: {'已启用' if tushare_service else '未启用'}")
-if not settings.USE_MOCK_DATA and not settings.TUSHARE_TOKEN:
+if not settings.TUSHARE_TOKEN:
     logger.warning("  - TuShare未配置 TUSHARE_TOKEN，将使用其他真实数据源")
 if TUSHARE_IMPORT_ERROR:
     logger.warning(f"  - TuShare不可用，将自动降级到其他数据源: {TUSHARE_IMPORT_ERROR}")
 logger.info(f"  - AKShare服务: {'已启用（备用）' if akshare_service else '未启用'}")
 logger.info(f"  - Tencent服务: {'已启用（备用）' if tencent_service else '未启用'}")
+logger.info(f"  - 资金流能力源: {[item.get('name') for item in data_source_manager.get_money_flow_coverage_status().get('sources', [])]}")
 logger.info(
     f"  - 代理处理: {'禁用系统代理' if settings.DISABLE_SYSTEM_PROXY_FOR_DATA_SOURCE else '沿用系统代理'}"
 )
-logger.info(
-    f"  - Mock服务: {'已启用（兜底）' if settings.ENABLE_MOCK_FALLBACK else '已禁用（避免假数据）'}"
-)
-logger.info(
-    f"  - 容错策略: {'TuShare -> Tencent -> AKShare -> Mock' if settings.ENABLE_MOCK_FALLBACK else 'TuShare -> Tencent -> AKShare（无Mock兜底）'}"
-)
+logger.info("  - Mock服务: 已禁用（项目原则：禁止作为真实数据展示或用于策略决策）")
+logger.info("  - 容错策略: TuShare -> Tencent -> AKShare（无Mock兜底）")
 logger.info("=" * 60)
 
 # 辅助函数：清理NaN/Infinity值
@@ -171,9 +202,15 @@ def get_quote_price(quote: dict) -> float:
 
 def build_money_flow_payload(money_flow_raw: dict) -> dict:
     """构造资金流向统一响应结构。"""
+    quality = money_flow_raw.get("quality") or ("proxy" if money_flow_raw.get("estimated") else "real")
+    display_mode = "proxy" if quality == "proxy" else "normal"
+    score = int(money_flow_raw['main_net_inflow'] / 10000000)
     flow_signal = {
         'overall': money_flow_raw['trend'],
-        'score': int(money_flow_raw['main_net_inflow'] / 10000000),
+        'score': score,
+        'available': True,
+        'display_mode': display_mode,
+        'quality': quality,
         'signals': [
             f"✓ 主力净流入 {abs(money_flow_raw['main_net_inflow']/100000000):.2f}亿" if money_flow_raw['main_net_inflow'] > 0 else f"✗ 主力净流出 {abs(money_flow_raw['main_net_inflow']/100000000):.2f}亿",
             f"✓ 超大单净流入 {abs(money_flow_raw['super_large_net']/100000000):.2f}亿" if money_flow_raw['super_large_net'] > 0 else f"✗ 超大单净流出 {abs(money_flow_raw['super_large_net']/100000000):.2f}亿",
@@ -183,6 +220,10 @@ def build_money_flow_payload(money_flow_raw: dict) -> dict:
 
     money_flow = {
         **money_flow_raw,
+        'available': True,
+        'display_mode': display_mode,
+        'quality': quality,
+        'score': score,
         'analysis': {
             'conclusion': '主力资金持续流入，短期看涨' if money_flow_raw['main_net_inflow'] > 0 else '主力资金持续流出，短期承压',
             'details': [
@@ -193,7 +234,76 @@ def build_money_flow_payload(money_flow_raw: dict) -> dict:
         }
     }
 
-    return {"money_flow": money_flow, "signal": flow_signal}
+    return {
+        "money_flow": money_flow,
+        "signal": flow_signal,
+        "available": True,
+        "source": money_flow_raw.get("source") or "real_money_flow",
+        "source_status": "available",
+        "display_mode": display_mode,
+        "quality": quality,
+        "score": score,
+        "reason": "真实资金流" if quality == "real" else "代理资金强度，仅作降级参考",
+    }
+
+
+def build_unavailable_money_flow(symbol: str, days: int, reason: str = "真实资金流数据源暂不可用") -> dict:
+    """构造资金流不可用时的中性响应，避免拖垮行情详情页。"""
+    return {
+        "symbol": symbol,
+        "days": days,
+        "available": False,
+        "source": None,
+        "source_status": "unavailable",
+        "display_mode": "unavailable",
+        "quality": "unavailable",
+        "score": None,
+        "reason": reason,
+        "main_net_inflow": 0,
+        "main_inflow": 0,
+        "main_outflow": 0,
+        "retail_net_inflow": 0,
+        "control_ratio": 0,
+        "trend": "暂无数据",
+        "strength": "不可用",
+        "super_large_net": 0,
+        "large_net": 0,
+        "medium_net": 0,
+        "small_net": 0,
+        "analysis": {
+            "conclusion": "资金流向暂不可用",
+            "details": [
+                reason,
+                "当前页面仍展示实时行情、K线、技术指标和基本面数据。",
+            ],
+        },
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def build_unavailable_money_flow_payload(symbol: str, days: int, reason: str = "真实资金流数据源暂不可用") -> dict:
+    """构造前端可直接渲染的资金流空态。"""
+    money_flow = build_unavailable_money_flow(symbol, days, reason)
+    return {
+        "money_flow": money_flow,
+        "signal": {
+            "overall": "资金流向暂不可用",
+            "score": None,
+            "available": False,
+            "display_mode": "unavailable",
+            "signals": [
+                reason,
+                "资金面本次不参与评分，避免把数据缺失误判为资金流出。",
+            ],
+        },
+        "available": False,
+        "source": None,
+        "source_status": "unavailable",
+        "display_mode": "unavailable",
+        "quality": "unavailable",
+        "score": None,
+        "reason": reason,
+    }
 
 
 def serialize_news_event(item: dict) -> dict:
@@ -246,12 +356,12 @@ app.add_middleware(
 )
 
 def _warmup_coach_cache():
-    """后台预热投资教练缓存，避免用户首次打开页面时等待完整选股计算。"""
+    """后台预热轻量数据，不在启动阶段生成推荐。"""
     try:
         news_factor_service.refresh_if_needed(force=True)
         coach_service.get_market_state_today()
-        coach_service.get_today_picks(max_count=30, user_id="default", risk_level="medium")
-        logger.info("✅ 投资教练轻量缓存预热完成")
+        market_snapshot_service.get_latest_valid_snapshot()
+        logger.info("✅ 投资教练轻量数据预热完成")
     except Exception as e:
         logger.warning(f"⚠️ 投资教练缓存预热失败: {str(e)}")
 
@@ -474,9 +584,20 @@ async def analyze_full(request: FullAnalysisRequest):
         signal_analysis = TechnicalAnalyzer.generate_signals(latest_indicators)
 
         money_flow_raw = data_source_manager.get_money_flow(symbol, request.money_flow_days)
-        if not money_flow_raw:
-            raise HTTPException(status_code=503, detail="无法获取资金流向数据")
-        money_flow_payload = build_money_flow_payload(money_flow_raw)
+        if money_flow_raw:
+            money_flow_payload = build_money_flow_payload(money_flow_raw)
+        else:
+            logger.warning(f"资金流向不可用，继续返回聚合行情数据: {symbol}")
+            money_flow_raw = build_unavailable_money_flow(
+                symbol,
+                request.money_flow_days,
+                "东方财富资金流接口暂不可用，已跳过资金流分析。",
+            )
+            money_flow_payload = build_unavailable_money_flow_payload(
+                symbol,
+                request.money_flow_days,
+                "东方财富资金流接口暂不可用，已跳过资金流分析。",
+            )
         industry = resolved.get("industry")
         news_context = news_factor_service.get_symbol_news_summary(symbol, industry=industry, allow_remote=False)
         fundamental_data = FundamentalService.get_fundamental_data(symbol)
@@ -678,10 +799,23 @@ async def get_money_flow(request: MoneyFlowRequest):
         # 获取资金流向数据
         money_flow_raw = data_source_manager.get_money_flow(symbol, request.days)
 
-        if not money_flow_raw:
-            raise HTTPException(status_code=404, detail="未找到资金流向数据")
-
-        payload = build_money_flow_payload(money_flow_raw)
+        if money_flow_raw:
+            try:
+                coach_store.upsert_money_flow_snapshot(
+                    trade_date=data_quality_service.current_trade_date(),
+                    symbol=symbol,
+                    payload=money_flow_raw,
+                    created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                )
+            except Exception:
+                pass
+            payload = build_money_flow_payload(money_flow_raw)
+        else:
+            payload = build_unavailable_money_flow_payload(
+                symbol,
+                request.days,
+                "真实资金流数据源暂不可用，请稍后重试。",
+            )
 
         return ApiResponse(
             code=200,
@@ -693,6 +827,18 @@ async def get_money_flow(request: MoneyFlowRequest):
         raise
     except Exception as e:
         logger.error(f"获取资金流向失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/money-flow/coverage")
+async def get_money_flow_coverage():
+    """获取资金流数据源覆盖与质量状态。"""
+    try:
+        data = await run_in_threadpool(data_quality_service.build_money_flow_coverage)
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取资金流覆盖率失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -733,7 +879,12 @@ async def get_ai_decision(request: AIDecisionRequest):
         # 获取资金流向
         money_flow = data_source_manager.get_money_flow(symbol, 5)
         if not money_flow:
-            raise HTTPException(status_code=503, detail="无法获取资金流向数据")
+            logger.warning(f"资金流向不可用，AI决策资金面按中性处理: {symbol}")
+            money_flow = build_unavailable_money_flow(
+                symbol,
+                5,
+                "真实资金流数据源暂不可用，AI决策资金面按中性处理。",
+            )
 
         # 生成AI决策
         user_profile = {
@@ -866,20 +1017,171 @@ async def coach_symbol_strategy(symbol: str, user_id: str = "default", risk_leve
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _run_coach_refresh(max_count: int, risk_level: str, user_id: str):
+    try:
+        coach_service.mark_refresh_started()
+        recommendation_service.get_today_recommendations(
+            max_count=max_count,
+            user_id=user_id,
+            risk_level=risk_level,
+            cached_only=False,
+        )
+        coach_service.mark_refresh_finished()
+    except Exception as e:
+        logger.error(f"后台刷新智能选股失败: {str(e)}")
+        coach_service.mark_refresh_finished(str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/smart-screen/summary")
+async def coach_smart_screen_summary(user_id: str = "default", risk_level: str = "medium"):
+    """快速返回智能选股首屏摘要，不触发重型全量选股。"""
+    try:
+        data = await run_in_threadpool(coach_service.get_smart_screen_summary, user_id=user_id, risk_level=risk_level)
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取智能选股摘要失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/themes/today")
+async def coach_themes_today(force: bool = False, limit: int = 12):
+    """返回动态市场主线，不依赖固定主题池。"""
+    try:
+        data = await run_in_threadpool(market_theme_service.get_today_themes, force=force, limit=limit)
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取市场主题失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _enrich_theme_stocks_with_picks(payload: dict, user_id: str = "default") -> dict:
+    """Annotate theme constituents with current smart-pick status without triggering heavy refresh."""
+    data = dict(payload or {})
+    cached = coach_service.get_cached_today_picks(max_count=60, user_id=user_id) or {}
+    pick_map = {str(item.get("symbol") or ""): item for item in (cached.get("picks") or [])}
+    enriched = []
+    for item in data.get("stocks") or []:
+        row = dict(item)
+        pick = pick_map.get(str(row.get("symbol") or ""))
+        if pick:
+            row["selected"] = True
+            row["pick_id"] = pick.get("pick_id")
+            row["decision_grade"] = (pick.get("decision") or {}).get("grade")
+            row["money_flow_quality"] = pick.get("money_flow_quality") or row.get("money_flow_quality")
+            row["exclusion_reason"] = None
+        else:
+            row["selected"] = False
+            row["exclusion_reason"] = row.get("exclusion_reason") or "未进入当前策略核心候选，可能未通过风险、趋势、资金或流动性闸门。"
+        enriched.append(row)
+    data["stocks"] = enriched
+    return data
+
+
+def _enrich_picks_with_current_themes(data: dict) -> dict:
+    """Best-effort theme tags for picks without triggering constituent crawling."""
+    if not isinstance(data, dict) or not data.get("picks"):
+        return data
+    try:
+        themes_payload = market_theme_service.get_today_themes(force=False, limit=12)
+        themes = themes_payload.get("theme_rank") or []
+        for pick in data.get("picks") or []:
+            if pick.get("theme_tags") or pick.get("matched_theme_ids") or pick.get("theme_rank_score"):
+                continue
+            symbol = str(pick.get("symbol") or "")
+            industry = str(pick.get("industry") or "")
+            matched = []
+            for theme in themes:
+                top_symbols = {str(item.get("symbol") or "") for item in (theme.get("top_symbols") or []) if item.get("symbol")}
+                if symbol in top_symbols or (industry and industry == theme.get("theme_name")):
+                    matched.append(theme)
+            pick["theme_tags"] = [item.get("theme_name") for item in matched[:3]]
+            pick["matched_theme_ids"] = [item.get("theme_id") for item in matched[:3]]
+            pick["theme_rank_score"] = matched[0].get("strength_score") if matched else None
+    except Exception:
+        return data
+    return data
+
+
+@app.get(f"{settings.API_PREFIX}/coach/themes/{{theme_id}}/stocks")
+async def coach_theme_stocks(theme_id: str, user_id: str = "default", limit: int = 80):
+    """主题穿透：返回板块/概念成分股并标注推荐状态。"""
+    try:
+        data = await run_in_threadpool(market_theme_service.get_theme_stocks, theme_id=theme_id, limit=limit)
+        data = await run_in_threadpool(_enrich_theme_stocks_with_picks, data, user_id)
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取主题成分股失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(f"{settings.API_PREFIX}/coach/picks/refresh")
+async def coach_picks_refresh(max_count: int = 30, risk_level: str = "medium", user_id: str = "default"):
+    """触发后台刷新，避免智能选股页面首屏被全量分析阻塞。"""
+    try:
+        state = coach_service.get_refresh_state()
+        if state.get("is_refreshing"):
+            return ApiResponse(code=200, message="success", data={"accepted": False, "status": "refreshing", "reason": "refreshing", **state})
+        with coach_refresh_lock:
+            state = coach_service.get_refresh_state()
+            if state.get("is_refreshing"):
+                return ApiResponse(code=200, message="success", data={"accepted": False, "status": "refreshing", "reason": "refreshing", **state})
+            started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            job_id = f"coach-refresh-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            coach_service.mark_refresh_started()
+            coach_refresh_executor.submit(_run_coach_refresh, max_count, risk_level, user_id)
+        return ApiResponse(
+            code=200,
+            message="success",
+            data={
+                "accepted": True,
+                "job_id": job_id,
+                "status": "queued",
+                "started_at": started_at,
+                **coach_service.get_refresh_state(),
+            },
+        )
+    except Exception as e:
+        logger.error(f"触发智能选股刷新失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get(f"{settings.API_PREFIX}/coach/picks/today")
 async def coach_picks_today(
     max_count: int = 5,
     risk_level: str = "medium",
-    user_id: str = "default"
+    user_id: str = "default",
+    cached_only: bool = False
 ):
     """获取今日可投推荐列表（投资教练）"""
     try:
-        data = await run_in_threadpool(
-            coach_service.get_today_picks,
-            max_count=max_count,
-            user_id=user_id,
-            risk_level=risk_level
-        )
+        if cached_only:
+            data = await run_in_threadpool(
+                recommendation_service.get_today_recommendations,
+                max_count=max_count,
+                user_id=user_id,
+                risk_level=risk_level,
+                cached_only=True,
+            )
+            if not data:
+                data = {
+                    "status": "empty",
+                    "picks": [],
+                    "is_refreshing": coach_service.get_refresh_state().get("is_refreshing"),
+                    "data_quality": {"snapshot_status": "unknown", "money_flow_coverage": 0},
+                    "data_diagnostics": {"refresh_state": coach_service.get_refresh_state()},
+                }
+        else:
+            data = await run_in_threadpool(
+                recommendation_service.get_today_recommendations,
+                max_count=max_count,
+                user_id=user_id,
+                risk_level=risk_level,
+                cached_only=False,
+            )
+        data = await run_in_threadpool(_enrich_picks_with_current_themes, data)
         data = clean_nan_values(data)
         return ApiResponse(code=200, message="success", data=data)
     except Exception as e:
@@ -958,6 +1260,54 @@ async def coach_paper_review(user_id: str = "default"):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get(f"{settings.API_PREFIX}/coach/monitor/overview")
+async def coach_monitor_overview(user_id: str = "default"):
+    """获取已选股票监控总览"""
+    try:
+        data = await run_in_threadpool(coach_service.get_monitor_overview, user_id=user_id)
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取监控总览失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/monitor/positions")
+async def coach_monitor_positions(user_id: str = "default"):
+    """获取已选股票逐票监控结果"""
+    try:
+        data = await run_in_threadpool(coach_service.get_monitor_positions, user_id=user_id)
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取逐票监控失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/monitor/feedback/latest")
+async def coach_monitor_feedback_latest(user_id: str = "default"):
+    """获取最新策略监控反馈报告"""
+    try:
+        data = await run_in_threadpool(coach_service.get_monitor_feedback_latest, user_id=user_id)
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取策略监控反馈失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(f"{settings.API_PREFIX}/coach/monitor/run-daily-review")
+async def coach_monitor_run_daily_review(user_id: str = "default"):
+    """手动触发每日收盘监控复盘"""
+    try:
+        data = await run_in_threadpool(coach_service.run_daily_monitor_review, user_id=user_id)
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"运行每日监控复盘失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get(f"{settings.API_PREFIX}/coach/picks/{{pick_id}}")
 async def coach_pick_detail(
     pick_id: str,
@@ -967,7 +1317,7 @@ async def coach_pick_detail(
     """获取单票推荐详情（投资教练）"""
     try:
         detail = await run_in_threadpool(
-            coach_service.get_pick_detail,
+            recommendation_service.get_pick_detail,
             pick_id=pick_id,
             user_id=user_id,
             risk_level=risk_level

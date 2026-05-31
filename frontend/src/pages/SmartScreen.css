@@ -221,6 +221,302 @@
   background: #1890ff;
 }
 
+.market-layers-row {
+  margin-bottom: 18px;
+}
+
+.theme-rank-card,
+.money-quality-card {
+  height: 100%;
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 12% 0%, rgba(34, 211, 238, 0.14), transparent 28%),
+    linear-gradient(145deg, rgba(15, 23, 42, 0.92), rgba(2, 6, 23, 0.72));
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.24);
+}
+
+.section-title-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+
+.section-title-row h3 {
+  color: #fff;
+  margin: 0 0 6px;
+  font-size: 18px;
+}
+
+.section-title-row p {
+  color: rgba(203, 213, 225, 0.68);
+  margin: 0;
+  line-height: 1.65;
+}
+
+.section-title-row.compact {
+  margin-bottom: 14px;
+}
+
+.theme-rank-list {
+  display: grid;
+  gap: 12px;
+}
+
+.theme-rank-item {
+  display: grid;
+  grid-template-columns: 34px 1fr;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.theme-rank-button {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+
+.theme-rank-button:hover {
+  border-color: rgba(34, 211, 238, 0.38);
+  background: rgba(34, 211, 238, 0.075);
+  transform: translateY(-1px);
+}
+
+.theme-rank-index {
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: rgba(34, 211, 238, 0.12);
+  border: 1px solid rgba(34, 211, 238, 0.24);
+  color: #67e8f9;
+  font-weight: 800;
+}
+
+.theme-rank-body {
+  min-width: 0;
+}
+
+.theme-rank-name,
+.theme-rank-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.theme-rank-name strong {
+  color: #fff;
+  font-size: 16px;
+}
+
+.theme-rank-name span,
+.theme-rank-meta span {
+  color: rgba(203, 213, 225, 0.72);
+  font-size: 12px;
+}
+
+.theme-rank-bars {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0;
+}
+
+.money-quality-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.money-quality-grid > div {
+  padding: 14px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.money-quality-grid span {
+  display: block;
+  color: rgba(203, 213, 225, 0.68);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.money-quality-grid strong {
+  color: #fff;
+  font-size: 26px;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.theme-drawer-summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+}
+
+.theme-drawer-summary > div {
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.theme-drawer-summary span {
+  display: block;
+  color: rgba(203, 213, 225, 0.68);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.theme-drawer-summary strong {
+  color: #fff;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 18px;
+}
+
+.diagnostic-card {
+  background:
+    radial-gradient(circle at 8% 0%, rgba(34, 211, 238, 0.12), transparent 28%),
+    rgba(255, 255, 255, 0.05);
+  border-radius: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.diagnostic-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+
+.diagnostic-head h3 {
+  color: #fff;
+  margin: 0 0 6px;
+}
+
+.diagnostic-head p {
+  margin: 0;
+  color: rgba(203, 213, 225, 0.68);
+  line-height: 1.7;
+}
+
+.diagnostic-metric {
+  padding: 12px 14px;
+  min-height: 82px;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.56);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.diagnostic-metric span {
+  display: block;
+  color: rgba(203, 213, 225, 0.66);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.diagnostic-metric strong {
+  color: #f8fafc;
+  font-size: 24px;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.theme-watch-section,
+.excluded-section {
+  margin-top: 18px;
+}
+
+.section-mini-title {
+  color: rgba(248, 250, 252, 0.92);
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+
+.theme-watch-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.theme-watch-item {
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(2, 6, 23, 0.38);
+  border: 1px solid rgba(34, 211, 238, 0.16);
+}
+
+.theme-watch-main {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.theme-watch-main strong {
+  color: #fff;
+}
+
+.theme-watch-main span {
+  color: rgba(148, 163, 184, 0.84);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+}
+
+.theme-watch-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.theme-watch-score {
+  margin-top: 10px;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: rgba(226, 232, 240, 0.82);
+  font-size: 12px;
+}
+
+.theme-watch-score span {
+  color: rgba(125, 211, 252, 0.9);
+}
+
+.excluded-list {
+  display: grid;
+  gap: 8px;
+}
+
+.excluded-item {
+  display: grid;
+  grid-template-columns: minmax(140px, 220px) 1fr;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(250, 173, 20, 0.08);
+  border: 1px solid rgba(250, 173, 20, 0.14);
+}
+
+.excluded-item span {
+  color: #fff;
+  font-weight: 700;
+}
+
+.excluded-item em {
+  color: rgba(254, 240, 138, 0.88);
+  font-style: normal;
+  line-height: 1.6;
+}
+
 /* 表格样式 */
 .ranking-table .ant-table {
   background: transparent;
@@ -478,8 +774,26 @@
   }
 
   .plan-hero-main,
-  .ranking-card-title {
+  .ranking-card-title,
+  .section-title-row,
+  .diagnostic-head {
     flex-direction: column;
+  }
+
+  .theme-rank-item {
+    grid-template-columns: 1fr;
+  }
+
+  .money-quality-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .theme-drawer-summary {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .excluded-item {
+    grid-template-columns: 1fr;
   }
 
   .plan-badge {
