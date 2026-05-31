@@ -168,6 +168,81 @@ class AKShareService:
             logger.error(f"AKShare获取全A快照失败: {str(e)}")
             return []
 
+    def get_market_theme_boards(self):
+        """获取概念/行业板块资金流与涨跌数据。"""
+        records = []
+
+        def _parse(df: pd.DataFrame, category: str):
+            if df is None or df.empty:
+                return
+            for _, row in df.iterrows():
+                name = str(self._first_valid(row, ["行业", "板块", "名称"], "")).strip()
+                if not name:
+                    continue
+                pct_change = self._to_float(self._first_valid(row, ["行业-涨跌幅", "涨跌幅", "涨跌幅%"], 0))
+                inflow_yi = self._to_float(self._first_valid(row, ["流入资金"], 0))
+                outflow_yi = self._to_float(self._first_valid(row, ["流出资金"], 0))
+                net_yi = self._to_float(self._first_valid(row, ["净额", "主力净流入"], 0))
+                company_count = int(self._to_float(self._first_valid(row, ["公司家数", "家数"], 0)))
+                leader = str(self._first_valid(row, ["领涨股"], "")).strip()
+                leader_pct = self._to_float(self._first_valid(row, ["领涨股-涨跌幅"], 0))
+                records.append(
+                    {
+                        "theme_name": name,
+                        "category": category,
+                        "pct_change": pct_change,
+                        "money_inflow_yi": inflow_yi,
+                        "money_outflow_yi": outflow_yi,
+                        "money_net_inflow_yi": net_yi,
+                        "amount_yi": max(inflow_yi + outflow_yi, 0),
+                        "stock_count": company_count,
+                        "leader_name": leader,
+                        "leader_pct_change": leader_pct,
+                        "source": "akshare_fund_flow",
+                    }
+                )
+
+        try:
+            _parse(ak.stock_fund_flow_concept(), "concept")
+        except Exception as e:
+            logger.warning(f"AKShare概念资金流获取失败: {str(e)}")
+        try:
+            _parse(ak.stock_fund_flow_industry(), "industry")
+        except Exception as e:
+            logger.warning(f"AKShare行业资金流获取失败: {str(e)}")
+        return records
+
+    def get_theme_constituents(self, theme_name: str, category: str = "concept"):
+        """获取板块/概念成分股。"""
+        try:
+            if category == "industry":
+                df = ak.stock_board_industry_cons_em(symbol=theme_name)
+            else:
+                df = ak.stock_board_concept_cons_em(symbol=theme_name)
+            if df is None or df.empty:
+                return []
+            rows = []
+            for _, row in df.iterrows():
+                symbol = str(self._first_valid(row, ["代码", "code"], "")).strip()
+                if symbol.startswith(("sh", "sz", "bj")) and len(symbol) >= 8:
+                    symbol = symbol[-6:]
+                if len(symbol) != 6 or not symbol.isdigit():
+                    continue
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "name": str(self._first_valid(row, ["名称", "name"], symbol)).strip(),
+                        "price": self._to_float(self._first_valid(row, ["最新价", "price"], 0)),
+                        "pct_change": self._to_float(self._first_valid(row, ["涨跌幅", "pct_change"], 0)),
+                        "amount": self._to_float(self._first_valid(row, ["成交额", "amount"], 0)),
+                        "turnover_rate": self._to_float(self._first_valid(row, ["换手率", "turnover_rate"], 0)),
+                    }
+                )
+            return rows
+        except Exception as e:
+            logger.warning(f"AKShare主题成分股获取失败 {theme_name}/{category}: {str(e)}")
+            return []
+
     def get_history_data(self, symbol: str, days: int = 120):
         """获取历史K线数据
 

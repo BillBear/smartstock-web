@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from threading import RLock
 from typing import Any, Dict, List, Optional
@@ -39,6 +40,7 @@ class CoachStore:
         self._is_postgres = self._dialect.startswith("postgresql")
         self._lock = RLock()
         self._init_schema()
+        self._init_market_snapshot_schema()
 
     @staticmethod
     def _row_to_dict(row) -> Optional[Dict[str, Any]]:
@@ -238,6 +240,38 @@ class CoachStore:
             );
             CREATE INDEX IF NOT EXISTS idx_ml_daily_predictions_model_symbol
                 ON ml_daily_predictions(model_id, symbol, trade_date DESC);
+
+            CREATE TABLE IF NOT EXISTS monitor_snapshots (
+                id BIGSERIAL PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                name TEXT,
+                track_type TEXT NOT NULL,
+                pick_id TEXT,
+                snapshot_date TEXT NOT NULL,
+                metrics_json TEXT NOT NULL,
+                conclusion_json TEXT NOT NULL,
+                data_quality_json TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(user_id, symbol, track_type, snapshot_date)
+            );
+            CREATE INDEX IF NOT EXISTS idx_monitor_snapshots_user_date
+                ON monitor_snapshots(user_id, snapshot_date DESC);
+            CREATE INDEX IF NOT EXISTS idx_monitor_snapshots_symbol
+                ON monitor_snapshots(user_id, symbol, snapshot_date DESC);
+
+            CREATE TABLE IF NOT EXISTS strategy_feedback_reports (
+                report_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                report_date TEXT NOT NULL,
+                report_type TEXT NOT NULL,
+                summary_json TEXT NOT NULL,
+                suggestions_json TEXT NOT NULL,
+                diagnostics_json TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_strategy_feedback_reports_user_date
+                ON strategy_feedback_reports(user_id, report_date DESC);
             """
         else:
             sql = """
@@ -430,8 +464,117 @@ class CoachStore:
             );
             CREATE INDEX IF NOT EXISTS idx_ml_daily_predictions_model_symbol
                 ON ml_daily_predictions(model_id, symbol, trade_date DESC);
+
+            CREATE TABLE IF NOT EXISTS monitor_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                name TEXT,
+                track_type TEXT NOT NULL,
+                pick_id TEXT,
+                snapshot_date TEXT NOT NULL,
+                metrics_json TEXT NOT NULL,
+                conclusion_json TEXT NOT NULL,
+                data_quality_json TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(user_id, symbol, track_type, snapshot_date)
+            );
+            CREATE INDEX IF NOT EXISTS idx_monitor_snapshots_user_date
+                ON monitor_snapshots(user_id, snapshot_date DESC);
+            CREATE INDEX IF NOT EXISTS idx_monitor_snapshots_symbol
+                ON monitor_snapshots(user_id, symbol, snapshot_date DESC);
+
+            CREATE TABLE IF NOT EXISTS strategy_feedback_reports (
+                report_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                report_date TEXT NOT NULL,
+                report_type TEXT NOT NULL,
+                summary_json TEXT NOT NULL,
+                suggestions_json TEXT NOT NULL,
+                diagnostics_json TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_strategy_feedback_reports_user_date
+                ON strategy_feedback_reports(user_id, report_date DESC);
             """
 
+        statements = [part.strip() for part in sql.split(";") if part.strip()]
+        with self._lock:
+            with self.engine.begin() as conn:
+                for stmt in statements:
+                    conn.execute(text(stmt))
+
+    def _init_market_snapshot_schema(self) -> None:
+        """Create persistent market-data snapshot tables used by the recommendation pipeline."""
+        id_type = "BIGSERIAL PRIMARY KEY" if self._is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        sql = f"""
+        CREATE TABLE IF NOT EXISTS market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            trade_date TEXT NOT NULL,
+            source TEXT,
+            snapshot_count INTEGER NOT NULL DEFAULT 0,
+            quality_status TEXT NOT NULL DEFAULT 'unknown',
+            meta_json TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_market_snapshots_date
+            ON market_snapshots(trade_date DESC, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS market_snapshot_items (
+            id {id_type},
+            snapshot_id TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            name TEXT,
+            industry TEXT,
+            item_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(snapshot_id, symbol)
+        );
+        CREATE INDEX IF NOT EXISTS idx_market_snapshot_items_snapshot
+            ON market_snapshot_items(snapshot_id);
+        CREATE INDEX IF NOT EXISTS idx_market_snapshot_items_symbol
+            ON market_snapshot_items(symbol, trade_date DESC);
+
+        CREATE TABLE IF NOT EXISTS money_flow_snapshots (
+            id {id_type},
+            trade_date TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            quality TEXT NOT NULL,
+            source TEXT,
+            available BOOLEAN NOT NULL DEFAULT FALSE,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(trade_date, symbol)
+        );
+        CREATE INDEX IF NOT EXISTS idx_money_flow_snapshots_quality
+            ON money_flow_snapshots(trade_date DESC, quality);
+
+        CREATE TABLE IF NOT EXISTS theme_snapshots (
+            id {id_type},
+            trade_date TEXT NOT NULL,
+            theme_id TEXT NOT NULL,
+            theme_name TEXT NOT NULL,
+            category TEXT,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(trade_date, theme_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_theme_snapshots_date
+            ON theme_snapshots(trade_date DESC);
+
+        CREATE TABLE IF NOT EXISTS data_quality_snapshots (
+            id {id_type},
+            trade_date TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            status TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(trade_date, scope)
+        );
+        CREATE INDEX IF NOT EXISTS idx_data_quality_snapshots_date
+            ON data_quality_snapshots(trade_date DESC, scope);
+        """
         statements = [part.strip() for part in sql.split(";") if part.strip()]
         with self._lock:
             with self.engine.begin() as conn:
@@ -710,7 +853,7 @@ class CoachStore:
         if not picks:
             return 0
         rows = []
-        created_at = picks[0].get("created_at") or trade_date
+        created_at = picks[0].get("created_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         for pick in picks:
             pick_id = str(pick.get("pick_id") or "").strip()
             symbol = str(pick.get("symbol") or "").strip()
@@ -831,6 +974,374 @@ class CoachStore:
                 except Exception:
                     data["snapshot"] = {}
                 return data
+
+    def get_latest_pick_snapshots_result(
+        self,
+        user_id: str = "default",
+        trade_date: Optional[str] = None,
+        limit: int = 60,
+    ) -> Optional[Dict[str, Any]]:
+        """Rebuild a lightweight recommendation result from persisted pick snapshots."""
+        result_limit = max(1, min(int(limit or 60), 200))
+        # Fetch the full latest batch first, then apply rank sorting in Python.
+        # Applying SQL LIMIT before parsing rank_no can restore the wrong symbols
+        # because relational rows are not stored in recommendation-rank order.
+        params: Dict[str, Any] = {"user_id": user_id, "limit": 200}
+        date_clause = ""
+        if trade_date:
+            date_clause = "AND trade_date = :trade_date"
+            params["trade_date"] = str(trade_date)
+
+        latest_date_sql = text(
+            f"""
+            SELECT trade_date
+            FROM pick_snapshots
+            WHERE user_id = :user_id {date_clause}
+            GROUP BY trade_date
+            ORDER BY trade_date DESC
+            LIMIT 1
+            """
+        )
+        with self._lock:
+            with self.engine.connect() as conn:
+                row = conn.execute(latest_date_sql, params).first()
+                if not row:
+                    return None
+                latest_trade_date = str(row._mapping["trade_date"])
+                batch_row = conn.execute(
+                    text(
+                        """
+                        SELECT created_at
+                        FROM pick_snapshots
+                        WHERE user_id = :user_id AND trade_date = :trade_date
+                        GROUP BY created_at
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {**params, "trade_date": latest_trade_date},
+                ).first()
+                if not batch_row:
+                    return None
+                latest_created_at = str(batch_row._mapping["created_at"])
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT *
+                        FROM pick_snapshots
+                        WHERE user_id = :user_id
+                            AND trade_date = :trade_date
+                            AND created_at = :created_at
+                        ORDER BY symbol
+                        LIMIT :limit
+                        """
+                    ),
+                    {**params, "trade_date": latest_trade_date, "created_at": latest_created_at},
+                ).fetchall()
+
+        picks = []
+        strategy_code = None
+        updated_at = None
+        for row in rows:
+            data = dict(row._mapping)
+            try:
+                pick = json.loads(data.get("snapshot_json") or "{}")
+            except Exception:
+                pick = {}
+            if not pick:
+                continue
+            strategy_code = strategy_code or data.get("strategy_code")
+            updated_at = updated_at or data.get("created_at")
+            picks.append(pick)
+
+        if not picks:
+            return None
+        picks.sort(key=lambda item: int(item.get("rank_no") or 9999))
+        picks = picks[:result_limit]
+        return {
+            "status": "cached_from_store",
+            "trade_date": latest_trade_date,
+            "updated_at": updated_at,
+            "strategy_code": strategy_code,
+            "picks": picks,
+        }
+
+    def upsert_market_snapshot(
+        self,
+        trade_date: str,
+        source: str,
+        items: List[Dict[str, Any]],
+        quality_status: str,
+        meta: Optional[Dict[str, Any]] = None,
+        created_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        created_at = created_at or str(trade_date)
+        safe_items = [item for item in (items or []) if str(item.get("symbol") or "").strip()]
+        snapshot_id = f"{trade_date}:{source or 'unknown'}"
+        snapshot_row = {
+            "snapshot_id": snapshot_id,
+            "trade_date": trade_date,
+            "source": source,
+            "snapshot_count": len(safe_items),
+            "quality_status": quality_status,
+            "meta_json": json.dumps(meta or {}, ensure_ascii=False),
+            "created_at": created_at,
+        }
+        with self._lock:
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO market_snapshots (
+                            snapshot_id, trade_date, source, snapshot_count, quality_status, meta_json, created_at
+                        ) VALUES (
+                            :snapshot_id, :trade_date, :source, :snapshot_count, :quality_status, :meta_json, :created_at
+                        )
+                        ON CONFLICT(snapshot_id) DO UPDATE SET
+                            source=excluded.source,
+                            snapshot_count=excluded.snapshot_count,
+                            quality_status=excluded.quality_status,
+                            meta_json=excluded.meta_json,
+                            created_at=excluded.created_at
+                        """
+                    ),
+                    snapshot_row,
+                )
+                for item in safe_items:
+                    symbol = str(item.get("symbol") or "").strip()
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO market_snapshot_items (
+                                snapshot_id, trade_date, symbol, name, industry, item_json, created_at
+                            ) VALUES (
+                                :snapshot_id, :trade_date, :symbol, :name, :industry, :item_json, :created_at
+                            )
+                            ON CONFLICT(snapshot_id, symbol) DO UPDATE SET
+                                name=excluded.name,
+                                industry=excluded.industry,
+                                item_json=excluded.item_json,
+                                created_at=excluded.created_at
+                            """
+                        ),
+                        {
+                            "snapshot_id": snapshot_id,
+                            "trade_date": trade_date,
+                            "symbol": symbol,
+                            "name": str(item.get("name") or symbol),
+                            "industry": str(item.get("industry") or ""),
+                            "item_json": json.dumps(item, ensure_ascii=False),
+                            "created_at": created_at,
+                        },
+                    )
+        return {**snapshot_row, "items": safe_items}
+
+    def get_latest_valid_market_snapshot(
+        self,
+        trade_date: Optional[str] = None,
+        min_count: int = 500,
+    ) -> Optional[Dict[str, Any]]:
+        params: Dict[str, Any] = {"min_count": int(min_count or 0)}
+        date_clause = ""
+        if trade_date:
+            date_clause = "AND trade_date <= :trade_date"
+            params["trade_date"] = str(trade_date)
+        with self._lock:
+            with self.engine.connect() as conn:
+                row = conn.execute(
+                    text(
+                        f"""
+                        SELECT *
+                        FROM market_snapshots
+                        WHERE snapshot_count >= :min_count {date_clause}
+                        ORDER BY trade_date DESC, created_at DESC
+                        LIMIT 1
+                        """
+                    ),
+                    params,
+                ).first()
+                if not row:
+                    return None
+                snapshot = dict(row._mapping)
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT item_json
+                        FROM market_snapshot_items
+                        WHERE snapshot_id = :snapshot_id
+                        """
+                    ),
+                    {"snapshot_id": snapshot["snapshot_id"]},
+                ).fetchall()
+        items = []
+        for row in rows:
+            try:
+                items.append(json.loads(row._mapping.get("item_json") or "{}"))
+            except Exception:
+                continue
+        try:
+            snapshot["meta"] = json.loads(snapshot.get("meta_json") or "{}")
+        except Exception:
+            snapshot["meta"] = {}
+        snapshot["items"] = items
+        return snapshot
+
+    def upsert_data_quality_snapshot(
+        self,
+        trade_date: str,
+        scope: str,
+        status: str,
+        payload: Dict[str, Any],
+        created_at: str,
+    ) -> None:
+        with self._lock:
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO data_quality_snapshots (
+                            trade_date, scope, status, payload_json, created_at
+                        ) VALUES (
+                            :trade_date, :scope, :status, :payload_json, :created_at
+                        )
+                        ON CONFLICT(trade_date, scope) DO UPDATE SET
+                            status=excluded.status,
+                            payload_json=excluded.payload_json,
+                            created_at=excluded.created_at
+                        """
+                    ),
+                    {
+                        "trade_date": trade_date,
+                        "scope": scope,
+                        "status": status,
+                        "payload_json": json.dumps(payload or {}, ensure_ascii=False),
+                        "created_at": created_at,
+                    },
+                )
+
+    def upsert_money_flow_snapshot(
+        self,
+        trade_date: str,
+        symbol: str,
+        payload: Dict[str, Any],
+        created_at: str,
+    ) -> None:
+        quality = str(payload.get("quality") or ("proxy" if payload.get("estimated") else "real"))
+        available = bool(payload.get("available", True)) and quality != "unavailable"
+        with self._lock:
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO money_flow_snapshots (
+                            trade_date, symbol, quality, source, available, payload_json, created_at
+                        ) VALUES (
+                            :trade_date, :symbol, :quality, :source, :available, :payload_json, :created_at
+                        )
+                        ON CONFLICT(trade_date, symbol) DO UPDATE SET
+                            quality=excluded.quality,
+                            source=excluded.source,
+                            available=excluded.available,
+                            payload_json=excluded.payload_json,
+                            created_at=excluded.created_at
+                        """
+                    ),
+                    {
+                        "trade_date": trade_date,
+                        "symbol": str(symbol),
+                        "quality": quality,
+                        "source": payload.get("source"),
+                        "available": available,
+                        "payload_json": json.dumps(payload or {}, ensure_ascii=False),
+                        "created_at": created_at,
+                    },
+                )
+
+    def get_money_flow_snapshot_quality_counts(self, trade_date: Optional[str] = None) -> Dict[str, Any]:
+        params: Dict[str, Any] = {}
+        date_clause = ""
+        if trade_date:
+            date_clause = "WHERE trade_date = :trade_date"
+            params["trade_date"] = str(trade_date)
+        with self._lock:
+            with self.engine.connect() as conn:
+                latest_row = conn.execute(
+                    text(
+                        f"""
+                        SELECT trade_date
+                        FROM money_flow_snapshots
+                        {date_clause}
+                        GROUP BY trade_date
+                        ORDER BY trade_date DESC
+                        LIMIT 1
+                        """
+                    ),
+                    params,
+                ).first()
+                if not latest_row:
+                    return {"trade_date": trade_date, "real": 0, "proxy": 0, "unavailable": 0, "total": 0}
+                latest_date = str(latest_row._mapping["trade_date"])
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT quality, COUNT(*) AS count
+                        FROM money_flow_snapshots
+                        WHERE trade_date = :trade_date
+                        GROUP BY quality
+                        """
+                    ),
+                    {"trade_date": latest_date},
+                ).fetchall()
+        counts = {"trade_date": latest_date, "real": 0, "proxy": 0, "unavailable": 0, "total": 0}
+        for row in rows:
+            quality = str(row._mapping.get("quality") or "unavailable")
+            count = int(row._mapping.get("count") or 0)
+            if quality not in {"real", "proxy", "unavailable"}:
+                quality = "unavailable"
+            counts[quality] += count
+            counts["total"] += count
+        return counts
+
+    def upsert_theme_snapshots(self, trade_date: str, themes: List[Dict[str, Any]], created_at: str) -> int:
+        rows = []
+        for item in themes or []:
+            theme_id = str(item.get("theme_id") or "").strip()
+            theme_name = str(item.get("theme_name") or "").strip()
+            if not theme_id or not theme_name:
+                continue
+            rows.append(
+                {
+                    "trade_date": trade_date,
+                    "theme_id": theme_id,
+                    "theme_name": theme_name,
+                    "category": item.get("category"),
+                    "payload_json": json.dumps(item, ensure_ascii=False),
+                    "created_at": created_at,
+                }
+            )
+        if not rows:
+            return 0
+        with self._lock:
+            with self.engine.begin() as conn:
+                for row in rows:
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO theme_snapshots (
+                                trade_date, theme_id, theme_name, category, payload_json, created_at
+                            ) VALUES (
+                                :trade_date, :theme_id, :theme_name, :category, :payload_json, :created_at
+                            )
+                            ON CONFLICT(trade_date, theme_id) DO UPDATE SET
+                                theme_name=excluded.theme_name,
+                                category=excluded.category,
+                                payload_json=excluded.payload_json,
+                                created_at=excluded.created_at
+                            """
+                        ),
+                        row,
+                    )
+        return len(rows)
 
     def open_or_add_position(
         self,
@@ -1640,3 +2151,190 @@ class CoachStore:
                     ),
                     payload,
                 )
+
+    def save_monitor_snapshots(
+        self,
+        user_id: str,
+        snapshot_date: str,
+        snapshots: List[Dict[str, Any]],
+    ) -> int:
+        if not snapshots:
+            return 0
+        from datetime import datetime
+
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        rows = []
+        for item in snapshots:
+            symbol = str(item.get("symbol") or "").strip()
+            track_type = str(item.get("track_type") or "").strip()
+            if not symbol or not track_type:
+                continue
+            rows.append(
+                {
+                    "user_id": str(user_id),
+                    "symbol": symbol,
+                    "name": item.get("name") or symbol,
+                    "track_type": track_type,
+                    "pick_id": item.get("pick_id"),
+                    "snapshot_date": str(snapshot_date),
+                    "metrics_json": json.dumps(item.get("metrics") or {}, ensure_ascii=False),
+                    "conclusion_json": json.dumps(item.get("conclusion") or {}, ensure_ascii=False),
+                    "data_quality_json": json.dumps(item.get("data_quality") or {}, ensure_ascii=False),
+                    "created_at": now_str,
+                }
+            )
+        if not rows:
+            return 0
+
+        with self._lock:
+            with self.engine.begin() as conn:
+                for row in rows:
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO monitor_snapshots (
+                                user_id, symbol, name, track_type, pick_id, snapshot_date,
+                                metrics_json, conclusion_json, data_quality_json, created_at
+                            ) VALUES (
+                                :user_id, :symbol, :name, :track_type, :pick_id, :snapshot_date,
+                                :metrics_json, :conclusion_json, :data_quality_json, :created_at
+                            )
+                            ON CONFLICT(user_id, symbol, track_type, snapshot_date) DO UPDATE SET
+                                name=excluded.name,
+                                pick_id=excluded.pick_id,
+                                metrics_json=excluded.metrics_json,
+                                conclusion_json=excluded.conclusion_json,
+                                data_quality_json=excluded.data_quality_json,
+                                created_at=excluded.created_at
+                            """
+                        ),
+                        row,
+                    )
+        return len(rows)
+
+    def list_monitor_snapshots(
+        self,
+        user_id: str,
+        snapshot_date: Optional[str] = None,
+        limit: int = 500,
+    ) -> List[Dict[str, Any]]:
+        clauses = ["user_id = :user_id"]
+        params: Dict[str, Any] = {"user_id": str(user_id), "limit": max(1, min(int(limit), 2000))}
+        if snapshot_date:
+            clauses.append("snapshot_date = :snapshot_date")
+            params["snapshot_date"] = str(snapshot_date)
+        with self._lock:
+            with self.engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        f"""
+                        SELECT *
+                        FROM monitor_snapshots
+                        WHERE {' AND '.join(clauses)}
+                        ORDER BY snapshot_date DESC, id DESC
+                        LIMIT :limit
+                        """
+                    ),
+                    params,
+                ).fetchall()
+
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            data = dict(row._mapping)
+            for source_key, target_key in (
+                ("metrics_json", "metrics"),
+                ("conclusion_json", "conclusion"),
+                ("data_quality_json", "data_quality"),
+            ):
+                try:
+                    data[target_key] = json.loads(data.get(source_key) or "{}")
+                except Exception:
+                    data[target_key] = {}
+            out.append(data)
+        return out
+
+    def save_strategy_feedback_report(
+        self,
+        report_id: str,
+        user_id: str,
+        report_date: str,
+        report_type: str,
+        summary: Dict[str, Any],
+        suggestions: List[Dict[str, Any]],
+        diagnostics: Dict[str, Any],
+        created_at: str,
+    ) -> Dict[str, Any]:
+        payload = {
+            "report_id": str(report_id),
+            "user_id": str(user_id),
+            "report_date": str(report_date),
+            "report_type": str(report_type or "daily"),
+            "summary_json": json.dumps(summary or {}, ensure_ascii=False),
+            "suggestions_json": json.dumps(suggestions or [], ensure_ascii=False),
+            "diagnostics_json": json.dumps(diagnostics or {}, ensure_ascii=False),
+            "created_at": str(created_at),
+        }
+        with self._lock:
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO strategy_feedback_reports (
+                            report_id, user_id, report_date, report_type,
+                            summary_json, suggestions_json, diagnostics_json, created_at
+                        ) VALUES (
+                            :report_id, :user_id, :report_date, :report_type,
+                            :summary_json, :suggestions_json, :diagnostics_json, :created_at
+                        )
+                        ON CONFLICT(report_id) DO UPDATE SET
+                            summary_json=excluded.summary_json,
+                            suggestions_json=excluded.suggestions_json,
+                            diagnostics_json=excluded.diagnostics_json,
+                            created_at=excluded.created_at
+                        """
+                    ),
+                    payload,
+                )
+        return {
+            "report_id": payload["report_id"],
+            "user_id": payload["user_id"],
+            "report_date": payload["report_date"],
+            "report_type": payload["report_type"],
+            "summary": summary or {},
+            "suggestions": suggestions or [],
+            "diagnostics": diagnostics or {},
+            "created_at": payload["created_at"],
+        }
+
+    def get_latest_strategy_feedback_report(
+        self,
+        user_id: str,
+        report_type: str = "daily",
+    ) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            with self.engine.connect() as conn:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT *
+                        FROM strategy_feedback_reports
+                        WHERE user_id = :user_id AND report_type = :report_type
+                        ORDER BY report_date DESC, created_at DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"user_id": str(user_id), "report_type": str(report_type or "daily")},
+                ).first()
+        if not row:
+            return None
+        data = dict(row._mapping)
+        for source_key, target_key, default in (
+            ("summary_json", "summary", {}),
+            ("suggestions_json", "suggestions", []),
+            ("diagnostics_json", "diagnostics", {}),
+        ):
+            try:
+                data[target_key] = json.loads(data.get(source_key) or json.dumps(default, ensure_ascii=False))
+            except Exception:
+                data[target_key] = default
+        return data

@@ -69,5 +69,15 @@ class Settings(BaseSettings):
         env_file = ".env"
 
 
+def validate_no_mock_data_policy(config: Settings) -> None:
+    """Mock data is forbidden for product data display and strategy decisions."""
+    if bool(config.USE_MOCK_DATA) or bool(config.ENABLE_MOCK_FALLBACK):
+        raise RuntimeError(
+            "SmartStock 禁止把 mock 数据作为真实数据展示或用于策略决策。"
+            "请设置 USE_MOCK_DATA=False 且 ENABLE_MOCK_FALLBACK=False。"
+        )
+
+
 # 创建全局配置实例
 settings = Settings()
+validate_no_mock_data_policy(settings)

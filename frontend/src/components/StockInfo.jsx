@@ -31,18 +31,23 @@ const StockInfo = ({ data }) => {
         </div>
       </div>
 
-      <div className="current-price">
-        <span className={`price ${isUp ? 'price-up' : 'price-down'}`}>
-          ¥{formatNumber(data.price)}
-        </span>
-        <span className={`change ${isUp ? 'change-up' : 'change-down'}`}>
-          {isUp ? <ArrowUpOutlined /> : <ArrowDownOutlined />}
-          {formatPercent(data.pct_change)}
+      <div className="current-price stock-price-strip">
+        <div className="price-main">
+          <span className={`price ${isUp ? 'price-up' : 'price-down'}`}>
+            ¥{formatNumber(data.price)}
+          </span>
+        </div>
+        <div className={`change-card ${isUp ? 'change-card-up' : 'change-card-down'}`}>
+          <span className="change-direction">
+            {isUp ? <ArrowUpOutlined /> : <ArrowDownOutlined />}
+            {isUp ? '上涨' : '下跌'}
+          </span>
+          <span className="change-percent">{formatPercent(data.pct_change)}</span>
           <span className="change-amount">
             {data.change > 0 ? '+' : ''}
             {formatNumber(data.change)}
           </span>
-        </span>
+        </div>
       </div>
 
       <Row gutter={16} className="stock-stats">

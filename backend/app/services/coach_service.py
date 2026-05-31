@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timedelta
@@ -63,6 +65,35 @@ class CoachService:
     ]
 
     MARKET_SAMPLE_POOL = ["000001", "000333", "002594", "300750", "600519", "601318"]
+
+    THEME_WATCH_CONFIG: Dict[str, List[str]] = {
+        "存储": ["603986", "688008", "301308", "688525", "001309", "300223", "000021", "300475"],
+        "算力": ["601138", "300308", "300502", "300394", "000977", "603019", "000938", "688256"],
+        "AI服务器": ["601138", "000977", "603019", "000938", "002463", "301308"],
+        "光模块": ["300308", "300502", "300394", "002281", "603083", "688313"],
+        "液冷": ["002837", "301018", "300499", "300602", "002011"],
+        "半导体": ["688981", "603501", "688012", "688041", "600584", "600460", "603986", "688008"],
+    }
+
+    THEME_KEYWORDS = {
+        "存储": ["存储", "半导体", "芯片", "DRAM", "NAND"],
+        "算力": ["算力", "服务器", "计算机", "通信设备", "数据中心"],
+        "AI服务器": ["服务器", "数据中心", "计算机设备"],
+        "光模块": ["光模块", "光通信", "通信设备"],
+        "液冷": ["液冷", "制冷", "温控", "数据中心"],
+        "半导体": ["半导体", "芯片", "集成电路", "电子元件"],
+    }
+
+    THEME_SYMBOL_NAMES = {
+        "603986": "兆易创新", "688008": "澜起科技", "301308": "江波龙", "688525": "佰维存储",
+        "001309": "德明利", "300223": "北京君正", "000021": "深科技", "300475": "香农芯创",
+        "601138": "工业富联", "300308": "中际旭创", "300502": "新易盛", "300394": "天孚通信",
+        "000977": "浪潮信息", "603019": "中科曙光", "000938": "紫光股份", "688256": "寒武纪",
+        "002463": "沪电股份", "002281": "光迅科技", "603083": "剑桥科技", "688313": "仕佳光子",
+        "002837": "英维克", "301018": "申菱环境", "300499": "高澜股份", "300602": "飞荣达",
+        "002011": "盾安环境", "688981": "中芯国际", "603501": "韦尔股份", "688012": "中微公司",
+        "688041": "海光信息", "600584": "长电科技", "600460": "士兰微",
+    }
 
     DEFAULT_RISK_PROFILE: Dict[str, Any] = {
         "risk_level": "medium",
@@ -201,6 +232,12 @@ class CoachService:
         news_service=None,
         ml_model_service=None,
         ml_explain_service=None,
+        market_snapshot_service=None,
+        data_quality_service=None,
+        universe_service=None,
+        feature_service=None,
+        market_theme_service=None,
+        scoring_service=None,
         today_picks_cache_ttl_seconds: int = 0,
         universe_refresh_seconds: int = 1200,
         universe_intraday_refresh_seconds: int = 90,
@@ -214,10 +251,22 @@ class CoachService:
         self.news_service = news_service
         self.ml_model_service = ml_model_service
         self.ml_explain_service = ml_explain_service
+        self.market_snapshot_service = market_snapshot_service
+        self.data_quality_service = data_quality_service
+        self.universe_service = universe_service
+        self.feature_service = feature_service
+        self.market_theme_service = market_theme_service
+        self.scoring_service = scoring_service
         self._pick_history: Dict[str, List[Dict[str, Any]]] = {}
         self._daily_snapshots: Dict[str, Dict[str, Any]] = {}
         self._backtest_runs: Dict[str, Dict[str, Any]] = {}
         self._today_picks_cache: Dict[str, Dict[str, Any]] = {}
+        self._refresh_state: Dict[str, Any] = {
+            "is_refreshing": False,
+            "last_started_at": None,
+            "last_finished_at": None,
+            "last_error": None,
+        }
         self._today_picks_cache_ttl_seconds = max(0, int(today_picks_cache_ttl_seconds or 0))
         self._universe_refresh_seconds = max(60, int(universe_refresh_seconds or 1200))
         self._universe_intraday_refresh_seconds = max(15, int(universe_intraday_refresh_seconds or 90))
@@ -236,6 +285,27 @@ class CoachService:
             "last_incremental_refresh_at": None,
             "last_meta": {},
         }
+
+    def get_refresh_state(self) -> Dict[str, Any]:
+        return copy.deepcopy(self._refresh_state)
+
+    def mark_refresh_started(self) -> None:
+        self._refresh_state.update(
+            {
+                "is_refreshing": True,
+                "last_started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "last_error": None,
+            }
+        )
+
+    def mark_refresh_finished(self, error: Optional[str] = None) -> None:
+        self._refresh_state.update(
+            {
+                "is_refreshing": False,
+                "last_finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "last_error": error,
+            }
+        )
 
     @staticmethod
     def _clamp(value: float, low: float, high: float) -> float:
@@ -260,9 +330,41 @@ class CoachService:
     def _now_ts() -> float:
         return datetime.now().timestamp()
 
+    def _infer_snapshot_trade_date(self, snapshot: Optional[Dict[str, Any]]) -> str:
+        """Prefer the quote timestamp over wall-clock date for weekends/holidays."""
+        fallback = datetime.now().strftime("%Y-%m-%d")
+        items = list((snapshot or {}).get("items") or [])
+        dates: List[str] = []
+        for item in items[: min(len(items), 200)]:
+            raw = item.get("trade_date") or item.get("date") or item.get("update_time")
+            text = str(raw or "").strip()
+            if len(text) >= 10 and re.match(r"^\d{4}-\d{2}-\d{2}", text):
+                dates.append(text[:10])
+            elif len(text) >= 8 and re.match(r"^\d{8}", text):
+                dates.append(f"{text[:4]}-{text[4:6]}-{text[6:8]}")
+        if dates:
+            return max(dates)
+        return str((snapshot or {}).get("trade_date") or fallback)
+
+    def _recommendation_trade_date(self) -> str:
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self.market_snapshot_service:
+            try:
+                snapshot = self.market_snapshot_service.get_latest_valid_snapshot(today)
+                if snapshot:
+                    return self._infer_snapshot_trade_date(snapshot)
+            except Exception:
+                pass
+        return today
+
     def _curated_fallback_candidates(self, target_size: Optional[int] = None) -> List[Dict[str, Any]]:
-        limit = max(30, min(int(target_size or 120), len(self.CURATED_FALLBACK_POOL)))
-        return [{"symbol": symbol} for symbol in self.CURATED_FALLBACK_POOL[:limit]]
+        theme_symbols: List[str] = []
+        for symbols in self.THEME_WATCH_CONFIG.values():
+            theme_symbols.extend(symbols)
+        # 兜底候选只用于数据源降级时维持页面可用，不能让固定主题名单主导推荐。
+        merged_pool = list(dict.fromkeys([*self.CURATED_FALLBACK_POOL, *theme_symbols]))
+        limit = max(30, min(int(target_size or 120), len(merged_pool)))
+        return [{"symbol": symbol} for symbol in merged_pool[:limit]]
 
     @staticmethod
     def _is_excluded_name(name: str) -> bool:
@@ -284,6 +386,338 @@ class CoachService:
         if symbol.startswith(("8", "4")):
             return "北交所"
         return "未知行业"
+
+    @classmethod
+    def _theme_tags_for_stock(cls, symbol: str, name: str = "", industry: str = "") -> List[str]:
+        tags = []
+        text = f"{name} {industry}".upper()
+        for theme, symbols in cls.THEME_WATCH_CONFIG.items():
+            keywords = cls.THEME_KEYWORDS.get(theme, [])
+            if symbol in symbols or any(str(keyword).upper() in text for keyword in keywords):
+                tags.append(theme)
+        return list(dict.fromkeys(tags))
+
+    @staticmethod
+    def _is_generic_market_theme(theme_name: str) -> bool:
+        text = str(theme_name or "")
+        generic_keywords = [
+            "高股息",
+            "证金",
+            "融资融券",
+            "沪股通",
+            "深股通",
+            "国企改革",
+            "超级品牌",
+            "MSCI",
+            "标普",
+        ]
+        return any(keyword in text for keyword in generic_keywords)
+
+    def _get_market_theme_context(self, limit: int = 12) -> Dict[str, Any]:
+        if not self.market_theme_service:
+            return {"status": "unavailable", "theme_rank": [], "data_quality": {"is_reliable": False}}
+        try:
+            payload = self.market_theme_service.get_today_themes(force=False, limit=limit) or {}
+            if (payload.get("data_quality") or {}).get("is_reliable") is False:
+                return payload
+            return payload
+        except Exception:
+            return {"status": "unavailable", "theme_rank": [], "data_quality": {"is_reliable": False}}
+
+    def _compute_theme_alignment(
+        self,
+        symbol: str,
+        name: str,
+        industry: str,
+        theme_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        themes = list((theme_payload or {}).get("theme_rank") or [])
+        if not themes:
+            return {
+                "theme_rank_score": 0.0,
+                "theme_tags": [],
+                "matched_theme_ids": [],
+                "matched_themes": [],
+                "theme_alignment_reason": "市场主线数据不可用，未参与评分。",
+                "theme_alignment_quality": "unavailable",
+            }
+
+        text = f"{symbol} {name} {industry}".lower()
+        matched = []
+        for rank_no, theme in enumerate(themes, start=1):
+            theme_name = str(theme.get("theme_name") or "").strip()
+            if not theme_name:
+                continue
+            top_symbols = theme.get("top_symbols") or []
+            symbol_hit = any(str(item.get("symbol") or "") == str(symbol) for item in top_symbols)
+            lower_theme = theme_name.lower()
+            text_hit = lower_theme in text or (industry and str(industry).strip() in theme_name)
+            # 行业细分经常比板块名称更窄，例如“火力发电”应归入“电力”。
+            if not symbol_hit and not text_hit and len(theme_name) >= 2:
+                text_hit = theme_name[:2] in text
+            if not (symbol_hit or text_hit):
+                continue
+            strength = self._safe_float(theme.get("strength_score"), 0)
+            money = self._safe_float(theme.get("money_flow_score"), 0)
+            rank_bonus = max(0.0, 16.0 - rank_no * 1.4)
+            score = self._clamp(strength * 0.55 + money * 0.25 + rank_bonus, 0, 100)
+            if self._is_generic_market_theme(theme_name):
+                score = min(score, 62.0)
+            matched.append(
+                {
+                    "theme_id": theme.get("theme_id"),
+                    "theme_name": theme_name,
+                    "category": theme.get("category"),
+                    "rank_no": rank_no,
+                    "strength_score": round(strength, 2),
+                    "money_flow_score": round(money, 2),
+                    "alignment_score": round(score, 2),
+                    "generic": self._is_generic_market_theme(theme_name),
+                }
+            )
+
+        matched.sort(key=lambda item: item.get("alignment_score", 0), reverse=True)
+        best_score = self._safe_float((matched[0] if matched else {}).get("alignment_score"), 0)
+        theme_tags = [item["theme_name"] for item in matched[:3] if item.get("theme_name")]
+        matched_ids = [item["theme_id"] for item in matched[:3] if item.get("theme_id")]
+        return {
+            "theme_rank_score": round(best_score, 2),
+            "theme_tags": theme_tags,
+            "matched_theme_ids": matched_ids,
+            "matched_themes": matched[:3],
+            "theme_alignment_reason": (
+                f"匹配当前市场主线：{'、'.join(theme_tags)}"
+                if matched
+                else "未匹配到当前前排市场主线，排序会小幅降权。"
+            ),
+            "theme_alignment_quality": "matched" if matched else "unmatched",
+        }
+
+    def _apply_theme_alignment(
+        self,
+        picks: List[Dict[str, Any]],
+        candidate_rows: List[Dict[str, Any]],
+        theme_payload: Dict[str, Any],
+    ) -> None:
+        if not picks:
+            return
+        row_map = {str(row.get("symbol") or ""): row for row in candidate_rows or []}
+        reliable = bool((theme_payload or {}).get("data_quality", {}).get("is_reliable"))
+        for pick in picks:
+            symbol = str(pick.get("symbol") or "")
+            row = row_map.get(symbol) or {}
+            industry = str(pick.get("industry") or row.get("industry") or "")
+            name = str(pick.get("name") or row.get("name") or symbol)
+            alignment = self._compute_theme_alignment(symbol, name, industry, theme_payload if reliable else {})
+            pick.update(
+                {
+                    "industry": industry,
+                    "theme_rank_score": alignment.get("theme_rank_score", 0),
+                    "theme_tags": alignment.get("theme_tags") or [],
+                    "matched_theme_ids": alignment.get("matched_theme_ids") or [],
+                    "matched_themes": alignment.get("matched_themes") or [],
+                }
+            )
+            evidence = pick.setdefault("evidence_summary", {})
+            evidence["theme_alignment"] = {
+                "score": alignment.get("theme_rank_score", 0),
+                "quality": alignment.get("theme_alignment_quality"),
+                "reason": alignment.get("theme_alignment_reason"),
+            }
+            reasons = pick.setdefault("reasons", [])
+            reason = alignment.get("theme_alignment_reason")
+            if reason and reason not in reasons:
+                reasons.append(reason)
+                pick["reasons"] = reasons[:5]
+
+            breakdown = pick.setdefault("score_breakdown", {})
+            theme_score = self._safe_float(alignment.get("theme_rank_score"), 0)
+            if self.scoring_service:
+                self.scoring_service.apply_theme_adjustment(pick, theme_score, reliable)
+            else:
+                breakdown["theme"] = round(theme_score, 2)
+                if "pre_theme_total" not in breakdown:
+                    breakdown["pre_theme_total"] = round(self._safe_float(breakdown.get("total"), pick.get("score") or 0), 2)
+                current_total = self._safe_float(breakdown.get("pre_theme_total"), breakdown.get("total") or pick.get("score") or 0)
+                if not reliable:
+                    adjustment = 0.0
+                elif theme_score > 0:
+                    adjustment = self._clamp((theme_score - 55.0) * 0.10, -1.0, 4.5)
+                else:
+                    adjustment = -3.0
+                breakdown["theme_adjustment"] = round(adjustment, 2)
+                breakdown["total"] = round(self._clamp(current_total + adjustment, 0, 100), 2)
+                pick["score_breakdown"] = breakdown
+                pick["score"] = breakdown["total"]
+
+    def _theme_momentum_metrics(self, symbol: str, quote: Dict[str, Any]) -> Dict[str, Any]:
+        price = self._safe_float(quote.get("price") or quote.get("current_price"), 0)
+        pct_change = self._safe_float(quote.get("pct_change") or quote.get("change_percent"), 0)
+        amount = self._safe_float(quote.get("amount") or quote.get("turnover"), 0)
+        metrics = {
+            "current_price": round(price, 3) if price > 0 else None,
+            "return_1d_pct": round(pct_change, 2),
+            "return_5d_pct": None,
+            "return_10d_pct": None,
+            "return_20d_pct": None,
+            "amount_ratio_20d": None,
+            "new_high_20d": False,
+        }
+        try:
+            df = self.data_source_manager.get_history_data(symbol, days=32)
+            if df is None or df.empty or "close" not in df.columns:
+                return metrics
+            closes = [self._safe_float(v, 0) for v in df["close"].tolist() if self._safe_float(v, 0) > 0]
+            current = price or (closes[-1] if closes else 0)
+            if current > 0:
+                metrics["current_price"] = round(current, 3)
+            for days, key in [(5, "return_5d_pct"), (10, "return_10d_pct"), (20, "return_20d_pct")]:
+                if current > 0 and len(closes) > days and closes[-days - 1] > 0:
+                    metrics[key] = round((current / closes[-days - 1] - 1) * 100, 2)
+            if current > 0 and closes:
+                recent = closes[-20:] if len(closes) >= 20 else closes
+                metrics["new_high_20d"] = current >= max(recent)
+            amount_col = None
+            for col in ["amount", "turnover"]:
+                if col in df.columns:
+                    amount_col = col
+                    break
+            if amount_col:
+                amounts = [self._safe_float(v, 0) for v in df[amount_col].tolist() if self._safe_float(v, 0) > 0]
+                if amount > 0 and len(amounts) >= 5:
+                    base = mean(amounts[-20:]) if len(amounts) >= 20 else mean(amounts)
+                    if base > 0:
+                        metrics["amount_ratio_20d"] = round(amount / base, 2)
+        except Exception:
+            return metrics
+        return metrics
+
+    def _build_theme_watchlist(
+        self,
+        entries: List[Dict[str, Any]],
+        industry_map: Dict[str, str],
+        limit: int = 24,
+    ) -> List[Dict[str, Any]]:
+        entry_map = {str(item.get("symbol") or ""): item for item in entries if item.get("symbol")}
+        configured_symbols = []
+        for symbols in self.THEME_WATCH_CONFIG.values():
+            configured_symbols.extend(symbols)
+        configured_symbols = list(dict.fromkeys(configured_symbols))
+
+        missing_symbols = [symbol for symbol in configured_symbols if symbol not in entry_map]
+        quote_map: Dict[str, Dict[str, Any]] = {}
+        if missing_symbols:
+            try:
+                quote_map = self.data_source_manager.get_realtime_quotes_batch(missing_symbols[:80]) or {}
+            except Exception:
+                quote_map = {}
+        basic_map: Dict[str, Dict[str, Any]] = {}
+        try:
+            basic_map = self.data_source_manager.get_stock_basic_map() or {}
+        except Exception:
+            basic_map = {}
+
+        rows: List[Dict[str, Any]] = []
+        candidate_symbols = list(dict.fromkeys([*configured_symbols, *list(entry_map.keys())]))
+        history_metric_deadline = self._now_ts() + 4.0
+        for symbol in candidate_symbols:
+            row = copy.deepcopy(entry_map.get(symbol) or quote_map.get(symbol) or {"symbol": symbol})
+            basic = basic_map.get(symbol) or {}
+            raw_name = str(row.get("name") or basic.get("name") or "").strip()
+            name = raw_name if raw_name and raw_name != symbol else self.THEME_SYMBOL_NAMES.get(symbol, symbol)
+            industry = str(industry_map.get(symbol) or row.get("industry") or basic.get("industry") or self._infer_board_industry(symbol))
+            tags = self._theme_tags_for_stock(symbol, name, industry)
+            if not tags:
+                continue
+            row["industry"] = industry
+            should_fetch_history = symbol in configured_symbols and self._now_ts() < history_metric_deadline
+            metrics = self._theme_momentum_metrics(symbol, row) if should_fetch_history else {
+                "current_price": self._safe_float(row.get("price") or row.get("current_price"), 0) or None,
+                "return_1d_pct": round(self._safe_float(row.get("pct_change"), 0), 2),
+                "return_5d_pct": None,
+                "return_10d_pct": None,
+                "return_20d_pct": None,
+                "amount_ratio_20d": None,
+                "new_high_20d": False,
+            }
+            return_20 = self._safe_float(metrics.get("return_20d_pct"), 0)
+            return_10 = self._safe_float(metrics.get("return_10d_pct"), 0)
+            return_5 = self._safe_float(metrics.get("return_5d_pct"), 0)
+            return_1 = self._safe_float(metrics.get("return_1d_pct"), 0)
+            amount_ratio = self._safe_float(metrics.get("amount_ratio_20d"), 1)
+            theme_score = self._clamp(
+                50 + return_20 * 1.1 + return_10 * 0.9 + return_5 * 0.7 + return_1 * 0.5 + (amount_ratio - 1) * 10,
+                0,
+                100,
+            )
+            if metrics.get("new_high_20d"):
+                theme_score = self._clamp(theme_score + 6, 0, 100)
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "name": name,
+                    "industry": industry,
+                    "themes": tags,
+                    "price": self._safe_float(row.get("price") or row.get("current_price") or metrics.get("current_price"), 0),
+                    "pct_change": round(self._safe_float(row.get("pct_change") or row.get("change_percent"), 0), 2),
+                    "amount_yi": round(self._safe_float(row.get("amount") or row.get("turnover"), 0) / 100000000, 2),
+                    "theme_score": round(theme_score, 2),
+                    "momentum_metrics": metrics,
+                    "source": "configured_theme" if symbol in configured_symbols else "snapshot_theme_keyword",
+                }
+            )
+        rows.sort(key=lambda item: (item.get("theme_score", 0), item.get("amount_yi", 0)), reverse=True)
+        return rows[:limit]
+
+    def _build_excluded_examples(
+        self,
+        theme_watchlist: List[Dict[str, Any]],
+        analyzed_picks: List[Dict[str, Any]],
+        final_picks: List[Dict[str, Any]],
+        candidate_rows: List[Dict[str, Any]],
+        limit: int = 12,
+    ) -> List[Dict[str, Any]]:
+        final_symbols = {str(p.get("symbol") or "") for p in final_picks}
+        analyzed_by_symbol = {str(p.get("symbol") or ""): p for p in analyzed_picks if p.get("symbol")}
+        candidate_symbols = {str(row.get("symbol") or "") for row in candidate_rows}
+        examples: List[Dict[str, Any]] = []
+        for item in theme_watchlist:
+            symbol = str(item.get("symbol") or "")
+            if not symbol or symbol in final_symbols:
+                continue
+            analyzed = analyzed_by_symbol.get(symbol)
+            if analyzed:
+                breakdown = analyzed.get("score_breakdown") or {}
+                dd_prob = self._safe_float(analyzed.get("dd_prob"), 0)
+                action = analyzed.get("action")
+                if dd_prob >= 0.30:
+                    reason = f"强势主题但回撤概率偏高（{dd_prob * 100:.1f}%），暂不进入买入池"
+                elif action != "buy":
+                    reason = "强势主题进入观察，但当前策略动作不是买入"
+                elif self._safe_float(breakdown.get("total"), 0) < 68:
+                    reason = f"综合评分不足（{self._safe_float(breakdown.get('total'), 0):.1f}），保留观察"
+                else:
+                    reason = "通过部分条件但未进入最终仓位上限，保留观察"
+                score = breakdown.get("total")
+            elif symbol in candidate_symbols:
+                reason = "进入预筛候选，但未排入本轮深度分析预算"
+                score = None
+            else:
+                reason = "属于强势主题观察池，但未满足当前策略的基础流动性/形态过滤"
+                score = None
+            examples.append(
+                {
+                    "symbol": symbol,
+                    "name": item.get("name") or symbol,
+                    "themes": item.get("themes") or [],
+                    "theme_score": item.get("theme_score"),
+                    "score": score,
+                    "reason": reason,
+                }
+            )
+            if len(examples) >= limit:
+                break
+        return examples
 
     def _get_universe_rules(self, risk_level: str) -> Dict[str, Any]:
         if risk_level == "low":
@@ -335,11 +769,20 @@ class CoachService:
 
         items = []
         executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(self.data_source_manager.get_a_share_snapshot)
+        snapshot_payload = {}
+        if self.market_snapshot_service:
+            future = executor.submit(self.market_snapshot_service.ensure_snapshot_for_recommendation)
+        else:
+            future = executor.submit(self.data_source_manager.get_a_share_snapshot)
         try:
             completed, pending = wait([future], timeout=8)
             if future in completed:
-                items = future.result() or []
+                result = future.result() or []
+                if isinstance(result, dict):
+                    snapshot_payload = result
+                    items = result.get("items") or []
+                else:
+                    items = result or []
             else:
                 future.cancel()
         except Exception:
@@ -357,6 +800,7 @@ class CoachService:
             self._universe_state["entry_map"] = entry_map
             self._universe_state["last_full_refresh_ts"] = now_ts
             self._universe_state["last_full_refresh_at"] = refresh_at
+            self._universe_state["last_snapshot_payload"] = copy.deepcopy(snapshot_payload)
         return copy.deepcopy(items)
 
     def _refresh_intraday_candidates(self, symbols: List[str]) -> None:
@@ -409,22 +853,45 @@ class CoachService:
         target_size: Optional[int] = None,
         strategy_code: str = "trend_breakout",
     ) -> Dict[str, Any]:
+        if self.universe_service:
+            return self.universe_service.build_dynamic_candidates(
+                risk_level=risk_level,
+                target_size=target_size,
+                strategy_code=strategy_code,
+            )
         entries = self._get_universe_snapshot(force=False)
         industry_map = self.data_source_manager.get_stock_industry_map()
         if not entries:
             fallback = self._curated_fallback_candidates(target_size)
+            theme_watchlist = self._build_theme_watchlist(fallback, industry_map)
+            source_status = {}
+            try:
+                source_status = self.data_source_manager.get_health_status()
+            except Exception:
+                source_status = {}
             return {
                 "candidates": fallback,
+                "theme_watchlist": theme_watchlist,
                 "meta": {
                     "source": "fallback_curated",
+                    "snapshot_count": 0,
+                    "fallback_reason": "全A快照暂不可用，已退回扩展主题兜底池；买入列表仍按真实行情/K线评分，不使用mock资金流。",
+                    "data_source_status": source_status,
                     "total_universe_count": 0,
                     "after_prefilter_count": len(fallback),
                     "candidate_count": len(fallback),
+                    "theme_watch_count": len(theme_watchlist),
                     "industry_count": 0,
                     "industry_map_count": len(industry_map),
                     "rules": {},
                     "full_refresh_at": None,
                     "incremental_refresh_at": None,
+                    "pipeline_counts": {
+                        "snapshot": 0,
+                        "prefilter": len(fallback),
+                        "candidate": len(fallback),
+                        "theme_watch": len(theme_watchlist),
+                    },
                 },
             }
 
@@ -525,36 +992,68 @@ class CoachService:
 
         if not refreshed_candidates:
             fallback = self._curated_fallback_candidates(target_candidate_size)
+            theme_watchlist = self._build_theme_watchlist([*filtered, *fallback], industry_map)
+            source_status = {}
+            try:
+                source_status = self.data_source_manager.get_health_status()
+            except Exception:
+                source_status = {}
             meta = {
                 "source": "fallback_curated_after_prefilter",
+                "snapshot_count": len(entries),
+                "fallback_reason": "全A快照可用但预筛/增量刷新后无有效候选，已退回扩展主题兜底池。",
+                "data_source_status": source_status,
                 "total_universe_count": len(entries),
                 "after_prefilter_count": len(filtered),
                 "candidate_count": len(fallback),
+                "theme_watch_count": len(theme_watchlist),
                 "industry_count": len(industries),
                 "industry_map_count": len(industry_map),
                 "rules": {**rules, "strategy_target_size": target_candidate_size, "industry_cap_effective": dynamic_industry_cap},
                 "full_refresh_at": full_refresh_at,
                 "incremental_refresh_at": incremental_refresh_at,
+                "pipeline_counts": {
+                    "snapshot": len(entries),
+                    "prefilter": len(filtered),
+                    "candidate": len(fallback),
+                    "theme_watch": len(theme_watchlist),
+                },
             }
             with self._universe_lock:
                 self._universe_state["last_meta"] = meta
-            return {"candidates": fallback, "meta": meta}
+            return {"candidates": fallback, "theme_watchlist": theme_watchlist, "meta": meta}
 
+        theme_watchlist = self._build_theme_watchlist(entries, industry_map)
+        source_status = {}
+        try:
+            source_status = self.data_source_manager.get_health_status()
+        except Exception:
+            source_status = {}
         meta = {
             "source": "a_share_snapshot",
+            "snapshot_count": len(entries),
+            "fallback_reason": None,
+            "data_source_status": source_status,
             "total_universe_count": len(entries),
             "after_prefilter_count": len(filtered),
             "candidate_count": len(refreshed_candidates),
+            "theme_watch_count": len(theme_watchlist),
             "industry_count": len(industries),
             "industry_map_count": len(industry_map),
             "rules": {**rules, "strategy_target_size": target_candidate_size, "industry_cap_effective": dynamic_industry_cap},
             "full_refresh_at": full_refresh_at,
             "incremental_refresh_at": incremental_refresh_at,
+            "pipeline_counts": {
+                "snapshot": len(entries),
+                "prefilter": len(filtered),
+                "candidate": len(refreshed_candidates),
+                "theme_watch": len(theme_watchlist),
+            },
         }
         with self._universe_lock:
             self._universe_state["last_meta"] = meta
 
-        return {"candidates": refreshed_candidates, "meta": meta}
+        return {"candidates": refreshed_candidates, "theme_watchlist": theme_watchlist, "meta": meta}
 
     def _get_latest_action_map(self, user_id: str) -> Dict[str, Dict[str, Any]]:
         return self.store.get_latest_pick_actions(user_id=user_id)
@@ -573,6 +1072,231 @@ class CoachService:
                 }
             else:
                 pick["user_action"] = None
+
+    def _latest_today_snapshot(self) -> Optional[Dict[str, Any]]:
+        trade_date = self._recommendation_trade_date()
+        snapshot = self._daily_snapshots.get(trade_date)
+        if snapshot:
+            return copy.deepcopy(snapshot)
+        latest_cache = None
+        latest_ts = -1.0
+        for item in self._today_picks_cache.values():
+            ts = float(item.get("ts") or 0)
+            data = item.get("data") or {}
+            if data.get("trade_date") == trade_date and ts > latest_ts:
+                latest_cache = data
+                latest_ts = ts
+        return copy.deepcopy(latest_cache) if latest_cache else None
+
+    def get_cached_today_picks(self, max_count: int = 30, user_id: str = "default") -> Optional[Dict[str, Any]]:
+        data = self._latest_today_snapshot()
+        if not data:
+            try:
+                restored = self.store.get_latest_pick_snapshots_result(
+                    user_id=user_id,
+                    trade_date=self._recommendation_trade_date(),
+                    limit=max_count,
+                )
+                if not restored:
+                    restored = self.store.get_latest_pick_snapshots_result(user_id=user_id, limit=max_count)
+            except Exception:
+                restored = None
+            if not restored:
+                return None
+            market_snapshot = None
+            if self.market_snapshot_service:
+                try:
+                    market_snapshot = self.market_snapshot_service.get_latest_valid_snapshot(restored.get("trade_date"))
+                except Exception:
+                    market_snapshot = None
+            picks = restored.get("picks") or []
+            data = {
+                "status": "cached_from_store",
+                "trade_date": restored.get("trade_date"),
+                "updated_at": restored.get("updated_at"),
+                "is_refreshing": bool(self._refresh_state.get("is_refreshing")),
+                "market_state": self.get_market_state_today(),
+                "risk_profile": self.get_risk_profile(user_id),
+                "universe_meta": {
+                    "source": "pick_snapshots",
+                    "snapshot_count": int((market_snapshot or {}).get("snapshot_count") or 0),
+                    "fallback_reason": None if market_snapshot else "已从推荐快照恢复，但未找到可用全A市场快照。",
+                    "pipeline_counts": {
+                        "snapshot": int((market_snapshot or {}).get("snapshot_count") or 0),
+                        "restored_picks": len(picks),
+                        "final_output": len(picks),
+                    },
+                },
+                "strategy_health": None,
+                "trade_plan": self._attach_trade_plan(
+                    picks,
+                    strategy_health={},
+                    market_state=self.get_market_state_today(),
+                    risk_profile=self.get_risk_profile(user_id),
+                ),
+                "theme_watchlist": [],
+                "excluded_examples": [],
+                "picks": picks,
+                "no_trade": len(picks) == 0,
+                "no_trade_reason": "当前没有可展示的缓存推荐。" if not picks else None,
+            }
+        result = copy.deepcopy(data)
+        result["picks"] = (result.get("picks") or [])[: max(1, min(int(max_count or 30), 60))]
+        self._attach_user_actions(result["picks"], user_id)
+        meta = result.get("universe_meta") or {}
+        result["status"] = result.get("status") or "cached"
+        if result["status"] == "fresh":
+            result["status"] = "cached"
+        result["updated_at"] = result.get("updated_at") or meta.get("incremental_refresh_at") or meta.get("full_refresh_at")
+        result["is_refreshing"] = bool(self._refresh_state.get("is_refreshing"))
+        result["data_quality"] = self._build_data_quality(result)
+        result["data_diagnostics"] = self._build_data_diagnostics(result)
+        return result
+
+    def get_smart_screen_summary(self, user_id: str = "default", risk_level: str = "medium") -> Dict[str, Any]:
+        cached = self.get_cached_today_picks(max_count=5, user_id=user_id)
+        refresh_state = self.get_refresh_state()
+        if cached:
+            picks = cached.get("picks") or []
+            trade_plan = cached.get("trade_plan") or {}
+            market_state = cached.get("market_state") or {}
+            strategy_health = cached.get("strategy_health") or {}
+            return {
+                "status": "cached",
+                "trade_date": cached.get("trade_date"),
+                "updated_at": cached.get("updated_at"),
+                "is_refreshing": bool(refresh_state.get("is_refreshing")),
+                "market_state": market_state,
+                "trade_plan": trade_plan,
+                "strategy_health": strategy_health,
+                "top_picks": picks[:5],
+                "pick_count": len(cached.get("picks") or []),
+                "core_count": len([p for p in picks if (p.get("decision") or {}).get("grade") in {"A", "B"}]),
+                "data_quality": cached.get("data_quality"),
+                "data_diagnostics": cached.get("data_diagnostics"),
+                "message": "已展示最近一次缓存结果，刷新会在后台完成。",
+            }
+
+        state = self.get_market_state_today()
+        return {
+            "status": "empty",
+            "trade_date": datetime.now().strftime("%Y-%m-%d"),
+            "updated_at": None,
+            "is_refreshing": bool(refresh_state.get("is_refreshing")),
+            "market_state": state,
+            "trade_plan": {
+                "primary_action": "watch",
+                "headline": "等待生成今日交易计划",
+                "summary": "页面先展示市场环境，完整选股会在后台刷新后更新。",
+                "core_count": 0,
+                "trial_count": 0,
+                "suggested_total_exposure_pct": 0,
+            },
+            "strategy_health": None,
+            "top_picks": [],
+            "pick_count": 0,
+            "core_count": 0,
+            "data_quality": {
+                "snapshot_status": "unknown",
+                "money_flow_coverage": "unknown",
+                "diagnostic_mode": "hidden",
+            },
+            "data_diagnostics": {"refresh_state": refresh_state},
+            "message": "暂无缓存推荐，已可触发后台刷新。",
+        }
+
+    def _build_data_quality(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        if self.data_quality_service:
+            return self.data_quality_service.build_recommendation_quality(
+                result.get("picks") or [],
+                result.get("universe_meta") or {},
+            )
+        picks = result.get("picks") or []
+        real_count = len([p for p in picks if p.get("money_flow_quality") == "real"])
+        proxy_count = len([p for p in picks if p.get("money_flow_quality") == "proxy"])
+        unavailable_count = len([p for p in picks if p.get("money_flow_quality") == "unavailable"])
+        meta = result.get("universe_meta") or {}
+        snapshot_count = int(self._safe_float(meta.get("snapshot_count"), 0))
+        source = str(meta.get("source") or "")
+        snapshot_status = "fallback" if source.startswith("fallback_") else "ok"
+        if snapshot_count < 500:
+            snapshot_status = "insufficient_data"
+        return {
+            "snapshot_status": snapshot_status,
+            "snapshot_count": snapshot_count,
+            "fallback_reason": meta.get("fallback_reason"),
+            "is_reliable": snapshot_status == "ok",
+            "money_flow_quality": {
+                "real": real_count,
+                "proxy": proxy_count,
+                "unavailable": unavailable_count,
+                "total": len(picks),
+            },
+            "money_flow_coverage": round(real_count / len(picks), 4) if picks else 0,
+            "diagnostic_mode": "hidden",
+        }
+
+    def _build_data_diagnostics(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        meta = result.get("universe_meta") or {}
+        return {
+            "universe_meta": meta,
+            "pipeline_counts": meta.get("pipeline_counts") or {},
+            "fallback_reason": meta.get("fallback_reason"),
+            "refresh_state": self.get_refresh_state(),
+        }
+
+    def _build_degraded_today_result(
+        self,
+        trade_date: str,
+        market_state: Dict[str, Any],
+        risk_profile: Dict[str, Any],
+        universe_meta: Dict[str, Any],
+        theme_watchlist: List[Dict[str, Any]],
+        user_id: str,
+    ) -> Dict[str, Any]:
+        snapshot_count = int(self._safe_float((universe_meta or {}).get("snapshot_count"), 0))
+        fallback_reason = (universe_meta or {}).get("fallback_reason") or (
+            f"全A快照样本量不足（{snapshot_count} < 500），不生成正常核心候选。"
+        )
+        meta = copy.deepcopy(universe_meta or {})
+        meta["fallback_reason"] = fallback_reason
+        meta["is_reliable"] = False
+        pipeline_counts = meta.setdefault("pipeline_counts", {})
+        if isinstance(pipeline_counts, dict):
+            pipeline_counts["final_output"] = 0
+            pipeline_counts["strict_buy"] = 0
+        trade_plan = self._attach_trade_plan(
+            [],
+            strategy_health={},
+            market_state=market_state,
+            risk_profile=risk_profile,
+        )
+        trade_plan["headline"] = "数据降级，今日不生成买入清单"
+        trade_plan["summary"] = fallback_reason
+        result = {
+            "status": "degraded",
+            "trade_date": trade_date,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "is_refreshing": bool(self._refresh_state.get("is_refreshing")),
+            "market_state": market_state,
+            "risk_profile": risk_profile,
+            "universe_meta": meta,
+            "strategy_health": {
+                "status": "data_degraded",
+                "summary": fallback_reason,
+                "live_ready": False,
+            },
+            "trade_plan": trade_plan,
+            "theme_watchlist": theme_watchlist or [],
+            "excluded_examples": [],
+            "picks": [],
+            "no_trade": True,
+            "no_trade_reason": fallback_reason,
+        }
+        result["data_quality"] = self._build_data_quality(result)
+        result["data_diagnostics"] = self._build_data_diagnostics(result)
+        self._daily_snapshots[trade_date] = copy.deepcopy(result)
+        return result
 
     def _find_pick_by_id(self, pick_id: str) -> Optional[Dict[str, Any]]:
         # 当日快照优先
@@ -880,26 +1604,23 @@ class CoachService:
         quote_override: Optional[Dict[str, Any]] = None,
         strategy_code: str = "trend_breakout",
     ) -> Optional[Dict[str, Any]]:
-        quote = copy.deepcopy(quote_override) if quote_override else self.data_source_manager.get_realtime_quote(symbol)
-        if not quote:
+        if not self.feature_service:
             return None
-        quote.setdefault("code", symbol)
-        quote.setdefault("name", symbol)
-        if float(quote.get("price") or 0) <= 0:
-            refreshed_quote = self.data_source_manager.get_realtime_quote(symbol)
-            if refreshed_quote:
-                quote.update(refreshed_quote)
-
-        history_df = self.data_source_manager.get_history_data(symbol, days=120)
-        if history_df.empty:
+        feature_payload = self.feature_service.build_pick_features(
+            symbol=symbol,
+            quote_override=quote_override,
+            strategy_code=strategy_code,
+        )
+        if not feature_payload:
             return None
 
-        analyzed_df = TechnicalAnalyzer.analyze_all_indicators(history_df)
-        indicators = TechnicalAnalyzer.get_latest_indicators(analyzed_df)
-        signal = TechnicalAnalyzer.generate_signals(indicators)
-        strategy = self._normalize_strategy_code(strategy_code)
-
-        current_price = float(quote.get("price") or indicators.get("close") or 0)
+        quote = feature_payload.get("quote") or {}
+        history_df = feature_payload.get("history_df")
+        analyzed_df = feature_payload.get("analyzed_df")
+        indicators = feature_payload.get("indicators") or {}
+        signal = feature_payload.get("signal") or {}
+        strategy = feature_payload.get("strategy") or self._normalize_strategy_code(strategy_code)
+        current_price = self._safe_float(feature_payload.get("current_price"), 0)
         if current_price <= 0:
             return None
 
@@ -907,45 +1628,16 @@ class CoachService:
         up_prob = self._clamp(0.52 + signal_score / 250.0, 0.05, 0.95)
         dd_prob = self._clamp(0.34 - signal_score / 400.0, 0.05, 0.90)
 
-        money_flow_source = "proxy"
-        if quote_override:
-            amount_yi_proxy = float(quote.get("amount") or 0) / 100000000
-            pct_proxy = float(quote.get("pct_change") or 0)
-            # 列表筛选阶段避免逐只调用高成本资金流接口，使用成交额 * 涨跌幅构造日内资金强弱代理。
-            main_net_inflow_yi = self._clamp(amount_yi_proxy * pct_proxy / 12.0, -5.0, 5.0)
-        else:
-            money_flow_raw = self.data_source_manager.get_money_flow(symbol, days=3) or {}
-            main_net_inflow = float(money_flow_raw.get("main_net_inflow", 0) or 0)
-            main_net_inflow_yi = main_net_inflow / 100000000
-            money_flow_source = "remote"
+        money_flow_source = str(feature_payload.get("money_flow_source") or "unavailable")
+        money_flow_quality = str(feature_payload.get("money_flow_quality") or "unavailable")
+        money_flow_confidence = self._safe_float(feature_payload.get("money_flow_confidence"), 0.0)
+        main_net_inflow_yi = self._safe_float(feature_payload.get("main_net_inflow_yi"), 0.0)
+        industry_name = str(feature_payload.get("industry_name") or self._infer_board_industry(symbol))
+        news_factor = feature_payload.get("news_factor") or {}
+        turnover_rate = self._safe_float(feature_payload.get("turnover_rate"), 0.0)
 
-        industry_name = (
-            str((quote_override or {}).get("industry") or quote.get("industry") or "").strip()
-            or self._infer_board_industry(symbol)
-        )
-        news_factor = {
-            "macro_score": 50.0,
-            "industry_score": 50.0,
-            "stock_score": 50.0,
-            "total_score": 50.0,
-            "net_score": 0.0,
-            "sentiment": "neutral",
-            "latest_events": [],
-            "updated_at": None,
-        }
-        if self.news_service:
-            try:
-                news_factor = self.news_service.get_symbol_news_summary(symbol=symbol, industry=industry_name, allow_remote=False)
-            except Exception:
-                news_factor = news_factor
-
-        turnover_rate = float(quote.get("turnover_rate") or 0)
-        if turnover_rate <= 0:
-            amount_yi = float(quote.get("amount") or 0) / 100000000
-            if amount_yi > 0:
-                turnover_rate = self._clamp(amount_yi * 0.35, 0.2, 25)
-
-        flow_score = self._clamp(50 + main_net_inflow_yi * 8, 0, 100)
+        flow_multiplier = 8 if money_flow_quality == "real" else (3 if money_flow_quality == "proxy" else 0)
+        flow_score = self._clamp(50 + main_net_inflow_yi * flow_multiplier, 0, 100)
         if turnover_rate <= 2:
             turnover_score = 45 + turnover_rate * 6
         elif turnover_rate <= 8:
@@ -957,7 +1649,8 @@ class CoachService:
         turnover_score = self._clamp(turnover_score, 0, 100)
 
         # 资金流与换手率会直接影响概率
-        up_prob = self._clamp(up_prob + self._clamp(main_net_inflow_yi * 0.012, -0.05, 0.05), 0.05, 0.95)
+        flow_prob_weight = 0.012 if money_flow_quality == "real" else (0.004 if money_flow_quality == "proxy" else 0.0)
+        up_prob = self._clamp(up_prob + self._clamp(main_net_inflow_yi * flow_prob_weight, -0.05, 0.05), 0.05, 0.95)
         if turnover_rate > 15:
             dd_prob = self._clamp(dd_prob + 0.05, 0.05, 0.90)
         elif turnover_rate < 1:
@@ -970,58 +1663,29 @@ class CoachService:
             up_prob = self._clamp(up_prob + self._clamp(news_net_score / 500.0, -0.06, 0.06), 0.05, 0.95)
             dd_prob = self._clamp(dd_prob - self._clamp(news_net_score / 700.0, -0.05, 0.05), 0.05, 0.90)
 
-        rsi = self._safe_float(indicators.get("rsi"), 50)
-        macd_hist = self._safe_float(indicators.get("macd_hist"), 0)
-        close_price = self._safe_float(indicators.get("close"), current_price)
-        boll_lower = self._safe_float(indicators.get("boll_lower"), 0)
-        boll_middle = self._safe_float(indicators.get("boll_middle"), 0)
-        ma5 = self._safe_float(indicators.get("ma5"), close_price)
-        ma10 = self._safe_float(indicators.get("ma10"), close_price)
-        ma20 = self._safe_float(indicators.get("ma20"), close_price)
-        ma60 = self._safe_float(indicators.get("ma60"), close_price)
-        curr_volume = self._safe_float(analyzed_df.iloc[-1]["volume"], 0) if len(analyzed_df) >= 1 else 0
-        avg_volume_5 = float(analyzed_df["volume"].tail(5).mean()) if "volume" in analyzed_df.columns and len(analyzed_df) >= 1 else 0
-        volume_ratio = self._clamp(curr_volume / avg_volume_5, 0, 5) if avg_volume_5 > 0 else 1.0
-        near_lower_band = bool(boll_lower > 0 and close_price <= boll_lower * 1.04)
-        reclaim_middle_band = bool(boll_middle > 0 and close_price >= boll_middle * 0.99)
-        prev_close = self._safe_float(analyzed_df.iloc[-2]["close"], close_price) if len(analyzed_df) >= 2 else close_price
-        prev_pct_change = ((prev_close - self._safe_float(analyzed_df.iloc[-3]["close"], prev_close)) / self._safe_float(analyzed_df.iloc[-3]["close"], prev_close) * 100) if len(analyzed_df) >= 3 and self._safe_float(analyzed_df.iloc[-3]["close"], 0) > 0 else 0
-        curr_pct_change = ((close_price - prev_close) / prev_close * 100) if prev_close > 0 else 0
-        close_5d = self._safe_float(analyzed_df.iloc[-6]["close"], close_price) if len(analyzed_df) >= 6 else close_price
-        close_20d = self._safe_float(analyzed_df.iloc[-21]["close"], close_price) if len(analyzed_df) >= 21 else close_price
-        return_5d_pct = ((close_price - close_5d) / close_5d * 100) if close_5d > 0 else 0
-        return_20d_pct = ((close_price - close_20d) / close_20d * 100) if close_20d > 0 else 0
-        recent_high_20 = float(analyzed_df["high"].tail(20).max()) if "high" in analyzed_df.columns and len(analyzed_df) >= 1 else close_price
-        recent_low_20 = float(analyzed_df["low"].tail(20).min()) if "low" in analyzed_df.columns and len(analyzed_df) >= 1 else close_price
-        from_20d_high_pct = ((close_price / recent_high_20) - 1) * 100 if recent_high_20 > 0 else 0
-        from_20d_low_pct = ((close_price / recent_low_20) - 1) * 100 if recent_low_20 > 0 else 0
-        ma_alignment = sum(
-            1
-            for cond in [
-                close_price >= ma5 > 0,
-                close_price >= ma10 > 0,
-                close_price >= ma20 > 0,
-                ma20 >= ma60 > 0,
-            ]
-            if cond
-        )
-        stretch_from_ma20_pct = ((close_price / ma20) - 1) * 100 if ma20 > 0 else 0
-        overheated = bool(rsi >= 78 or stretch_from_ma20_pct >= 10 or return_20d_pct >= 24 or curr_pct_change >= 6.5)
-        broken_downtrend = bool(
-            return_20d_pct <= -14
-            or from_20d_high_pct <= -22
-            or (ma20 > 0 and ma60 > 0 and close_price < ma20 * 0.96 and ma20 < ma60)
-        )
-        rebound_day = bool(curr_pct_change > 0.6 and prev_pct_change < 0)
-        oversold = bool(rsi <= 35)
-        macd_repair = bool(macd_hist >= -0.03)
-        pullback_score = (
-            (24 if oversold else 0)
-            + (18 if near_lower_band else 0)
-            + (16 if rebound_day else 0)
-            + (12 if macd_repair else 0)
-            + (8 if reclaim_middle_band else 0)
-        )
+        rsi = self._safe_float(feature_payload.get("rsi"), 50)
+        macd_hist = self._safe_float(feature_payload.get("macd_hist"), 0)
+        close_price = self._safe_float(feature_payload.get("close_price"), current_price)
+        ma5 = self._safe_float(feature_payload.get("ma5"), close_price)
+        ma10 = self._safe_float(feature_payload.get("ma10"), close_price)
+        ma20 = self._safe_float(feature_payload.get("ma20"), close_price)
+        ma60 = self._safe_float(feature_payload.get("ma60"), close_price)
+        volume_ratio = self._safe_float(feature_payload.get("volume_ratio"), 1.0)
+        near_lower_band = bool(feature_payload.get("near_lower_band"))
+        reclaim_middle_band = bool(feature_payload.get("reclaim_middle_band"))
+        prev_pct_change = self._safe_float(feature_payload.get("prev_pct_change"), 0.0)
+        curr_pct_change = self._safe_float(feature_payload.get("curr_pct_change"), 0.0)
+        return_5d_pct = self._safe_float(feature_payload.get("return_5d_pct"), 0.0)
+        return_20d_pct = self._safe_float(feature_payload.get("return_20d_pct"), 0.0)
+        from_20d_high_pct = self._safe_float(feature_payload.get("from_20d_high_pct"), 0.0)
+        ma_alignment = int(self._safe_float(feature_payload.get("ma_alignment"), 0.0))
+        stretch_from_ma20_pct = self._safe_float(feature_payload.get("stretch_from_ma20_pct"), 0.0)
+        overheated = bool(feature_payload.get("overheated"))
+        broken_downtrend = bool(feature_payload.get("broken_downtrend"))
+        rebound_day = bool(feature_payload.get("rebound_day"))
+        oversold = bool(feature_payload.get("oversold"))
+        macd_repair = bool(feature_payload.get("macd_repair"))
+        pullback_score = self._safe_float(feature_payload.get("pullback_score"), 0.0)
         if strategy == "pullback_rebound":
             up_prob = self._clamp(up_prob - 0.08 + pullback_score / 180.0 + self._clamp(main_net_inflow_yi * 0.01, -0.04, 0.04), 0.05, 0.95)
             dd_prob = self._clamp(dd_prob + 0.05 - pullback_score / 220.0, 0.05, 0.90)
@@ -1078,6 +1742,10 @@ class CoachService:
         disqualify_buy = False
         disqualify_watch = False
         structure_penalty = 0.0
+
+        if money_flow_quality != "real":
+            quality_notes.append("资金流为代理或不可用：资金面只作弱参考，不支持高置信买入")
+            structure_penalty += 4.0 if money_flow_quality == "proxy" else 8.0
 
         if broken_downtrend:
             quality_notes.append("趋势结构破位：20日跌幅/高位回撤过大或价格跌破中期均线")
@@ -1143,6 +1811,8 @@ class CoachService:
             dd_prob = self._clamp(dd_prob + structure_penalty / 320.0, 0.08, 0.90)
             quality_score = self._clamp(quality_score - structure_penalty, 0, 100)
             signal_score -= structure_penalty * 0.65
+            if money_flow_quality == "unavailable":
+                disqualify_buy = True
         # 当前概率仍是量价/资讯代理，不允许展示成“几乎确定”的胜率。
         up_prob = self._clamp(up_prob, 0.05, 0.80)
         dd_prob = self._clamp(dd_prob, 0.10, 0.90)
@@ -1194,6 +1864,13 @@ class CoachService:
             execution_penalty += 4.0
 
         edge_score = self._clamp(48 + expected_edge_pct * 6.5 + (profit_factor_proxy - 1) * 15 - execution_penalty, 0, 100)
+        score_reliability_penalty = 0.0
+        if money_flow_quality == "proxy":
+            score_reliability_penalty += 5.0
+            flow_score = self._clamp(50 + (flow_score - 50) * 0.55, 0, 100)
+        elif money_flow_quality == "unavailable":
+            score_reliability_penalty += 9.0
+            flow_score = 50.0
         flow_score = self._clamp(flow_score - execution_penalty * 0.35, 0, 100)
         turnover_score = self._clamp(turnover_score - execution_penalty * 0.25, 0, 100)
         quality_score = self._clamp(quality_score * 0.68 + edge_score * 0.32, 0, 100)
@@ -1338,6 +2015,8 @@ class CoachService:
                     + news_display_score * 0.10
                 )
 
+        total_score = self._clamp(total_score - score_reliability_penalty, 0, 100)
+
         ml_enrichment: Dict[str, Any] = {}
         if self.ml_model_service:
             try:
@@ -1375,11 +2054,14 @@ class CoachService:
         expected_return = round((up_prob - dd_prob) * expected_mult, 2)
 
         now_date = datetime.now().strftime("%Y-%m-%d")
+        display_score = round(self._clamp(total_score, 0, 100), 2)
         return {
             "pick_id": f"{now_date}-{symbol}-S1",
             "symbol": symbol,
             "name": quote.get("name", symbol),
+            "industry": industry_name,
             "action": action,
+            "score": display_score,
             "up_prob": round(up_prob, 4),
             "dd_prob": round(dd_prob, 4),
             "confidence_level": confidence,
@@ -1402,7 +2084,10 @@ class CoachService:
                 "main_net_inflow_yi": round(main_net_inflow_yi, 3),
                 "turnover_rate": round(turnover_rate, 3),
                 "money_flow_source": money_flow_source,
+                "money_flow_quality": money_flow_quality,
             },
+            "money_flow_quality": money_flow_quality,
+            "money_flow_confidence": money_flow_confidence,
             "news_factor": news_factor,
             "evidence_summary": {
                 "strategy_code": strategy,
@@ -1413,6 +2098,7 @@ class CoachService:
                 "state_tag": state_tag,
                 "quality_gate_passed": not disqualify_buy,
                 "quality_notes": quality_notes[:4],
+                "score_reliability_penalty": round(score_reliability_penalty, 2),
             },
             "score_breakdown": {
                 "trend": round(trend_score, 2),
@@ -1421,7 +2107,7 @@ class CoachService:
                 "quality": round(quality_score, 2),
                 "risk_adjusted": round(risk_adjusted_score, 2),
                 "news": round(news_display_score, 2),
-                "total": round(self._clamp(total_score, 0, 100), 2),
+                "total": display_score,
             },
             "teaching_points": [
                 "先看市场状态，再决定是否进攻",
@@ -1432,22 +2118,26 @@ class CoachService:
         }
 
     def _rank_score(self, pick: Dict[str, Any], risk_level: str) -> float:
+        if self.scoring_service:
+            return self.scoring_service.rank_score(pick, risk_level)
         up_prob = float(pick.get("up_prob", 0))
         dd_prob = float(pick.get("dd_prob", 1))
         total_score = float((pick.get("score_breakdown") or {}).get("total", 0))
         risk_adjusted = float((pick.get("score_breakdown") or {}).get("risk_adjusted", 0))
         edge_pct = float(pick.get("expected_edge_pct", 0) or 0)
         profit_factor = float(pick.get("profit_factor_proxy", 1) or 1)
+        theme_score = self._safe_float(pick.get("theme_rank_score"), 0)
+        theme_component = theme_score if theme_score > 0 else 35.0
         edge_score = self._clamp(50 + edge_pct * 6, 0, 100)
         pf_score = self._clamp(45 + (profit_factor - 1) * 22, 0, 100)
         anti_dd_score = (1 - dd_prob) * 100
         up_score = up_prob * 100
 
         if risk_level == "low":
-            return anti_dd_score * 0.34 + edge_score * 0.24 + risk_adjusted * 0.22 + pf_score * 0.10 + total_score * 0.10
+            return anti_dd_score * 0.30 + edge_score * 0.22 + risk_adjusted * 0.21 + pf_score * 0.09 + total_score * 0.10 + theme_component * 0.08
         if risk_level == "high":
-            return up_score * 0.22 + edge_score * 0.30 + pf_score * 0.18 + total_score * 0.18 + anti_dd_score * 0.12
-        return up_score * 0.20 + anti_dd_score * 0.20 + edge_score * 0.28 + pf_score * 0.14 + total_score * 0.18
+            return up_score * 0.20 + edge_score * 0.27 + pf_score * 0.16 + total_score * 0.16 + anti_dd_score * 0.10 + theme_component * 0.11
+        return up_score * 0.18 + anti_dd_score * 0.18 + edge_score * 0.25 + pf_score * 0.13 + total_score * 0.17 + theme_component * 0.09
 
     def _risk_specific_pick_sort_key(self, pick: Dict[str, Any], risk_level: str) -> float:
         """风险等级必须改变排序偏好，而不只是改变文案。
@@ -1456,6 +2146,8 @@ class CoachService:
         中风险：保持赔率/胜率/风险均衡。
         高风险：优先弹性、换手活跃度和预期收益，允许更高波动。
         """
+        if self.scoring_service:
+            return self.scoring_service.risk_specific_sort_key(pick, risk_level)
         up_prob = self._safe_float(pick.get("up_prob"), 0)
         dd_prob = self._safe_float(pick.get("dd_prob"), 1)
         expected_return = self._safe_float(pick.get("expected_return_pct"), 0)
@@ -1469,6 +2161,8 @@ class CoachService:
         metrics = pick.get("market_metrics") or {}
         turnover = self._safe_float(metrics.get("turnover_rate"), 0)
         flow_yi = self._safe_float(metrics.get("main_net_inflow_yi"), 0)
+        theme_score = self._safe_float(pick.get("theme_rank_score"), 0)
+        theme_component = theme_score if theme_score > 0 else 35.0
         symbol = str(pick.get("symbol") or "")
         board_penalty = 4.0 if symbol.startswith(("300", "688")) else 0.0
 
@@ -1481,6 +2175,7 @@ class CoachService:
                 + self._clamp(turnover_stability, 0, 100) * 0.10
                 + self._clamp(flow_yi * 8 + 50, 0, 100) * 0.08
                 + total_score * 0.04
+                + theme_component * 0.08
                 - board_penalty
             )
         if risk_level == "high":
@@ -1499,11 +2194,14 @@ class CoachService:
                 + watch_bonus
                 + active_bonus
                 + growth_board_bonus
+                + theme_component * 0.14
                 - dd_prob * 6
             )
         return self._rank_score(pick, risk_level)
 
     def _apply_risk_specific_selection(self, picks: List[Dict[str, Any]], risk_level: str) -> List[Dict[str, Any]]:
+        if self.scoring_service:
+            return self.scoring_service.apply_risk_specific_selection(picks, risk_level)
         if not picks:
             return []
 
@@ -1558,6 +2256,9 @@ class CoachService:
 
     def _calibrate_pick_scores(self, picks: List[Dict[str, Any]], market_state: Dict[str, Any]) -> None:
         """将原始总分映射为更可信的展示分，降低纯相对排名的误导。"""
+        if self.scoring_service:
+            self.scoring_service.calibrate_pick_scores(picks, market_state)
+            return
         if not picks:
             return
 
@@ -1631,7 +2332,145 @@ class CoachService:
                 100,
             )
             breakdown["total"] = round(display_total, 2)
+            breakdown["pre_theme_total"] = breakdown["total"]
             pick["score_breakdown"] = breakdown
+            pick["score"] = breakdown["total"]
+
+    def _apply_universe_quality_guard(self, picks: List[Dict[str, Any]], universe_meta: Dict[str, Any]) -> None:
+        """数据源降级时降低展示分和执行级别，避免固定兜底池产生虚假高分。"""
+        if self.scoring_service:
+            self.scoring_service.apply_universe_quality_guard(picks, universe_meta)
+            return
+        if not picks:
+            return
+        source = str((universe_meta or {}).get("source") or "")
+        snapshot_count = int(self._safe_float((universe_meta or {}).get("snapshot_count"), 0))
+        is_fallback = source.startswith("fallback_") or snapshot_count <= 0
+        if not is_fallback:
+            return
+
+        for pick in picks:
+            breakdown = pick.get("score_breakdown") or {}
+            penalty = 7.0
+            if pick.get("money_flow_quality") != "real":
+                penalty += 4.0
+            if not pick.get("theme_tags") and not pick.get("matched_theme_ids"):
+                penalty += 2.0
+            raw_total = self._safe_float(breakdown.get("total"), 0)
+            capped = min(raw_total - penalty, 78.0 if pick.get("money_flow_quality") != "real" else 82.0)
+            breakdown["total"] = round(self._clamp(capped, 0, 100), 2)
+            breakdown["universe_quality_penalty"] = round(penalty, 2)
+            pick["score_breakdown"] = breakdown
+            pick["score"] = breakdown["total"]
+            pick["data_quality_warning"] = "全A快照不可用，当前来自兜底候选池；评分已按数据置信度降权。"
+            if pick.get("action") == "buy" and pick.get("money_flow_quality") != "real":
+                pick["action"] = "watch"
+                pick["position_pct"] = round(self._safe_float(pick.get("position_pct"), 0) * 0.5, 2)
+                risks = pick.setdefault("risks", [])
+                risks.insert(0, "数据源降级且资金流非真实数据，暂不升级为核心买入。")
+
+    def _upgrade_final_money_flow(self, picks: List[Dict[str, Any]]) -> None:
+        """Fetch real money-flow for final visible picks only.
+
+        Candidate prefiltering may use quote-derived proxy factors for speed, but
+        the final cards should prefer real money-flow when the data source is
+        available.
+        """
+        targets = [p for p in (picks or []) if p.get("symbol") and p.get("money_flow_quality") != "real"]
+        if not targets:
+            return
+        max_workers = min(4, len(targets))
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        future_map = {
+            executor.submit(self.data_source_manager.get_money_flow, pick.get("symbol"), 3): pick
+            for pick in targets
+        }
+        try:
+            completed, pending = wait(list(future_map.keys()), timeout=10)
+            for future in completed:
+                pick = future_map.get(future)
+                if not pick:
+                    continue
+                try:
+                    money_flow = future.result()
+                except Exception:
+                    money_flow = None
+                if money_flow:
+                    self._apply_money_flow_to_pick(pick, money_flow)
+            for future in pending:
+                future.cancel()
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def _apply_money_flow_to_pick(self, pick: Dict[str, Any], money_flow: Dict[str, Any]) -> None:
+        if self.scoring_service:
+            repricing = self.scoring_service.apply_money_flow_to_pick(pick, money_flow)
+            quality = repricing.get("quality") or ("proxy" if money_flow.get("quality") == "proxy" else "real")
+            source = repricing.get("source") or str(money_flow.get("source") or "remote")
+            try:
+                self.store.upsert_money_flow_snapshot(
+                    trade_date=self._recommendation_trade_date(),
+                    symbol=str(pick.get("symbol") or money_flow.get("symbol") or ""),
+                    payload={**money_flow, "quality": quality, "available": True, "source": source},
+                    created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                )
+            except Exception:
+                pass
+            return
+
+        quality = "proxy" if money_flow.get("quality") == "proxy" else "real"
+        source = str(money_flow.get("source") or "remote")
+        main_net_inflow_yi = float(money_flow.get("main_net_inflow") or 0) / 100000000
+        confidence = 1.0 if quality == "real" else 0.45
+        metrics = pick.setdefault("market_metrics", {})
+        old_flow_yi = self._safe_float(metrics.get("main_net_inflow_yi"), 0)
+        metrics.update(
+            {
+                "main_net_inflow_yi": round(main_net_inflow_yi, 3),
+                "money_flow_source": source,
+                "money_flow_quality": quality,
+                "money_flow_display_mode": "proxy" if quality == "proxy" else "normal",
+            }
+        )
+        pick["money_flow_quality"] = quality
+        pick["money_flow_confidence"] = confidence
+        pick["money_flow_source"] = source
+        pick["money_flow_display_mode"] = "proxy" if quality == "proxy" else "normal"
+
+        breakdown = pick.get("score_breakdown") or {}
+        old_flow_score = self._safe_float(breakdown.get("money_flow"), 50)
+        flow_multiplier = 8 if quality == "real" else 3
+        new_flow_score = self._clamp(50 + main_net_inflow_yi * flow_multiplier, 0, 100)
+        breakdown["money_flow"] = round(new_flow_score, 2)
+        breakdown["money_flow_repriced"] = True
+        breakdown["money_flow_source"] = source
+        total = self._safe_float(breakdown.get("total"), 0)
+        breakdown["total"] = round(self._clamp(total + (new_flow_score - old_flow_score) * 0.08, 0, 100), 2)
+        pick["score_breakdown"] = breakdown
+        pick["score"] = breakdown["total"]
+
+        reasons = pick.setdefault("reasons", [])
+        label = "真实资金流" if quality == "real" else "代理资金强度"
+        flow_text = f"{label}净流入 {main_net_inflow_yi:.2f} 亿" if main_net_inflow_yi >= 0 else f"{label}净流出 {abs(main_net_inflow_yi):.2f} 亿"
+        if flow_text not in reasons:
+            reasons.append(flow_text)
+        if quality == "real":
+            risks = [
+                risk for risk in (pick.get("risks") or [])
+                if "资金流为代理或不可用" not in str(risk)
+            ]
+            if old_flow_yi >= 0 and main_net_inflow_yi < 0:
+                risks.insert(0, "真实资金流转为净流出，需降低执行优先级。")
+            pick["risks"] = risks
+        try:
+            self.store.upsert_money_flow_snapshot(
+                trade_date=self._recommendation_trade_date(),
+                symbol=str(pick.get("symbol") or money_flow.get("symbol") or ""),
+                payload={**money_flow, "quality": quality, "available": True, "source": source},
+                created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+        except Exception:
+            pass
 
     def _build_pick_decision(
         self,
@@ -1690,6 +2529,14 @@ class CoachService:
             reason.append("最近回测仍有未通过项：" + "、".join(str(x.get("label") or x.get("key") or x) for x in failed_checks[:2]))
         if not reason and real_money_allowed:
             reason.append("策略证据、赔率和回撤条件均满足当前准入要求")
+        if pick.get("data_quality_warning"):
+            reason.insert(0, pick.get("data_quality_warning"))
+            if grade in {"A", "B"}:
+                grade = "C"
+                level = "数据降级观察"
+                executable = False
+                real_money_allowed = False
+                mode = "watch_only"
 
         return {
             "grade": grade,
@@ -1878,7 +2725,7 @@ class CoachService:
         if strategy_config.get("max_position_pct"):
             risk_profile["max_position_pct"] = float(strategy_config["max_position_pct"])
 
-        trade_date = datetime.now().strftime("%Y-%m-%d")
+        trade_date = self._recommendation_trade_date()
         level = risk_profile.get("risk_level", "medium")
         score_threshold = self._safe_float(strategy_config.get("score_threshold"), 0)
         cache_key = f"{trade_date}:{user_id}:{level}:{strategy_code}:{int(score_threshold)}"
@@ -1903,6 +2750,12 @@ class CoachService:
             cached_result = copy.deepcopy(cache_item["data"])
             all_cached_picks = cached_result.get("picks", [])
             cached_result["picks"] = all_cached_picks[:max_count]
+            cached_meta = cached_result.get("universe_meta") or {}
+            cached_counts = cached_meta.get("pipeline_counts") or {}
+            if isinstance(cached_counts, dict):
+                cached_counts["visible_output"] = len(cached_result["picks"])
+                cached_meta["pipeline_counts"] = cached_counts
+                cached_result["universe_meta"] = cached_meta
             cached_result["no_trade"] = len(cached_result["picks"]) == 0
             cached_result["no_trade_reason"] = (
                 "当前市场与策略条件不足，建议今日不交易"
@@ -1916,6 +2769,10 @@ class CoachService:
                     market_state=cached_result.get("market_state") or {},
                     risk_profile=cached_result.get("risk_profile") or {},
                 )
+            cached_result["status"] = "cached"
+            cached_result["is_refreshing"] = bool(self._refresh_state.get("is_refreshing"))
+            cached_result["data_quality"] = self._build_data_quality(cached_result)
+            cached_result["data_diagnostics"] = self._build_data_diagnostics(cached_result)
             self._attach_user_actions(cached_result["picks"], user_id)
             return cached_result
 
@@ -1928,7 +2785,21 @@ class CoachService:
             strategy_code=strategy_code,
         )
         candidate_rows = universe_result.get("candidates", [])
+        original_candidate_rows = list(candidate_rows)
+        theme_watchlist = universe_result.get("theme_watchlist") or []
         universe_meta = universe_result.get("meta", {})
+        snapshot_count = int(self._safe_float((universe_meta or {}).get("snapshot_count"), 0))
+        if snapshot_count < 500:
+            result = self._build_degraded_today_result(
+                trade_date=trade_date,
+                market_state=market_state,
+                risk_profile=risk_profile,
+                universe_meta=universe_meta,
+                theme_watchlist=theme_watchlist,
+                user_id=user_id,
+            )
+            result["picks"] = result["picks"][:max_count]
+            return result
 
         # 根据策略配置扩大深度分析池，避免只分析过小样本导致高分不够可靠。
         if level == "high":
@@ -1941,6 +2812,9 @@ class CoachService:
         candidate_rows = candidate_rows[: analyze_budget]
         if isinstance(universe_meta, dict):
             universe_meta["analyzed_count"] = len(candidate_rows)
+            pipeline_counts = universe_meta.setdefault("pipeline_counts", {})
+            if isinstance(pipeline_counts, dict):
+                pipeline_counts["analyzed"] = len(candidate_rows)
 
         max_workers = min(6, max(1, len(candidate_rows)))
         futures = []
@@ -1962,10 +2836,15 @@ class CoachService:
             if isinstance(universe_meta, dict):
                 universe_meta["analysis_completed_count"] = len(completed)
                 universe_meta["analysis_timeout_count"] = len(pending)
+                pipeline_counts = universe_meta.setdefault("pipeline_counts", {})
+                if isinstance(pipeline_counts, dict):
+                    pipeline_counts["analysis_completed"] = len(completed)
+                    pipeline_counts["analysis_timeout"] = len(pending)
             for future in completed:
                 try:
                     pick = future.result()
                     if pick:
+                        pick["pick_id"] = f"{trade_date}-{pick.get('symbol')}-S1"
                         picks.append(pick)
                 except Exception:
                     # 单票失败不影响整体结果（容错）
@@ -1975,6 +2854,10 @@ class CoachService:
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 
+        analyzed_picks_before_filters = copy.deepcopy(picks)
+        market_theme_payload = self._get_market_theme_context(limit=12)
+        self._apply_theme_alignment(picks, original_candidate_rows, market_theme_payload)
+        analyzed_picks_before_filters = copy.deepcopy(picks)
         picks = self._apply_risk_specific_selection(picks, level)
 
         if market_state["state_tag"] == "defensive":
@@ -1993,6 +2876,7 @@ class CoachService:
             picks = [p for p in picks if p.get("pick_id") not in ignored_pick_ids]
 
         self._calibrate_pick_scores(picks, market_state)
+        self._apply_universe_quality_guard(picks, universe_meta)
         picks = self._apply_risk_specific_selection(picks, level)
         effective_score_threshold: Optional[float] = None
         if 50 <= score_threshold <= 95:
@@ -2026,6 +2910,28 @@ class CoachService:
         all_picks = picks[:display_cap]
         for i, item in enumerate(all_picks, start=1):
             item["rank_no"] = i
+            item["exclusion_reason"] = None
+        self._upgrade_final_money_flow(all_picks)
+        self._apply_theme_alignment(all_picks, original_candidate_rows, market_theme_payload)
+        all_picks.sort(key=lambda item: self._safe_float((item.get("score_breakdown") or {}).get("total"), 0), reverse=True)
+        for i, item in enumerate(all_picks, start=1):
+            item["rank_no"] = i
+        excluded_examples = self._build_excluded_examples(
+            theme_watchlist,
+            analyzed_picks_before_filters,
+            all_picks,
+            original_candidate_rows,
+        )
+        if isinstance(universe_meta, dict):
+            universe_meta["theme_watch_count"] = len(theme_watchlist)
+            universe_meta["excluded_examples_count"] = len(excluded_examples)
+            universe_meta["market_theme_status"] = market_theme_payload.get("status")
+            universe_meta["market_theme_count"] = len(market_theme_payload.get("theme_rank") or [])
+            pipeline_counts = universe_meta.setdefault("pipeline_counts", {})
+            if isinstance(pipeline_counts, dict):
+                pipeline_counts["strict_buy"] = len([p for p in all_picks if p.get("action") == "buy"])
+                pipeline_counts["final_output"] = len(all_picks)
+                pipeline_counts["excluded_examples"] = len(excluded_examples)
 
         self._pick_history[trade_date] = copy.deepcopy(all_picks)
         strategy_health = {
@@ -2085,7 +2991,10 @@ class CoachService:
             pass
 
         full_result = {
+            "status": "fresh",
             "trade_date": trade_date,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "is_refreshing": bool(self._refresh_state.get("is_refreshing")),
             "market_state": market_state,
             "risk_profile": risk_profile,
             "universe_meta": universe_meta,
@@ -2102,10 +3011,14 @@ class CoachService:
                     "max_position_pct": strategy_config.get("max_position_pct"),
                 },
             },
+            "theme_watchlist": theme_watchlist,
+            "excluded_examples": excluded_examples,
             "picks": all_picks,
             "no_trade": len(all_picks) == 0,
             "no_trade_reason": "当前市场与策略条件不足，建议今日不交易" if len(all_picks) == 0 else None,
         }
+        full_result["data_quality"] = self._build_data_quality(full_result)
+        full_result["data_diagnostics"] = self._build_data_diagnostics(full_result)
 
         self._daily_snapshots[trade_date] = copy.deepcopy(full_result)
         if self._today_picks_cache_ttl_seconds > 0:
@@ -2116,15 +3029,43 @@ class CoachService:
 
         result = copy.deepcopy(full_result)
         result["picks"] = result["picks"][:max_count]
+        result_meta = result.get("universe_meta") or {}
+        result_counts = result_meta.get("pipeline_counts") or {}
+        if isinstance(result_counts, dict):
+            result_counts["visible_output"] = len(result["picks"])
+            result_meta["pipeline_counts"] = result_counts
+            result["universe_meta"] = result_meta
+        result["data_quality"] = self._build_data_quality(result)
+        result["data_diagnostics"] = self._build_data_diagnostics(result)
         self._attach_user_actions(result["picks"], user_id)
         return result
 
     def get_pick_detail(self, pick_id: str, user_id: str = "default", risk_level: Optional[str] = None) -> Optional[Dict[str, Any]]:
         # 优先从 pick_id 对应日期查找
         trade_date = pick_id[:10] if len(pick_id) >= 10 else datetime.now().strftime("%Y-%m-%d")
+        snapshot_row = self.store.get_pick_snapshot(pick_id, user_id=user_id)
+        if snapshot_row and snapshot_row.get("snapshot"):
+            snapshot = snapshot_row.get("snapshot") or {}
+            result = {
+                "trade_date": snapshot_row.get("trade_date"),
+                "market_state": (self._latest_today_snapshot() or {}).get("market_state") or self.get_market_state_today(),
+                **snapshot,
+            }
+            if self.news_service and result.get("symbol"):
+                try:
+                    result["news_factor"] = self.news_service.get_symbol_news_summary(
+                        symbol=result.get("symbol"),
+                        industry=(result.get("industry") or self._infer_board_industry(result.get("symbol"))),
+                        allow_remote=False,
+                    )
+                except Exception:
+                    pass
+            result["user_action"] = self._get_latest_action_map(user_id).get(pick_id)
+            return result
+
         data = self._daily_snapshots.get(trade_date)
         if not data:
-            data = self.get_today_picks(max_count=30, user_id=user_id, risk_level=risk_level)
+            data = self.get_cached_today_picks(max_count=60, user_id=user_id) or {}
 
         for item in data.get("picks", []):
             if item["pick_id"] == pick_id:
@@ -2138,7 +3079,7 @@ class CoachService:
                         result["news_factor"] = self.news_service.get_symbol_news_summary(
                             symbol=result.get("symbol"),
                             industry=(result.get("industry") or self._infer_board_industry(result.get("symbol"))),
-                            allow_remote=True,
+                            allow_remote=False,
                         )
                     except Exception:
                         pass
@@ -2148,6 +3089,21 @@ class CoachService:
 
         symbol = self._extract_symbol_from_pick_id(pick_id)
         if symbol:
+            try:
+                symbol_snapshot_row = self.store.get_latest_pick_snapshot_by_symbol(symbol, user_id=user_id)
+            except Exception:
+                symbol_snapshot_row = None
+            symbol_snapshot = (symbol_snapshot_row or {}).get("snapshot") or {}
+            if symbol_snapshot:
+                result = {
+                    "trade_date": (symbol_snapshot_row or {}).get("trade_date"),
+                    "market_state": (self._latest_today_snapshot() or {}).get("market_state") or self.get_market_state_today(),
+                    **symbol_snapshot,
+                    "detail_status": "symbol_snapshot_fallback",
+                    "detail_message": "未找到原推荐ID，已展示该股票最近一次推荐快照。",
+                }
+                result["user_action"] = self._get_latest_action_map(user_id).get(symbol_snapshot.get("pick_id"))
+                return result
             for item in data.get("picks", []):
                 if item.get("symbol") == symbol:
                     result = {
@@ -2160,32 +3116,13 @@ class CoachService:
                             result["news_factor"] = self.news_service.get_symbol_news_summary(
                                 symbol=result.get("symbol"),
                                 industry=(result.get("industry") or self._infer_board_industry(result.get("symbol"))),
-                                allow_remote=True,
+                                allow_remote=False,
                             )
                         except Exception:
                             pass
                     action = self._get_latest_action_map(user_id).get(item.get("pick_id"))
                     result["user_action"] = action
                     return result
-        snapshot_row = self.store.get_pick_snapshot(pick_id, user_id=user_id)
-        if snapshot_row and snapshot_row.get("snapshot"):
-            snapshot = snapshot_row.get("snapshot") or {}
-            result = {
-                "trade_date": snapshot_row.get("trade_date"),
-                "market_state": data.get("market_state") or self.get_market_state_today(),
-                **snapshot,
-            }
-            if self.news_service and result.get("symbol"):
-                try:
-                    result["news_factor"] = self.news_service.get_symbol_news_summary(
-                        symbol=result.get("symbol"),
-                        industry=(result.get("industry") or self._infer_board_industry(result.get("symbol"))),
-                        allow_remote=True,
-                    )
-                except Exception:
-                    pass
-            result["user_action"] = self._get_latest_action_map(user_id).get(pick_id)
-            return result
         return None
 
     def get_symbol_strategy_context(
@@ -2204,6 +3141,41 @@ class CoachService:
         if len(code) != 6 or not code.isdigit():
             return {"symbol": code, "available": False, "reason": "invalid_symbol"}
 
+        def _context_from_pick(item: Dict[str, Any], source: str, trade_date: Optional[str] = None) -> Dict[str, Any]:
+            return {
+                "symbol": code,
+                "available": True,
+                "source": source,
+                "trade_date": trade_date,
+                "pick_id": item.get("pick_id"),
+                "name": item.get("name"),
+                "action": item.get("action"),
+                "up_prob": item.get("up_prob"),
+                "dd_prob": item.get("dd_prob"),
+                "expected_return_pct": item.get("expected_return_pct"),
+                "expected_edge_pct": item.get("expected_edge_pct"),
+                "profit_factor_proxy": item.get("profit_factor_proxy"),
+                "confidence_level": item.get("confidence_level"),
+                "entry_range": item.get("entry_range"),
+                "take_profit": item.get("take_profit"),
+                "stop_loss": item.get("stop_loss"),
+                "position_pct": item.get("position_pct"),
+                "horizon_days": item.get("horizon_days"),
+                "invalid_conditions": item.get("invalid_conditions") or [],
+                "teaching_points": item.get("teaching_points") or [],
+                "score_breakdown": item.get("score_breakdown") or {},
+                "reasons": item.get("reasons") or [],
+                "risks": item.get("risks") or [],
+                "strategy_code": (item.get("evidence_summary") or {}).get("strategy_code"),
+                "evidence_summary": item.get("evidence_summary") or {},
+                "decision": item.get("decision"),
+                "probability_model": item.get("probability_model"),
+                "market_metrics": item.get("market_metrics") or {},
+                "model_probability": item.get("model_probability"),
+                "factor_contributions": item.get("factor_contributions") or [],
+                "model_version_id": item.get("model_version_id"),
+            }
+
         action_ref = None
         try:
             for action in self.store.list_pick_actions(user_id=user_id, limit=500):
@@ -2215,56 +3187,22 @@ class CoachService:
             action_ref = None
 
         if action_ref and action_ref.get("pick_id"):
+            snapshot_row = self.store.get_pick_snapshot(action_ref.get("pick_id"), user_id=user_id)
+            snapshot = (snapshot_row or {}).get("snapshot") or {}
+            if snapshot.get("symbol") == code and snapshot.get("score_breakdown"):
+                return _context_from_pick(
+                    snapshot,
+                    source="latest_user_action_snapshot",
+                    trade_date=(snapshot_row or {}).get("trade_date"),
+                )
             detail = self.get_pick_detail(action_ref.get("pick_id"), user_id=user_id, risk_level=risk_level)
             if detail and detail.get("symbol") == code and detail.get("score_breakdown"):
-                return {
-                    "symbol": code,
-                    "available": True,
-                    "source": "latest_user_action",
-                    "pick_id": detail.get("pick_id"),
-                    "name": detail.get("name"),
-                    "action": detail.get("action"),
-                    "up_prob": detail.get("up_prob"),
-                    "dd_prob": detail.get("dd_prob"),
-                    "expected_return_pct": detail.get("expected_return_pct"),
-                    "score_breakdown": detail.get("score_breakdown") or {},
-                    "reasons": detail.get("reasons") or [],
-                    "risks": detail.get("risks") or [],
-                    "strategy_code": (detail.get("evidence_summary") or {}).get("strategy_code"),
-                    "evidence_summary": detail.get("evidence_summary") or {},
-                    "decision": detail.get("decision"),
-                    "probability_model": detail.get("probability_model"),
-                    "market_metrics": detail.get("market_metrics") or {},
-                    "model_probability": detail.get("model_probability"),
-                    "factor_contributions": detail.get("factor_contributions") or [],
-                    "model_version_id": detail.get("model_version_id"),
-                }
+                return _context_from_pick(detail, source="latest_user_action")
 
-        data = self.get_today_picks(max_count=40, user_id=user_id, risk_level=risk_level)
+        data = self.get_cached_today_picks(max_count=60, user_id=user_id) or {}
         for item in data.get("picks", []):
             if item.get("symbol") == code:
-                return {
-                    "symbol": code,
-                    "available": True,
-                    "source": "today_smart_screen",
-                    "pick_id": item.get("pick_id"),
-                    "name": item.get("name"),
-                    "action": item.get("action"),
-                    "up_prob": item.get("up_prob"),
-                    "dd_prob": item.get("dd_prob"),
-                    "expected_return_pct": item.get("expected_return_pct"),
-                    "score_breakdown": item.get("score_breakdown") or {},
-                    "reasons": item.get("reasons") or [],
-                    "risks": item.get("risks") or [],
-                    "strategy_code": (item.get("evidence_summary") or {}).get("strategy_code"),
-                    "evidence_summary": item.get("evidence_summary") or {},
-                    "decision": item.get("decision"),
-                    "probability_model": item.get("probability_model"),
-                    "market_metrics": item.get("market_metrics") or {},
-                    "model_probability": item.get("model_probability"),
-                    "factor_contributions": item.get("factor_contributions") or [],
-                    "model_version_id": item.get("model_version_id"),
-                }
+                return _context_from_pick(item, source="today_smart_screen")
 
         return {
             "symbol": code,
@@ -2285,10 +3223,121 @@ class CoachService:
                 continue
             valid_runs.append(result)
 
+        def _compact_config(config: Dict[str, Any]) -> Dict[str, Any]:
+            return {
+                "holding_days": config.get("holding_days"),
+                "score_threshold": config.get("score_threshold"),
+                "stop_profit_pct": config.get("stop_profit_pct"),
+                "stop_loss_pct": config.get("stop_loss_pct"),
+                "max_positions": config.get("max_positions"),
+                "universe_size": config.get("universe_size"),
+                "commission": config.get("commission"),
+                "slippage": config.get("slippage"),
+                "test_start": config.get("test_start"),
+                "test_end": config.get("test_end"),
+            }
+
+        def _evidence_hash(run: Dict[str, Any]) -> str:
+            payload = {
+                "run_id": run.get("run_id"),
+                "strategy_code": run.get("strategy_code"),
+                "config": _compact_config(run.get("config") or {}),
+                "diagnostics": run.get("diagnostics") or {},
+                "metrics": run.get("metrics") or {},
+            }
+            raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+            return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+        def _summarize_run(run: Dict[str, Any], include_samples: bool = True) -> Dict[str, Any]:
+            metrics = run.get("metrics") or {}
+            diagnostics = run.get("diagnostics") or {}
+            credibility = run.get("credibility") or {}
+            config = run.get("config") or {}
+            trade_rows = run.get("trades") or []
+            roundtrips = run.get("closed_roundtrips") or []
+            closed_count = int(diagnostics.get("closed_roundtrips") or len(roundtrips) or 0)
+            summary = {
+                "run_id": run.get("run_id"),
+                "started_at": run.get("started_at"),
+                "finished_at": run.get("finished_at"),
+                "status": run.get("status"),
+                "backtest_engine": run.get("backtest_engine") or "historical_replay_v1",
+                "metrics": metrics,
+                "diagnostics": diagnostics,
+                "evidence_hash": _evidence_hash(run),
+                "has_closed_trades": closed_count > 0,
+                "credibility": {
+                    "score": credibility.get("score"),
+                    "grade": credibility.get("grade"),
+                    "live_ready": bool(credibility.get("live_ready")),
+                    "summary": credibility.get("summary"),
+                    "failed_checks": (credibility.get("failed_checks") or [])[:5],
+                    "gate_checks": (credibility.get("gate_checks") or [])[:8],
+                },
+                "config": _compact_config(config),
+                "sample_summary": {
+                    "trade_count": int(diagnostics.get("trade_count") or 0),
+                    "closed_roundtrips": closed_count,
+                    "valid_history_symbols": int(diagnostics.get("valid_history_symbols") or 0),
+                    "universe_size": int(diagnostics.get("universe_size") or config.get("universe_size") or 0),
+                    "calendar_days": int(diagnostics.get("calendar_days") or 0),
+                    "avg_holding_days": self._safe_float(diagnostics.get("avg_holding_days"), 0.0),
+                    "avg_return_pct": self._safe_float(diagnostics.get("avg_return_pct"), 0.0),
+                },
+            }
+            if include_samples:
+                summary.update(
+                    {
+                        "recent_trades": trade_rows[-12:],
+                        "recent_roundtrips": roundtrips[-12:],
+                        "drawdown_curve": (run.get("drawdown_curve") or [])[-120:],
+                        "equity_curve": (run.get("equity_curve") or [])[-120:],
+                    }
+                )
+            return summary
+
+        execution_assumptions = {
+            "engine": "historical_replay_v1",
+            "scope": "strategy_level",
+            "buy_execution": "信号生成后的下一交易日开盘价买入，并计入滑点。",
+            "sell_execution": "触发止盈、止损、持有期或评分退出后，按当日收盘价近似卖出，并计入滑点。",
+            "cost_model": "回测使用配置中的 commission 和 slippage。",
+            "money_flow_caveat": "历史回放中的资金流因子包含量价代理，不等同于逐日真实主力资金流。",
+        }
+
         if not valid_runs:
             return {
                 "strategy_code": code,
                 "version_no": "derived-from-backtest",
+                "evidence_source": {
+                    "type": "unavailable",
+                    "label": "暂无有效历史回放证据",
+                    "display_scope": "unavailable",
+                    "is_verifiable": False,
+                },
+                "unavailable": True,
+                "proxy_model": None,
+                "display_run": None,
+                "latest_run": None,
+                "verification_target": {
+                    "type": "run_new_backtest",
+                    "path": f"/backtest?strategy_code={code}",
+                },
+                "execution_assumptions": execution_assumptions,
+                "sample_summary": {
+                    "sample_runs": 0,
+                    "closed_roundtrips": 0,
+                    "valid_history_symbols": 0,
+                    "calendar_days": 0,
+                },
+                "credibility_summary": {
+                    "score": None,
+                    "grade": None,
+                    "live_ready": False,
+                    "summary": "暂无可验证回测证据。",
+                    "failed_checks": ["暂无历史回放记录"],
+                    "gate_checks": [],
+                },
                 "overall": {
                     "annual_return": 0.0,
                     "max_drawdown": 0.0,
@@ -2296,6 +3345,8 @@ class CoachService:
                     "win_rate": 0.0,
                     "profit_loss_ratio": 0.0,
                     "sample_runs": 0,
+                    "closed_roundtrips": 0,
+                    "avg_return_pct": 0.0,
                 },
                 "by_state": [
                     {"state_tag": "offensive", "win_rate": 0.0, "max_drawdown": 0.0, "sample_count": 0},
@@ -2310,6 +3361,7 @@ class CoachService:
             }
 
         weighted = {"annual_return": 0.0, "max_drawdown": 0.0, "sharpe": 0.0, "win_rate": 0.0, "profit_loss_ratio": 0.0}
+        weighted_diagnostics = {"avg_return_pct": 0.0}
         total_weight = 0.0
         state_bucket: Dict[str, Dict[str, float]] = {
             "offensive": {"win_sum": 0.0, "dd_sum": 0.0, "weight": 0.0, "sample_count": 0.0},
@@ -2326,6 +3378,7 @@ class CoachService:
             total_closed_roundtrips += int(diagnostics.get("closed_roundtrips") or 0)
             for key in weighted.keys():
                 weighted[key] += self._safe_float(metrics.get(key), 0.0) * run_weight
+            weighted_diagnostics["avg_return_pct"] += self._safe_float(diagnostics.get("avg_return_pct"), 0.0) * run_weight
 
             for item in (run.get("by_state") or []):
                 tag = str(item.get("state_tag") or "")
@@ -2346,6 +3399,8 @@ class CoachService:
             "win_rate": round(weighted["win_rate"] / total_weight, 6),
             "profit_loss_ratio": round(weighted["profit_loss_ratio"] / total_weight, 6),
             "sample_runs": len(valid_runs),
+            "closed_roundtrips": total_closed_roundtrips,
+            "avg_return_pct": round(weighted_diagnostics["avg_return_pct"] / total_weight, 6),
         }
 
         by_state = []
@@ -2374,50 +3429,69 @@ class CoachService:
             )
 
         latest_run = valid_runs[0] if valid_runs else {}
-        latest_metrics = latest_run.get("metrics") or {}
-        latest_diagnostics = latest_run.get("diagnostics") or {}
-        latest_credibility = latest_run.get("credibility") or latest_credibility
-        latest_trade_rows = latest_run.get("trades") or []
-        latest_roundtrips = latest_run.get("closed_roundtrips") or []
-        latest_drawdown_curve = latest_run.get("drawdown_curve") or []
-        latest_equity_curve = latest_run.get("equity_curve") or []
-        latest_config = latest_run.get("config") or {}
-        latest_started_at = latest_run.get("started_at")
-        latest_run_id = latest_run.get("run_id")
+        display_run = next(
+            (
+                run for run in valid_runs
+                if int((run.get("diagnostics") or {}).get("closed_roundtrips") or len(run.get("closed_roundtrips") or []) or 0) > 0
+            ),
+            None,
+        )
+        latest_summary = _summarize_run(latest_run) if latest_run else None
+        display_summary = _summarize_run(display_run) if display_run else None
+        display_scope = "display_run" if display_summary else "overall"
+        source_label = "最近一次有闭环交易的历史回放" if display_summary else "多次历史回放总体聚合证据"
+        source_type = "historical_replay_run" if display_summary else "aggregate_backtest_evidence"
+        credibility_source = (display_summary or latest_summary or {}).get("credibility") or {}
+        sample_source = (display_summary or {}).get("sample_summary") or {}
+        verification_run_id = (display_summary or {}).get("run_id")
+        verification_path = (
+            f"/backtest?strategy_code={code}&run_id={verification_run_id}"
+            if verification_run_id
+            else f"/backtest?strategy_code={code}"
+        )
 
         return {
             "strategy_code": code,
             "version_no": "derived-from-backtest",
+            "evidence_source": {
+                "type": source_type,
+                "label": source_label,
+                "display_scope": display_scope,
+                "is_verifiable": True,
+                "run_id": verification_run_id,
+            },
+            "unavailable": False,
+            "proxy_model": None,
+            "verification_target": {
+                "type": "backtest_run" if verification_run_id else "strategy_evidence",
+                "run_id": verification_run_id,
+                "path": verification_path,
+            },
+            "execution_assumptions": execution_assumptions,
+            "sample_summary": {
+                "sample_runs": len(valid_runs),
+                "closed_roundtrips": total_closed_roundtrips,
+                "display_closed_roundtrips": int(sample_source.get("closed_roundtrips") or 0),
+                "valid_history_symbols": int(sample_source.get("valid_history_symbols") or 0),
+                "universe_size": int(sample_source.get("universe_size") or 0),
+                "calendar_days": int(sample_source.get("calendar_days") or 0),
+                "avg_holding_days": sample_source.get("avg_holding_days"),
+                "avg_return_pct": overall.get("avg_return_pct"),
+            },
+            "credibility_summary": {
+                "score": credibility_source.get("score"),
+                "grade": credibility_source.get("grade"),
+                "live_ready": bool(credibility_source.get("live_ready")),
+                "summary": credibility_source.get("summary"),
+                "failed_checks": credibility_source.get("failed_checks") or [],
+                "gate_checks": credibility_source.get("gate_checks") or [],
+            },
             "overall": overall,
             "by_state": by_state,
             "active_state": default_state,
-            "latest_run": {
-                "run_id": latest_run_id,
-                "started_at": latest_started_at,
-                "metrics": latest_metrics,
-                "diagnostics": latest_diagnostics,
-                "credibility": {
-                    "score": latest_credibility.get("score"),
-                    "grade": latest_credibility.get("grade"),
-                    "live_ready": bool(latest_credibility.get("live_ready")),
-                    "summary": latest_credibility.get("summary"),
-                    "failed_checks": (latest_credibility.get("failed_checks") or [])[:5],
-                },
-                "config": {
-                    "holding_days": latest_config.get("holding_days"),
-                    "score_threshold": latest_config.get("score_threshold"),
-                    "stop_profit_pct": latest_config.get("stop_profit_pct"),
-                    "stop_loss_pct": latest_config.get("stop_loss_pct"),
-                    "max_positions": latest_config.get("max_positions"),
-                    "universe_size": latest_config.get("universe_size"),
-                    "test_start": latest_config.get("test_start"),
-                    "test_end": latest_config.get("test_end"),
-                },
-                "recent_trades": latest_trade_rows[-12:],
-                "recent_roundtrips": latest_roundtrips[-12:],
-                "drawdown_curve": latest_drawdown_curve[-120:],
-                "equity_curve": latest_equity_curve[-120:],
-            },
+            "display_run": display_summary,
+            "latest_run": latest_summary,
+            "recent_runs": [_summarize_run(run, include_samples=False) for run in valid_runs[:12]],
             "notes": notes,
         }
 
@@ -2895,6 +3969,423 @@ class CoachService:
             ],
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
+
+    def _build_monitor_path(
+        self,
+        symbol: str,
+        entry_price: float,
+        selected_at: Optional[str],
+        current_price: float,
+    ) -> Dict[str, Any]:
+        entry_price = self._safe_float(entry_price, 0)
+        current_price = self._safe_float(current_price, 0)
+        if entry_price <= 0:
+            return {
+                "points": [],
+                "current_return_pct": 0.0,
+                "max_return_pct": 0.0,
+                "max_drawdown_pct": 0.0,
+                "data_quality": "unavailable",
+            }
+
+        selected_dt = self._parse_trade_time(selected_at) or datetime.now()
+        days = max(30, min(240, (datetime.now() - selected_dt).days + 10))
+        points: List[Dict[str, Any]] = []
+        try:
+            history = self.data_source_manager.get_history_data(symbol, days=days)
+        except Exception:
+            history = pd.DataFrame()
+
+        if history is not None and not history.empty:
+            selected_key = selected_dt.strftime("%Y%m%d")
+            for _, row in history.iterrows():
+                date_text = str(row.get("date") or row.get("trade_date") or "")
+                date_key = date_text.replace("-", "")[:8]
+                if len(date_key) == 8 and date_key < selected_key:
+                    continue
+                close_price = self._safe_float(row.get("close"), 0)
+                if close_price <= 0:
+                    continue
+                points.append(
+                    {
+                        "date": f"{date_key[:4]}-{date_key[4:6]}-{date_key[6:8]}" if len(date_key) == 8 else date_text,
+                        "price": round(close_price, 4),
+                        "return_pct": round((close_price / entry_price - 1) * 100, 4),
+                    }
+                )
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        if current_price > 0 and (not points or points[-1].get("date") != today):
+            points.append(
+                {
+                    "date": today,
+                    "price": round(current_price, 4),
+                    "return_pct": round((current_price / entry_price - 1) * 100, 4),
+                }
+            )
+
+        if not points:
+            points.append(
+                {
+                    "date": today,
+                    "price": round(current_price or entry_price, 4),
+                    "return_pct": round(((current_price or entry_price) / entry_price - 1) * 100, 4),
+                }
+            )
+
+        peak_price = entry_price
+        max_drawdown = 0.0
+        max_return = -999.0
+        for point in points:
+            price = self._safe_float(point.get("price"), entry_price)
+            peak_price = max(peak_price, price)
+            drawdown = (price / peak_price - 1) * 100 if peak_price > 0 else 0.0
+            max_drawdown = min(max_drawdown, drawdown)
+            max_return = max(max_return, self._safe_float(point.get("return_pct"), 0))
+
+        return {
+            "points": points[-80:],
+            "current_return_pct": round((self._safe_float(points[-1].get("price"), entry_price) / entry_price - 1) * 100, 4),
+            "max_return_pct": round(max(max_return, 0.0), 4),
+            "max_drawdown_pct": round(abs(max_drawdown), 4),
+            "data_quality": "history" if len(points) > 1 else "mark_only",
+        }
+
+    def _monitor_conclusion(
+        self,
+        track_type: str,
+        metrics: Dict[str, Any],
+        risk_status: Optional[str],
+        score: Optional[float],
+        money_flow_quality: str,
+    ) -> Dict[str, Any]:
+        ret = self._safe_float(metrics.get("current_return_pct"), 0)
+        max_dd = self._safe_float(metrics.get("max_drawdown_pct"), 0)
+        holding_days = int(self._safe_float(metrics.get("holding_days"), 0))
+
+        if track_type == "paper_position":
+            if risk_status == "stop_loss":
+                status, action = "suggest_exit", "建议退出"
+                reason = "已触发止损规则，应优先执行交易纪律。"
+            elif risk_status in {"warning"} or ret <= -3 or max_dd >= 8:
+                status, action = "risk_review", "风险复核"
+                reason = "浮亏或回撤进入警戒区，需复核入选逻辑是否仍成立。"
+            elif risk_status == "take_profit" or ret >= 10:
+                status, action = "risk_review", "止盈/保护利润"
+                reason = "收益达到较高区间，应评估分批止盈或移动止损。"
+            else:
+                status, action = "continue_hold", "继续持有"
+                reason = "收益和回撤仍在策略容忍范围内。"
+        else:
+            if ret >= 8:
+                status, action = "missed_opportunity", "错过机会"
+                reason = "观察后涨幅已明显兑现，说明策略可能过严或执行犹豫。"
+            elif ret <= -5 or max_dd >= 8:
+                status, action = "validation_failed", "验证失败"
+                reason = "观察后走势走弱，暂不应升级为买入。"
+            else:
+                status, action = "waiting_trigger", "等待触发"
+                reason = "尚未形成明确后验结果，继续等待入场或失效信号。"
+
+        flags = []
+        if score is None:
+            flags.append("缺少推荐快照")
+        elif self._safe_float(score, 0) < 70:
+            flags.append("入选分数偏低")
+        if money_flow_quality == "unavailable":
+            flags.append("资金流不可用")
+        if holding_days >= 20 and track_type == "paper_position":
+            flags.append("持有周期偏长")
+
+        return {
+            "status": status,
+            "label": action,
+            "reason": reason,
+            "flags": flags,
+        }
+
+    def get_monitor_positions(self, user_id: str = "default", persist: bool = False) -> Dict[str, Any]:
+        watchlist = self.get_watchlist(user_id=user_id)
+        portfolio = self.get_paper_portfolio(user_id=user_id, refresh_quotes=True)
+        position_map = {row.get("symbol"): row for row in portfolio.get("positions", [])}
+        items = watchlist.get("items") or []
+        symbols = [str(item.get("symbol") or "") for item in items if item.get("symbol")]
+        quote_map = self.data_source_manager.get_realtime_quotes_batch(list(dict.fromkeys(symbols))) if symbols else {}
+
+        rows: List[Dict[str, Any]] = []
+        for item in items:
+            symbol = str(item.get("symbol") or "")
+            if not symbol:
+                continue
+            pos = position_map.get(symbol)
+            track_type = "paper_position" if pos or item.get("action_type") == "paper_buy" else "watch_only"
+            quote = quote_map.get(symbol) or {}
+            current_price = self._safe_float(
+                (pos or {}).get("current_price")
+                or item.get("current_price")
+                or quote.get("price")
+                or item.get("action_price"),
+                0,
+            )
+            entry_range = item.get("entry_range") or []
+            entry_price = self._safe_float(
+                (pos or {}).get("avg_price")
+                or item.get("action_price")
+                or (entry_range[0] if isinstance(entry_range, list) and entry_range else None)
+                or current_price,
+                0,
+            )
+            selected_at = item.get("created_at") or (pos or {}).get("opened_at")
+            selected_dt = self._parse_trade_time(selected_at) or datetime.now()
+            holding_days = max((datetime.now() - selected_dt).days, 0)
+            path = self._build_monitor_path(symbol, entry_price, selected_at, current_price)
+
+            snap_row = {}
+            try:
+                snap_row = self.store.get_pick_snapshot(item.get("pick_id") or "", user_id=user_id) or {}
+            except Exception:
+                snap_row = {}
+            snap = snap_row.get("snapshot") or {}
+            score = item.get("score")
+            if score is None:
+                score = (snap.get("score_breakdown") or {}).get("total")
+            money_flow_quality = (
+                item.get("money_flow_quality")
+                or snap.get("money_flow_quality")
+                or ((snap.get("money_flow") or {}).get("quality"))
+                or "unavailable"
+            )
+            risk_status = (pos or {}).get("risk_status") or item.get("risk_status")
+            metrics = {
+                "entry_price": round(entry_price, 4) if entry_price else None,
+                "current_price": round(current_price, 4) if current_price else None,
+                "current_return_pct": path.get("current_return_pct"),
+                "max_return_pct": path.get("max_return_pct"),
+                "max_drawdown_pct": path.get("max_drawdown_pct"),
+                "holding_days": holding_days,
+                "qty": (pos or {}).get("qty") or item.get("position_qty"),
+                "market_value": (pos or {}).get("market_value") or item.get("market_value"),
+                "unrealized_pnl": (pos or {}).get("unrealized_pnl") or item.get("unrealized_pnl"),
+                "distance_to_stop_loss_pct": None,
+                "distance_to_take_profit_pct": None,
+            }
+            if current_price > 0 and (pos or {}).get("stop_loss"):
+                metrics["distance_to_stop_loss_pct"] = round((current_price / self._safe_float(pos.get("stop_loss"), current_price) - 1) * 100, 4)
+            if current_price > 0 and (pos or {}).get("take_profit"):
+                metrics["distance_to_take_profit_pct"] = round((self._safe_float(pos.get("take_profit"), current_price) / current_price - 1) * 100, 4)
+
+            conclusion = self._monitor_conclusion(
+                track_type=track_type,
+                metrics=metrics,
+                risk_status=risk_status,
+                score=score,
+                money_flow_quality=str(money_flow_quality),
+            )
+            data_quality = {
+                "price": "real_or_cached" if current_price > 0 else "unavailable",
+                "history": path.get("data_quality"),
+                "money_flow": money_flow_quality,
+                "snapshot": "available" if snap else "missing",
+            }
+            rows.append(
+                {
+                    "pick_id": item.get("pick_id"),
+                    "symbol": symbol,
+                    "name": item.get("name") or (pos or {}).get("name") or symbol,
+                    "track_type": track_type,
+                    "selected_at": selected_at,
+                    "score": score,
+                    "decision_grade": ((item.get("decision") or {}).get("grade") or (snap.get("decision") or {}).get("grade")),
+                    "up_prob": item.get("up_prob") if item.get("up_prob") is not None else snap.get("up_prob"),
+                    "dd_prob": item.get("dd_prob") if item.get("dd_prob") is not None else snap.get("dd_prob"),
+                    "stop_loss": (pos or {}).get("stop_loss") or item.get("stop_loss"),
+                    "take_profit": (pos or {}).get("take_profit") or item.get("take_profit"),
+                    "risk_status": risk_status or "normal",
+                    "risk_message": (pos or {}).get("risk_message") or item.get("risk_message"),
+                    "theme_tags": item.get("theme_tags") or snap.get("theme_tags") or [],
+                    "money_flow_quality": money_flow_quality,
+                    "metrics": metrics,
+                    "path": path.get("points", []),
+                    "conclusion": conclusion,
+                    "data_quality": data_quality,
+                }
+            )
+
+        rows.sort(
+            key=lambda row: (
+                row.get("conclusion", {}).get("status") in {"suggest_exit", "risk_review", "missed_opportunity"},
+                abs(self._safe_float(row.get("metrics", {}).get("current_return_pct"), 0)),
+            ),
+            reverse=True,
+        )
+        snapshot_date = datetime.now().strftime("%Y-%m-%d")
+        if persist:
+            self.store.save_monitor_snapshots(user_id=user_id, snapshot_date=snapshot_date, snapshots=rows)
+        return {"items": rows, "snapshot_date": snapshot_date, "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+    def _build_monitor_feedback(self, user_id: str, positions_payload: Dict[str, Any]) -> Dict[str, Any]:
+        items = positions_payload.get("items") or []
+        paper_items = [item for item in items if item.get("track_type") == "paper_position"]
+        watch_items = [item for item in items if item.get("track_type") == "watch_only"]
+        returns = [self._safe_float(item.get("metrics", {}).get("current_return_pct"), 0) for item in paper_items]
+        watch_returns = [self._safe_float(item.get("metrics", {}).get("current_return_pct"), 0) for item in watch_items]
+        risk_items = [item for item in items if item.get("conclusion", {}).get("status") in {"suggest_exit", "risk_review"}]
+        missed_items = [item for item in items if item.get("conclusion", {}).get("status") == "missed_opportunity"]
+        money_unavailable = [item for item in items if item.get("money_flow_quality") == "unavailable"]
+        max_drawdown = max([self._safe_float(item.get("metrics", {}).get("max_drawdown_pct"), 0) for item in items] or [0])
+        win_rate = (sum(1 for r in returns if r > 0) / len(returns)) if returns else 0.0
+        avg_return = mean(returns) if returns else 0.0
+        avg_watch_return = mean(watch_returns) if watch_returns else 0.0
+
+        diagnostics = self._build_trade_diagnostics(self.get_paper_trades(user_id=user_id, limit=500).get("items") or [])
+        closed_roundtrips = int(diagnostics.get("closed_roundtrips") or 0)
+
+        suggestions: List[Dict[str, Any]] = []
+        if len(paper_items) + closed_roundtrips < 10:
+            suggestions.append(
+                {
+                    "id": "expand_monitor_sample",
+                    "priority": "high",
+                    "title": "先扩大模拟样本，不自动改策略参数",
+                    "reason": f"当前可评价样本 {len(paper_items) + closed_roundtrips} 笔，未达到稳定复盘门槛。",
+                    "impact": "避免用少量样本过拟合策略。",
+                }
+            )
+        if returns and avg_return < 0:
+            suggestions.append(
+                {
+                    "id": "raise_entry_quality",
+                    "priority": "high",
+                    "title": "提高买入阈值或减少弱信号执行",
+                    "reason": f"当前模拟持仓平均收益 {avg_return:.2f}% 为负。",
+                    "impact": "降低交易频率，优先保留高置信候选。",
+                }
+            )
+        if max_drawdown >= 8:
+            suggestions.append(
+                {
+                    "id": "tighten_risk_control",
+                    "priority": "high",
+                    "title": "收紧止损和单票仓位",
+                    "reason": f"监控样本最大回撤 {max_drawdown:.2f}% 已进入警戒区。",
+                    "impact": "优先控制组合回撤，再追求收益扩张。",
+                }
+            )
+        if len(missed_items) >= 2 or avg_watch_return >= 6:
+            suggestions.append(
+                {
+                    "id": "review_watch_to_buy_gate",
+                    "priority": "medium",
+                    "title": "复核观察股升级买入的触发条件",
+                    "reason": f"观察池出现 {len(missed_items)} 只明显上涨样本，可能存在执行过严或信号滞后。",
+                    "impact": "减少强势票只观察不执行的机会成本。",
+                }
+            )
+        if items and len(money_unavailable) / len(items) >= 0.3:
+            suggestions.append(
+                {
+                    "id": "degrade_money_flow_weight",
+                    "priority": "medium",
+                    "title": "资金流不可用时降低资金因子权重",
+                    "reason": f"资金流不可用样本占比 {len(money_unavailable) / len(items) * 100:.1f}%。",
+                    "impact": "避免不可用数据污染总评分和复盘结论。",
+                }
+            )
+        if not suggestions:
+            suggestions.append(
+                {
+                    "id": "keep_and_monitor",
+                    "priority": "low",
+                    "title": "当前无需调整，继续按日复盘",
+                    "reason": "收益、回撤和风险提醒暂未触发参数调整条件。",
+                    "impact": "保持策略稳定，避免频繁漂移。",
+                }
+            )
+
+        strategy_health = self._clamp(
+            55 + win_rate * 25 + max(avg_return, -10) * 1.2 - max_drawdown * 1.4 - len(risk_items) * 4,
+            0,
+            100,
+        )
+        if not items:
+            headline = "暂无已选股票，无法形成监控反馈"
+        elif risk_items:
+            headline = f"今日有 {len(risk_items)} 个风险样本需要处理"
+        elif avg_return > 0:
+            headline = "已选股票整体反馈偏正，继续按规则跟踪"
+        else:
+            headline = "已选股票反馈偏弱，优先控制新开仓"
+
+        summary = {
+            "headline": headline,
+            "review_status": "insufficient_sample" if len(paper_items) + closed_roundtrips < 10 else "tracking",
+            "strategy_health_score": round(strategy_health, 2),
+            "tracked_count": len(items),
+            "paper_position_count": len(paper_items),
+            "watch_count": len(watch_items),
+            "open_win_rate": round(win_rate, 4),
+            "avg_return_pct": round(avg_return, 4),
+            "avg_watch_return_pct": round(avg_watch_return, 4),
+            "max_drawdown_pct": round(max_drawdown, 4),
+            "risk_flag_count": len(risk_items),
+            "missed_opportunity_count": len(missed_items),
+            "money_flow_unavailable_count": len(money_unavailable),
+            "closed_roundtrips": closed_roundtrips,
+            "diagnostic_note": "反馈建议只进入复盘，不自动覆盖当前策略参数。",
+        }
+        return {"summary": summary, "suggestions": suggestions, "diagnostics": diagnostics}
+
+    def get_monitor_overview(self, user_id: str = "default") -> Dict[str, Any]:
+        positions_payload = self.get_monitor_positions(user_id=user_id, persist=False)
+        feedback = self._build_monitor_feedback(user_id=user_id, positions_payload=positions_payload)
+        portfolio = self.get_paper_portfolio(user_id=user_id, refresh_quotes=False)
+        latest_report = self.store.get_latest_strategy_feedback_report(user_id=user_id, report_type="daily")
+        summary = feedback.get("summary") or {}
+        return {
+            "summary": {
+                **summary,
+                "total_market_value": (portfolio.get("summary") or {}).get("total_market_value", 0),
+                "total_unrealized_pnl": (portfolio.get("summary") or {}).get("total_unrealized_pnl", 0),
+                "total_unrealized_pnl_pct": (portfolio.get("summary") or {}).get("total_unrealized_pnl_pct", 0),
+            },
+            "latest_report": {
+                "report_id": (latest_report or {}).get("report_id"),
+                "report_date": (latest_report or {}).get("report_date"),
+                "created_at": (latest_report or {}).get("created_at"),
+            },
+            "updated_at": positions_payload.get("updated_at"),
+        }
+
+    def run_daily_monitor_review(self, user_id: str = "default") -> Dict[str, Any]:
+        positions_payload = self.get_monitor_positions(user_id=user_id, persist=True)
+        feedback = self._build_monitor_feedback(user_id=user_id, positions_payload=positions_payload)
+        now = datetime.now()
+        report_date = now.strftime("%Y-%m-%d")
+        report = self.store.save_strategy_feedback_report(
+            report_id=f"monitor_{user_id}_{report_date}",
+            user_id=user_id,
+            report_date=report_date,
+            report_type="daily",
+            summary=feedback.get("summary") or {},
+            suggestions=feedback.get("suggestions") or [],
+            diagnostics={
+                **(feedback.get("diagnostics") or {}),
+                "snapshot_count": len(positions_payload.get("items") or []),
+                "snapshot_date": positions_payload.get("snapshot_date"),
+            },
+            created_at=now.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        return {
+            **report,
+            "positions": positions_payload.get("items", []),
+            "snapshot_date": positions_payload.get("snapshot_date"),
+        }
+
+    def get_monitor_feedback_latest(self, user_id: str = "default") -> Dict[str, Any]:
+        report = self.store.get_latest_strategy_feedback_report(user_id=user_id, report_type="daily")
+        if report:
+            return report
+        return self.run_daily_monitor_review(user_id=user_id)
 
     def get_picks_history(
         self,

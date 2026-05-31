@@ -115,6 +115,9 @@ class AIDecisionEngine:
     @staticmethod
     def _calculate_money_flow_score(money_flow: Dict[str, Any]) -> float:
         """计算资金流向评分"""
+        if money_flow.get("available") is False:
+            return 0
+
         score = 0
 
         main_net = money_flow.get('main_net_inflow', 0)

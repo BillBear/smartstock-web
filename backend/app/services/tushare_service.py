@@ -343,6 +343,7 @@ class TuShareService:
                 'large_net': float(estimated_inflow * 0.4),
                 'medium_net': float(-estimated_inflow * 0.3),
                 'small_net': float(-estimated_inflow * 0.7),
+                'estimated': True,
             }
         except Exception as e:
             logger.error(f"估算资金流向失败 {ts_code}: {str(e)}")
