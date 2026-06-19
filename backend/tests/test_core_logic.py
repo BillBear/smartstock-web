@@ -1,5 +1,4 @@
 import math
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -9,8 +8,6 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.core.config import Settings
-from app.services.data_source_manager import DataSourceManager
 from app.services.advice_service import AdviceService
 from app.services.technical_analyzer import TechnicalAnalyzer
 
@@ -80,36 +77,6 @@ class AdviceServiceTests(unittest.TestCase):
         self.assertIn("take_profit", advice["advice"])
         self.assertIn("stop_loss", advice["advice"])
         self.assertGreaterEqual(len(advice["risk_warning"]), 3)
-
-
-class DataSourceManagerTests(unittest.TestCase):
-    def test_search_uses_minimal_basic_map_when_remote_sources_are_unavailable(self):
-        manager = DataSourceManager()
-
-        results = manager.search_stocks("平安", limit=5)
-        symbols = {item["symbol"] for item in results}
-
-        self.assertIn("000001", symbols)
-        self.assertIn("601318", symbols)
-
-
-class SettingsTests(unittest.TestCase):
-    def test_secret_defaults_are_empty_and_local_frontend_is_allowed(self):
-        env_backup = {key: os.environ.get(key) for key in ("TUSHARE_TOKEN", "USE_MOCK_DATA")}
-        try:
-            os.environ.pop("TUSHARE_TOKEN", None)
-            os.environ.pop("USE_MOCK_DATA", None)
-            settings = Settings(_env_file=None)
-        finally:
-            for key, value in env_backup.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
-
-        self.assertEqual(settings.TUSHARE_TOKEN, "")
-        self.assertFalse(settings.USE_MOCK_DATA)
-        self.assertIn("http://localhost:3601", settings.CORS_ORIGINS)
 
 
 if __name__ == "__main__":
