@@ -206,3 +206,5 @@ smartstock-web/
 - 默认不使用 Mock 兜底，避免真实数据不可用时误导用户。
 - 大型业务模块重构前先补回归测试，保持接口响应结构稳定。
 - 金融决策相关变更优先补充测试和页面验证。
+- 分支、worktree、提交范围、baseline 证据和验证纪律见
+  [docs/development/worktree-and-commit-policy.md](docs/development/worktree-and-commit-policy.md)。
