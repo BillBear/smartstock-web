@@ -50,6 +50,7 @@ def build_ranking_report(
         "ranking_false_positive_samples.csv": "ranking_false_positive_samples.csv",
         "ranking_factor_correlations.csv": "ranking_factor_correlations.csv",
         "ranking_diagnostics.json": "ranking_diagnostics.json",
+        "ranking_summary.json": "ranking_summary.json",
     }
 
     write_csv(out_dir / "ranking_daily_metrics.csv", daily_metrics)

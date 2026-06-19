@@ -115,6 +115,20 @@ class CoachModelTrainRequest(BaseModel):
     symbols: Optional[List[str]] = Field(None, description="可选指定股票池")
 
 
+class CoachRankingEvaluationRunRequest(BaseModel):
+    """候选池排序质量评估请求"""
+    strategy_code: str = Field("trend_breakout", description="策略编码")
+    risk_level: str = Field("medium", description="风险等级：low/medium/high")
+    start_date: str = Field(..., description="开始日期 YYYY-MM-DD")
+    end_date: str = Field(..., description="结束日期 YYYY-MM-DD")
+    horizons: List[int] = Field(default_factory=lambda: [3, 5, 10, 20], description="未来收益窗口")
+    top_k: List[int] = Field(default_factory=lambda: [3, 5, 10], description="Top-K 指标")
+    commission: float = Field(0.0003, description="交易佣金", ge=0)
+    slippage: float = Field(0.001, description="滑点", ge=0)
+    fixture: Optional[str] = Field(None, description="可选 smoke fixture，仅用于测试和本地冒烟验证")
+    output_dir: Optional[str] = Field(None, description="报告输出目录；为空时写入默认策略证据目录")
+
+
 # ========== 响应模型 ==========
 
 class StockRealtimeResponse(BaseModel):

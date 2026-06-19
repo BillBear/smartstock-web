@@ -1,6 +1,7 @@
 """
 FastAPI主应用程序
 """
+import json
 import sys
 from pathlib import Path
 
@@ -25,10 +26,15 @@ from app.models.schemas import (
     CoachBacktestRunRequest,
     CoachStrategyConfigApplyRequest,
     CoachModelTrainRequest,
+    CoachRankingEvaluationRunRequest,
     StockRealtimeResponse,
     ApiResponse,
     ErrorResponse
 )
+from app.evaluation.ranking_fixtures import smoke_fixture_rows
+from app.evaluation.ranking_labels import DEFAULT_STRONG_LABEL_CONFIG
+from app.evaluation.ranking_replay import RankingReplayService
+from app.evaluation.ranking_report import build_ranking_report
 from app.services.stock_service import StockDataService
 from app.services.technical_analyzer import TechnicalAnalyzer
 from app.services.advice_service import AdviceService
@@ -226,6 +232,129 @@ def resolve_stock_or_404(symbol_or_name: str) -> dict:
     if not resolved or not resolved.get("symbol"):
         raise HTTPException(status_code=404, detail=f"未找到匹配股票: {query}")
     return resolved
+
+
+def _run_ranking_evaluation_report(request: CoachRankingEvaluationRunRequest) -> dict:
+    """Generate a read-only ranking evaluation report from replayed snapshots."""
+    horizons = _positive_int_list(request.horizons, "horizons", [3, 5, 10, 20])
+    top_k = _positive_int_list(request.top_k, "top_k", [3, 5, 10])
+    start_date = _parse_ranking_date("start_date", request.start_date)
+    end_date = _parse_ranking_date("end_date", request.end_date)
+    if start_date > end_date:
+        raise HTTPException(status_code=400, detail="start_date must be on or before end_date")
+    if request.fixture not in (None, "smoke"):
+        raise HTTPException(status_code=400, detail="fixture only supports smoke")
+
+    label_config = dict(DEFAULT_STRONG_LABEL_CONFIG)
+    label_config["horizons"] = list(horizons)
+    execution_config = {
+        "commission": float(request.commission),
+        "slippage": float(request.slippage),
+        "fixture": request.fixture,
+    }
+
+    if request.fixture == "smoke":
+        rows, coverage = smoke_fixture_rows(horizons)
+    else:
+        replay_service = RankingReplayService(
+            store=coach_store,
+            data_source_manager=data_source_manager,
+            user_id="default",
+        )
+        replay = replay_service.replay(
+            strategy_code=request.strategy_code,
+            risk_level=request.risk_level,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            attach_labels=True,
+            label_config=label_config,
+        )
+        rows = replay["rows"]
+        coverage = replay["coverage"]
+
+    summary = build_ranking_report(
+        candidate_rows=rows,
+        strategy_code=request.strategy_code,
+        risk_level=request.risk_level,
+        start_date=request.start_date,
+        end_date=request.end_date,
+        horizons=horizons,
+        top_k_values=top_k,
+        output_dir=request.output_dir or _default_ranking_evaluation_output_dir(request),
+        label_config=label_config,
+        coverage=coverage,
+        execution_config=execution_config,
+    )
+    return clean_nan_values(summary)
+
+
+def _positive_int_list(values: list, name: str, default: list) -> list:
+    items = values if values is not None else default
+    output = []
+    for value in items:
+        try:
+            item = int(value)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"{name} must contain integers")
+        if item <= 0:
+            raise HTTPException(status_code=400, detail=f"{name} values must be greater than 0")
+        output.append(item)
+    if not output:
+        raise HTTPException(status_code=400, detail=f"{name} must not be empty")
+    return output
+
+
+def _parse_ranking_date(name: str, value: str):
+    try:
+        parsed = datetime.strptime(str(value), "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{name} must use YYYY-MM-DD")
+    if parsed.isoformat() != str(value):
+        raise HTTPException(status_code=400, detail=f"{name} must use YYYY-MM-DD")
+    return parsed
+
+
+def _default_ranking_evaluation_output_dir(request: CoachRankingEvaluationRunRequest) -> str:
+    run_id = "-".join(
+        [
+            str(request.strategy_code or "strategy"),
+            str(request.risk_level or "risk"),
+            str(request.start_date),
+            str(request.end_date),
+            datetime.utcnow().strftime("%Y%m%d%H%M%S"),
+        ]
+    )
+    return str(
+        Path(__file__).resolve().parents[2]
+        / "docs"
+        / "strategy-evidence"
+        / "ranking-evaluation"
+        / "runs"
+        / run_id
+    )
+
+
+def _load_latest_ranking_evaluation_summary() -> dict:
+    runs_dir = (
+        Path(__file__).resolve().parents[2]
+        / "docs"
+        / "strategy-evidence"
+        / "ranking-evaluation"
+        / "runs"
+    )
+    if not runs_dir.exists():
+        return {"available": False, "message": "ranking evaluation report not found"}
+    summaries = sorted(
+        runs_dir.glob("*/ranking_summary.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if not summaries:
+        return {"available": False, "message": "ranking evaluation report not found"}
+    payload = json.loads(summaries[0].read_text(encoding="utf-8"))
+    payload["available"] = True
+    payload["summary_path"] = str(summaries[0])
+    return clean_nan_values(payload)
 
 # 创建FastAPI应用
 app = FastAPI(
@@ -1110,6 +1239,30 @@ async def coach_model_metrics(model_id: str):
         raise
     except Exception as e:
         logger.error(f"获取模型指标失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(f"{settings.API_PREFIX}/coach/ranking-evaluation/run")
+async def coach_ranking_evaluation_run(request: CoachRankingEvaluationRunRequest):
+    """运行候选池排序质量评估，只读取历史快照并生成诊断报告。"""
+    try:
+        data = await run_in_threadpool(_run_ranking_evaluation_report, request)
+        return ApiResponse(code=200, message="success", data=data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"运行候选池排序质量评估失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/ranking-evaluation/latest")
+async def coach_ranking_evaluation_latest():
+    """获取最近一次候选池排序质量评估摘要。"""
+    try:
+        data = await run_in_threadpool(_load_latest_ranking_evaluation_summary)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取候选池排序质量评估摘要失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

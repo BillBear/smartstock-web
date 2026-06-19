@@ -6,13 +6,14 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Iterable, List, Optional
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.evaluation.ranking_labels import DEFAULT_STRONG_LABEL_CONFIG
+from app.evaluation.ranking_fixtures import smoke_fixture_rows
 from app.evaluation.ranking_replay import RankingReplayService
 from app.evaluation.ranking_report import build_ranking_report
 
@@ -93,50 +94,7 @@ def run(argv: Optional[Iterable[str]] = None) -> int:
     return 0
 
 
-def smoke_fixture_rows(horizons: List[int]) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    rows = []
-    trade_dates = ["2026-01-02", "2026-01-05"]
-    template = [
-        ("000001", 1, -3.0, False, True, "sl_before_tp", "neutral", 86.0),
-        ("000002", 2, 9.0, True, False, "tp_before_sl", "neutral", 74.0),
-        ("000003", 8, 4.0, False, False, "no_trigger", "neutral", 69.0),
-        ("000004", 14, 22.0, True, False, "tp_before_sl", "neutral", 58.0),
-    ]
-    for trade_date in trade_dates:
-        for symbol, rank_no, ret5, strong5, bought, path, state, score in template:
-            row: Dict[str, Any] = {
-                "trade_date": trade_date,
-                "symbol": symbol,
-                "name": symbol,
-                "rank_no": rank_no,
-                "tradability_status": "tradable",
-                "was_bought": bought,
-                "tp_sl_path": path,
-                "market_state_tag": state,
-                "factor_ranking_score": score,
-                "factor_total_score": score - 2,
-                "max_floating_profit_pct": max(ret5, 0.0) + 2,
-                "max_adverse_excursion_pct": -4.0,
-            }
-            for horizon in horizons:
-                multiplier = {3: 0.6, 5: 1.0, 10: 1.35, 20: 1.8}.get(int(horizon), 1.0)
-                ret = round(ret5 * multiplier, 6)
-                row[f"return_{int(horizon)}d_pct"] = ret
-                row[f"strong_{int(horizon)}d"] = ret >= {3: 5.0, 5: 8.0, 10: 12.0, 20: 18.0}.get(int(horizon), 8.0)
-            rows.append(row)
-    coverage = {
-        "coverage_status": "complete",
-        "requested_date_count": len(trade_dates),
-        "covered_date_count": len(trade_dates),
-        "requested_dates": trade_dates,
-        "available_dates": trade_dates,
-        "missing_dates": [],
-        "fixture": "smoke",
-    }
-    return rows, coverage
-
-
-def print_summary(summary: Dict[str, Any], output_dir: str) -> None:
+def print_summary(summary: dict, output_dir: str) -> None:
     metrics = summary.get("metrics") or {}
     print(f"output_dir: {Path(output_dir).resolve()}")
     print(f"coverage_status: {(summary.get('coverage') or {}).get('coverage_status')}")
