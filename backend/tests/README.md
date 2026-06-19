@@ -17,6 +17,7 @@ python3 -m unittest tests.test_strategy_contracts -v
 python3 -m unittest tests.test_backtest_replay -v
 python3 -m unittest tests.test_persistence -v
 python3 -m unittest tests.test_api_contracts -v
+python3 -m unittest discover -s tests -p 'test_ranking_*.py' -v
 ```
 
 Layer intent:
@@ -27,3 +28,4 @@ Layer intent:
 - `test_backtest_replay.py`: historical replay helper and credibility-gate contracts without live data dependencies.
 - `test_persistence.py`: SQLite persistence round trips for coach state and backtest records.
 - `test_api_contracts.py`: request/config validation and API-facing schema defaults.
+- `test_ranking_*.py`: candidate-pool ranking labels, metrics, replay, diagnostics, report generation, and read-only API contracts. These tests evaluate historical outputs and must not tune production strategy parameters.

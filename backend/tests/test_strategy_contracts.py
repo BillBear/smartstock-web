@@ -1,4 +1,7 @@
+import copy
+import importlib
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -68,6 +71,51 @@ class StrategyContractTests(unittest.TestCase):
         for rule in CoachService.LIVE_GATE_RULES:
             self.assertTrue(rule.get("label"))
             self.assertTrue(rule.get("threshold"))
+
+    def test_ranking_evaluation_modules_do_not_mutate_strategy_presets(self):
+        before = copy.deepcopy(CoachService.STRATEGY_PRESET_LIBRARY)
+
+        for module_name in (
+            "app.evaluation.ranking_labels",
+            "app.evaluation.ranking_metrics",
+            "app.evaluation.ranking_replay",
+            "app.evaluation.ranking_diagnostics",
+            "app.evaluation.ranking_report",
+            "app.evaluation.ranking_fixtures",
+        ):
+            with self.subTest(module_name=module_name):
+                importlib.import_module(module_name)
+
+        self.assertEqual(CoachService.STRATEGY_PRESET_LIBRARY, before)
+
+    def test_ranking_evaluation_report_does_not_mutate_strategy_presets(self):
+        before = copy.deepcopy(CoachService.STRATEGY_PRESET_LIBRARY)
+        from app.evaluation.ranking_fixtures import smoke_fixture_rows
+        from app.evaluation.ranking_labels import DEFAULT_STRONG_LABEL_CONFIG
+        from app.evaluation.ranking_report import build_ranking_report
+
+        horizons = [3, 5, 10, 20]
+        rows, coverage = smoke_fixture_rows(horizons)
+        label_config = dict(DEFAULT_STRONG_LABEL_CONFIG)
+        label_config["horizons"] = horizons
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            summary = build_ranking_report(
+                candidate_rows=rows,
+                strategy_code="trend_breakout",
+                risk_level="medium",
+                start_date="2026-01-02",
+                end_date="2026-01-09",
+                horizons=horizons,
+                top_k_values=[3, 5, 10],
+                output_dir=output_dir,
+                label_config=label_config,
+                coverage=coverage,
+                execution_config={"fixture": "smoke"},
+            )
+
+        self.assertEqual(summary["coverage"]["coverage_status"], "complete")
+        self.assertEqual(CoachService.STRATEGY_PRESET_LIBRARY, before)
 
 
 if __name__ == "__main__":
