@@ -2078,6 +2078,7 @@ class CoachService:
                 user_id=user_id,
                 trade_date=trade_date,
                 strategy_code=strategy_code,
+                risk_level=level,
                 picks=all_picks,
             )
         except Exception:

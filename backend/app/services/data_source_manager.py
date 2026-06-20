@@ -78,6 +78,7 @@ class DataSourceManager:
             "realtime": 20,
             "moneyflow": 180,
             "history": 300,
+            "history_range": 300,
             "market": 300,
         }
 
@@ -255,6 +256,63 @@ class DataSourceManager:
                 continue
 
         logger.error(f"所有数据源均失败: {symbol}")
+        return pd.DataFrame()
+
+    def get_history_data_range(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """按显式日期范围获取历史K线，供回放/评估使用。
+
+        与 get_history_data(days=...) 分开，避免旧候选池被最近 N 日行情误标注。
+        """
+        normalized_start = self._normalize_date_value(start_date)
+        normalized_end = self._normalize_date_value(end_date)
+        if not normalized_start or not normalized_end or normalized_start > normalized_end:
+            return pd.DataFrame()
+
+        cache_key = f"history_range:{symbol}:{normalized_start}:{normalized_end}"
+        cached = self._get_cache(cache_key)
+        if cached is not None:
+            return cached
+
+        ts_code = self._convert_to_tushare_code(symbol)
+        start_yyyymmdd = normalized_start.replace("-", "")
+        end_yyyymmdd = normalized_end.replace("-", "")
+        source_map = {name: svc for name, svc in self.sources}
+        preferred_order = ["TuShare", "AKShare"]
+
+        for source_name in preferred_order:
+            service = source_map.get(source_name)
+            if not service:
+                continue
+            if self._is_circuit_open(source_name, "history"):
+                logger.info(f"⏭️ 跳过 {source_name}（history range）: 熔断冷却中")
+                continue
+            try:
+                logger.info(f"尝试从 {source_name} 获取历史区间数据: {symbol} {normalized_start}..{normalized_end}")
+                if source_name == "TuShare":
+                    df = service.get_history_data(ts_code, start_date=start_yyyymmdd, end_date=end_yyyymmdd)
+                elif hasattr(service, "get_history_data_range"):
+                    df = service.get_history_data_range(symbol, start_date=normalized_start, end_date=normalized_end)
+                else:
+                    continue
+
+                if not df.empty:
+                    df = self._normalize_history_data(df)
+                    if df.empty:
+                        self._record_failure(source_name, "history", "missing required columns")
+                        continue
+                    df = df[(df["date"] >= normalized_start) & (df["date"] <= normalized_end)].reset_index(drop=True)
+                    self._record_success(source_name, "history")
+                    self._set_cache(cache_key, df)
+                    logger.info(f"✅ 成功从 {source_name} 获取历史区间数据: {symbol}, 共 {len(df)} 条")
+                    return df
+
+                self._record_failure(source_name, "history", "empty data")
+                logger.warning(f"⚠️ {source_name} 历史区间返回空数据: {symbol}")
+            except Exception as e:
+                self._record_failure(source_name, "history", str(e))
+                logger.warning(f"❌ {source_name} 历史区间获取失败: {symbol}, 错误: {str(e)}")
+
+        logger.error(f"所有显式区间数据源均失败: {symbol} {normalized_start}..{normalized_end}")
         return pd.DataFrame()
 
     def get_money_flow(self, symbol: str, days: int = 5) -> Optional[Dict[str, Any]]:
@@ -688,9 +746,13 @@ class DataSourceManager:
             "收盘": "close",
             "最高": "high",
             "最低": "low",
+            "vol": "volume",
             "成交量": "volume",
             "成交额": "amount",
             "turnover": "amount",
+            "pct_chg": "pct_change",
+            "change_percent": "pct_change",
+            "涨跌幅": "pct_change",
         }
         normalized = df.rename(columns=rename_map).copy()
 
@@ -698,8 +760,27 @@ class DataSourceManager:
         if any(col not in normalized.columns for col in required_cols):
             return pd.DataFrame()
 
-        normalized["date"] = normalized["date"].astype(str)
+        normalized["date"] = normalized["date"].map(self._normalize_date_value)
+        normalized = normalized.dropna(subset=["date"])
         return normalized.sort_values("date").reset_index(drop=True)
+
+    @staticmethod
+    def _normalize_date_value(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text_value = str(value).strip()
+        if not text_value:
+            return None
+        for fmt in ("%Y-%m-%d", "%Y%m%d"):
+            candidate = text_value[:10] if fmt == "%Y-%m-%d" else text_value[:8]
+            try:
+                return pd.to_datetime(candidate, format=fmt, errors="raise").date().isoformat()
+            except Exception:
+                continue
+        parsed = pd.to_datetime(text_value, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        return parsed.date().isoformat()
 
     def _normalize_money_flow(self, data: Dict[str, Any], symbol: str) -> Dict[str, Any]:
         """统一资金流向字段，兼容Mock和真实数据源。"""

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """将 coach SQLite 数据迁移到 PostgreSQL。"""
+import argparse
 import os
 import sqlite3
-import psycopg2
 
 SQLITE_PATH = os.getenv("SQLITE_PATH", "/Users/xiong/Documents/SmartStock/smartstock-web/backend/data/coach.db")
 PG_DSN = os.getenv("PG_DSN", "postgresql://smartstock@127.0.0.1:5432/smartstock")
@@ -15,14 +15,22 @@ def fetch_all(conn, table):
     return rows
 
 
-def migrate():
-    if not os.path.exists(SQLITE_PATH):
-        print(f"[skip] sqlite not found: {SQLITE_PATH}")
+def _connect_postgres(pg_dsn):
+    try:
+        import psycopg2
+    except ImportError as exc:
+        raise RuntimeError("psycopg2 is required to run the SQLite to PostgreSQL migration") from exc
+    return psycopg2.connect(pg_dsn)
+
+
+def migrate(sqlite_path=SQLITE_PATH, pg_dsn=PG_DSN):
+    if not os.path.exists(sqlite_path):
+        print(f"[skip] sqlite not found: {sqlite_path}")
         return
 
-    src = sqlite3.connect(SQLITE_PATH)
+    src = sqlite3.connect(sqlite_path)
     src.row_factory = sqlite3.Row
-    dst = psycopg2.connect(PG_DSN)
+    dst = _connect_postgres(pg_dsn)
     dst.autocommit = False
 
     try:
@@ -126,6 +134,30 @@ def migrate():
             )
         print(f"backtest_runs: {len(rows)}")
 
+        rows = fetch_all(src, "pick_snapshots")
+        for r in rows:
+            d_cur.execute(
+                """
+                INSERT INTO pick_snapshots (
+                    pick_id, user_id, trade_date, symbol, name, strategy_code, risk_level, snapshot_json, created_at
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT(pick_id) DO UPDATE SET
+                  user_id=EXCLUDED.user_id,
+                  trade_date=EXCLUDED.trade_date,
+                  symbol=EXCLUDED.symbol,
+                  name=EXCLUDED.name,
+                  strategy_code=EXCLUDED.strategy_code,
+                  risk_level=EXCLUDED.risk_level,
+                  snapshot_json=EXCLUDED.snapshot_json,
+                  created_at=EXCLUDED.created_at
+                """,
+                (
+                    r.get("pick_id"), r.get("user_id"), r.get("trade_date"), r.get("symbol"), r.get("name"),
+                    r.get("strategy_code"), r.get("risk_level"), r.get("snapshot_json"), r.get("created_at"),
+                ),
+            )
+        print(f"pick_snapshots: {len(rows)}")
+
         # 修正序列
         d_cur.execute("SELECT setval(pg_get_serial_sequence('pick_actions','id'), COALESCE((SELECT MAX(id) FROM pick_actions),1), true)")
         d_cur.execute("SELECT setval(pg_get_serial_sequence('paper_positions','id'), COALESCE((SELECT MAX(id) FROM paper_positions),1), true)")
@@ -141,5 +173,17 @@ def migrate():
         dst.close()
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Migrate SmartStock coach data from SQLite to PostgreSQL.")
+    parser.add_argument("--sqlite-path", default=SQLITE_PATH)
+    parser.add_argument("--pg-dsn", default=PG_DSN)
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    migrate(sqlite_path=args.sqlite_path, pg_dsn=args.pg_dsn)
+
+
 if __name__ == "__main__":
-    migrate()
+    main()
