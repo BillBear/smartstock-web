@@ -140,6 +140,7 @@ class CoachStore:
                 symbol TEXT NOT NULL,
                 name TEXT,
                 strategy_code TEXT,
+                risk_level TEXT,
                 snapshot_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
@@ -332,6 +333,7 @@ class CoachStore:
                 symbol TEXT NOT NULL,
                 name TEXT,
                 strategy_code TEXT,
+                risk_level TEXT,
                 snapshot_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
@@ -437,6 +439,33 @@ class CoachStore:
             with self.engine.begin() as conn:
                 for stmt in statements:
                     conn.execute(text(stmt))
+                self._ensure_pick_snapshots_schema(conn)
+
+    def _ensure_pick_snapshots_schema(self, conn) -> None:
+        if self._is_postgres:
+            conn.execute(text("ALTER TABLE pick_snapshots ADD COLUMN IF NOT EXISTS risk_level TEXT"))
+            conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_pick_snapshots_user_strategy_risk_time
+                    ON pick_snapshots(user_id, strategy_code, risk_level, trade_date DESC)
+                    """
+                )
+            )
+            return
+
+        columns = conn.execute(text("PRAGMA table_info(pick_snapshots)")).fetchall()
+        column_names = {row._mapping["name"] for row in columns}
+        if "risk_level" not in column_names:
+            conn.execute(text("ALTER TABLE pick_snapshots ADD COLUMN risk_level TEXT"))
+        conn.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_pick_snapshots_user_strategy_risk_time
+                ON pick_snapshots(user_id, strategy_code, risk_level, trade_date DESC)
+                """
+            )
+        )
 
     def get_risk_profile(self, user_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -683,6 +712,29 @@ class CoachStore:
                     for row in rows
                 }
 
+    def get_pick_action_history(self, user_id: str) -> Dict[str, List[Dict[str, Any]]]:
+        with self._lock:
+            with self.engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT *
+                        FROM pick_actions
+                        WHERE user_id = :user_id
+                        ORDER BY id ASC
+                        """
+                    ),
+                    {"user_id": user_id},
+                ).fetchall()
+        history: Dict[str, List[Dict[str, Any]]] = {}
+        for row in rows:
+            item = dict(row._mapping)
+            pick_id = str(item.get("pick_id") or "")
+            if not pick_id:
+                continue
+            history.setdefault(pick_id, []).append(item)
+        return history
+
     def list_pick_actions(self, user_id: str, limit: int = 100) -> List[Dict[str, Any]]:
         with self._lock:
             with self.engine.connect() as conn:
@@ -706,11 +758,13 @@ class CoachStore:
         trade_date: str,
         strategy_code: str,
         picks: List[Dict[str, Any]],
+        risk_level: str = "medium",
     ) -> int:
         if not picks:
             return 0
         rows = []
         created_at = picks[0].get("created_at") or trade_date
+        normalized_risk_level = str(risk_level or "medium")
         for pick in picks:
             pick_id = str(pick.get("pick_id") or "").strip()
             symbol = str(pick.get("symbol") or "").strip()
@@ -724,6 +778,7 @@ class CoachStore:
                     "symbol": symbol,
                     "name": str(pick.get("name") or symbol),
                     "strategy_code": strategy_code,
+                    "risk_level": normalized_risk_level,
                     "snapshot_json": json.dumps(pick, ensure_ascii=False),
                     "created_at": str(created_at),
                 }
@@ -739,9 +794,9 @@ class CoachStore:
                             text(
                                 """
                                 INSERT INTO pick_snapshots (
-                                    pick_id, user_id, trade_date, symbol, name, strategy_code, snapshot_json, created_at
+                                    pick_id, user_id, trade_date, symbol, name, strategy_code, risk_level, snapshot_json, created_at
                                 ) VALUES (
-                                    :pick_id, :user_id, :trade_date, :symbol, :name, :strategy_code, :snapshot_json, :created_at
+                                    :pick_id, :user_id, :trade_date, :symbol, :name, :strategy_code, :risk_level, :snapshot_json, :created_at
                                 )
                                 ON CONFLICT (pick_id) DO UPDATE SET
                                     user_id=excluded.user_id,
@@ -749,6 +804,7 @@ class CoachStore:
                                     symbol=excluded.symbol,
                                     name=excluded.name,
                                     strategy_code=excluded.strategy_code,
+                                    risk_level=excluded.risk_level,
                                     snapshot_json=excluded.snapshot_json,
                                     created_at=excluded.created_at
                                 """
@@ -760,9 +816,9 @@ class CoachStore:
                             text(
                                 """
                                 INSERT INTO pick_snapshots (
-                                    pick_id, user_id, trade_date, symbol, name, strategy_code, snapshot_json, created_at
+                                    pick_id, user_id, trade_date, symbol, name, strategy_code, risk_level, snapshot_json, created_at
                                 ) VALUES (
-                                    :pick_id, :user_id, :trade_date, :symbol, :name, :strategy_code, :snapshot_json, :created_at
+                                    :pick_id, :user_id, :trade_date, :symbol, :name, :strategy_code, :risk_level, :snapshot_json, :created_at
                                 )
                                 ON CONFLICT(pick_id) DO UPDATE SET
                                     user_id=excluded.user_id,
@@ -770,6 +826,7 @@ class CoachStore:
                                     symbol=excluded.symbol,
                                     name=excluded.name,
                                     strategy_code=excluded.strategy_code,
+                                    risk_level=excluded.risk_level,
                                     snapshot_json=excluded.snapshot_json,
                                     created_at=excluded.created_at
                                 """
@@ -777,6 +834,53 @@ class CoachStore:
                             row,
                         )
         return len(rows)
+
+    def list_pick_snapshots(
+        self,
+        strategy_code: str,
+        risk_level: str,
+        trade_date: str,
+        user_id: str = "default",
+    ) -> List[Dict[str, Any]]:
+        with self._lock:
+            with self.engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT *
+                        FROM pick_snapshots
+                        WHERE user_id = :user_id
+                          AND trade_date = :trade_date
+                          AND (:strategy_code = '' OR strategy_code = :strategy_code)
+                          AND (:risk_level = '' OR risk_level = :risk_level)
+                        ORDER BY created_at ASC, pick_id ASC
+                        """
+                    ),
+                    {
+                        "user_id": str(user_id or "default"),
+                        "trade_date": str(trade_date),
+                        "strategy_code": str(strategy_code or ""),
+                        "risk_level": str(risk_level or ""),
+                    },
+                ).fetchall()
+
+        snapshots: List[Dict[str, Any]] = []
+        for row in rows:
+            data = dict(row._mapping)
+            try:
+                snapshot = json.loads(data.get("snapshot_json") or "{}")
+            except Exception:
+                snapshot = {}
+            snapshot.setdefault("pick_id", data.get("pick_id"))
+            snapshot.setdefault("user_id", data.get("user_id"))
+            snapshot.setdefault("trade_date", data.get("trade_date"))
+            snapshot.setdefault("symbol", data.get("symbol"))
+            snapshot.setdefault("name", data.get("name") or data.get("symbol"))
+            snapshot.setdefault("strategy_code", data.get("strategy_code"))
+            snapshot.setdefault("risk_level", data.get("risk_level"))
+            snapshot.setdefault("created_at", data.get("created_at"))
+            snapshots.append(snapshot)
+        return snapshots
 
     def get_pick_snapshot(self, pick_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         clauses = ["pick_id = :pick_id"]

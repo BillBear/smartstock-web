@@ -45,6 +45,19 @@ class RankingLabelTests(unittest.TestCase):
         self.assertEqual(labels["tradability_status"], "limit_up_entry_blocked")
         self.assertFalse(labels["strong_3d"])
 
+    def test_pct_chg_entry_limit_up_blocks_tradability(self):
+        history = self._frame(
+            [
+                {"date": "2026-01-02", "open": 11.0, "high": 11.0, "low": 11.0, "close": 11.0, "volume": 1000, "amount": 200000000, "pct_chg": 10.0},
+                {"date": "2026-01-05", "open": 11.1, "high": 11.2, "low": 10.8, "close": 11.0, "volume": 1000, "amount": 200000000},
+            ]
+        )
+
+        labels = label_forward_performance(history, DEFAULT_STRONG_LABEL_CONFIG)
+
+        self.assertFalse(labels["limit_constraint_pass"])
+        self.assertEqual(labels["tradability_status"], "limit_up_entry_blocked")
+
     def test_same_day_take_profit_stop_loss_counts_stop_first(self):
         history = self._frame(
             [

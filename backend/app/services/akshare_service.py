@@ -218,6 +218,41 @@ class AKShareService:
             logger.error(f"AKShare获取历史数据失败 {symbol}: {str(e)}")
             return pd.DataFrame()
 
+    def get_history_data_range(self, symbol: str, start_date: str, end_date: str):
+        """按显式日期范围获取历史K线数据。"""
+        try:
+            start = pd.to_datetime(start_date).strftime("%Y%m%d")
+            end = pd.to_datetime(end_date).strftime("%Y%m%d")
+            df = ak.stock_zh_a_hist(
+                symbol=symbol,
+                period="daily",
+                start_date=start,
+                end_date=end,
+                adjust="qfq",
+            )
+
+            if df.empty:
+                logger.warning(f"未找到股票 {symbol} 的历史区间数据")
+                return pd.DataFrame()
+
+            df = df.rename(
+                columns={
+                    "日期": "date",
+                    "开盘": "open",
+                    "收盘": "close",
+                    "最高": "high",
+                    "最低": "low",
+                    "成交量": "volume",
+                    "成交额": "amount",
+                    "涨跌幅": "pct_chg",
+                    "涨跌额": "change",
+                }
+            )
+            return df
+        except Exception as e:
+            logger.error(f"AKShare获取历史区间数据失败 {symbol}: {str(e)}")
+            return pd.DataFrame()
+
     def get_money_flow(self, symbol: str, days: int = 5):
         """获取资金流向数据（简化估算）
 

@@ -102,8 +102,13 @@ def _normalize_history(history: pd.DataFrame) -> pd.DataFrame:
     if history is None or history.empty:
         return pd.DataFrame()
     rows = history.copy()
+    for source_column in ("pct_change", "pct_chg", "change_percent", "涨跌幅"):
+        if source_column in rows.columns:
+            rows["pct_change"] = rows[source_column]
+            break
     if "date" in rows.columns:
-        rows = rows.sort_values("date")
+        rows["date"] = rows["date"].map(_normalize_date_value)
+        rows = rows.dropna(subset=["date"]).sort_values("date")
     for column in ("open", "high", "low", "close", "volume", "amount", "pct_change"):
         if column not in rows.columns:
             rows[column] = 0.0
@@ -250,3 +255,21 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     if math.isnan(result) or math.isinf(result):
         return default
     return result
+
+
+def _normalize_date_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    text_value = str(value).strip()
+    if not text_value:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y%m%d"):
+        candidate = text_value[:10] if fmt == "%Y-%m-%d" else text_value[:8]
+        try:
+            return pd.to_datetime(candidate, format=fmt, errors="raise").date().isoformat()
+        except Exception:
+            continue
+    parsed = pd.to_datetime(text_value, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return parsed.date().isoformat()

@@ -7,6 +7,7 @@ import pandas as pd
 from app.evaluation.ranking_replay import (
     RankingReplayService,
     attach_forward_labels,
+    _future_history,
     normalize_candidate_row,
     replay_coverage_summary,
 )
@@ -15,6 +16,9 @@ from app.services.coach_store import CoachStore
 
 class FakeHistoryManager:
     def get_history_data(self, symbol, days=120):
+        raise AssertionError("ranking replay must use explicit history ranges")
+
+    def get_history_data_range(self, symbol, start_date, end_date):
         return pd.DataFrame(
             [
                 {"date": "2026-01-05", "open": 10.0, "high": 10.6, "low": 9.9, "close": 10.4, "volume": 1000, "amount": 200000000},
@@ -22,6 +26,24 @@ class FakeHistoryManager:
                 {"date": "2026-01-07", "open": 10.9, "high": 11.3, "low": 10.8, "close": 11.2, "volume": 1000, "amount": 220000000},
                 {"date": "2026-01-08", "open": 11.2, "high": 11.6, "low": 11.1, "close": 11.5, "volume": 1000, "amount": 230000000},
                 {"date": "2026-01-09", "open": 11.5, "high": 12.0, "low": 11.4, "close": 11.9, "volume": 1000, "amount": 240000000},
+            ]
+        )
+
+
+class RangeOnlyHistoryManager:
+    def __init__(self):
+        self.calls = []
+
+    def get_history_data(self, symbol, days=120):
+        raise AssertionError("ranking replay must not fall back to recent-days history")
+
+    def get_history_data_range(self, symbol, start_date, end_date):
+        self.calls.append({"symbol": symbol, "start_date": start_date, "end_date": end_date})
+        return pd.DataFrame(
+            [
+                {"date": "20250102", "open": 99.0, "high": 99.0, "low": 99.0, "close": 99.0, "volume": 1000, "amount": 200000000},
+                {"date": "2025-01-03", "open": 10.0, "high": 10.5, "low": 9.9, "close": 11.0, "volume": 1000, "amount": 200000000},
+                {"date": "20260601", "open": 80.0, "high": 90.0, "low": 79.0, "close": 90.0, "volume": 1000, "amount": 200000000},
             ]
         )
 
@@ -95,6 +117,44 @@ class RankingReplayTests(unittest.TestCase):
         self.assertIn("strong_5d", labeled[0])
         self.assertGreater(labeled[0]["return_5d_pct"], 15.0)
 
+    def test_future_history_normalizes_dates_before_filtering(self):
+        history = pd.DataFrame(
+            [
+                {"date": "20250102", "open": 99.0, "high": 99.0, "low": 99.0, "close": 99.0},
+                {"date": "2025-01-03", "open": 10.0, "high": 11.0, "low": 9.8, "close": 10.8},
+            ]
+        )
+
+        future = _future_history(history, "2025-01-02", end_date="2025-01-03")
+
+        self.assertEqual(list(future["date"]), ["2025-01-03"])
+
+    def test_attach_forward_labels_requires_explicit_history_window(self):
+        rows = [{"trade_date": "2025-01-02", "symbol": "000001", "rank_no": 1}]
+        manager = RangeOnlyHistoryManager()
+
+        labeled = attach_forward_labels(rows, manager, label_config={"horizons": [1]})
+
+        self.assertEqual(manager.calls[0]["start_date"], "2025-01-02")
+        self.assertEqual(labeled[0]["entry_price"], 10.0)
+        self.assertEqual(labeled[0]["return_1d_pct"], 10.0)
+        self.assertLess(labeled[0]["max_floating_profit_pct"], 20.0)
+
+    def test_normalize_candidate_row_reads_evidence_summary_market_state(self):
+        row = normalize_candidate_row(
+            trade_date="2026-01-02",
+            pick={
+                "symbol": "000001",
+                "rank_no": 1,
+                "evidence_summary": {"state_tag": "offensive"},
+            },
+            market_state=None,
+            action=None,
+            source="pick_snapshot",
+        )
+
+        self.assertEqual(row["market_state_tag"], "offensive")
+
     def test_replay_service_uses_store_snapshots_without_live_candidate_refresh(self):
         store = FakeStore(
             {
@@ -163,6 +223,74 @@ class RankingReplayTests(unittest.TestCase):
             self.assertEqual(result["coverage"]["coverage_status"], "complete")
             self.assertEqual(len(result["rows"]), 1)
             self.assertEqual(result["rows"][0]["pick_id"], "pick-20260102-000001")
+            self.assertTrue(result["rows"][0]["was_bought"])
+            self.assertEqual(result["rows"][0]["buy_action_time"], "2026-01-02 09:40:00")
+
+    def test_replay_service_filters_real_snapshots_by_risk_level(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = CoachStore(str(Path(temp_dir) / "coach.sqlite3"))
+            store.upsert_pick_snapshots(
+                user_id="default",
+                trade_date="2026-01-02",
+                strategy_code="trend_breakout",
+                risk_level="low",
+                picks=[{"pick_id": "low-000001", "symbol": "000001", "rank_no": 1}],
+            )
+            store.upsert_pick_snapshots(
+                user_id="default",
+                trade_date="2026-01-02",
+                strategy_code="trend_breakout",
+                risk_level="medium",
+                picks=[{"pick_id": "medium-000002", "symbol": "000002", "rank_no": 1}],
+            )
+            service = RankingReplayService(store=store, data_source_manager=FakeHistoryManager(), user_id="default")
+
+            result = service.replay(
+                strategy_code="trend_breakout",
+                risk_level="medium",
+                start_date="2026-01-02",
+                end_date="2026-01-02",
+            )
+
+            self.assertEqual([row["symbol"] for row in result["rows"]], ["000002"])
+
+    def test_replay_service_preserves_prior_buy_when_latest_action_is_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = CoachStore(str(Path(temp_dir) / "coach.sqlite3"))
+            store.upsert_pick_snapshots(
+                user_id="default",
+                trade_date="2026-01-02",
+                strategy_code="trend_breakout",
+                risk_level="medium",
+                picks=[{"pick_id": "pick-closed-after-buy", "symbol": "000001", "rank_no": 1}],
+            )
+            store.append_pick_action(
+                {
+                    "user_id": "default",
+                    "pick_id": "pick-closed-after-buy",
+                    "symbol": "000001",
+                    "action_type": "paper_buy",
+                    "created_at": "2026-01-02 09:40:00",
+                }
+            )
+            store.append_pick_action(
+                {
+                    "user_id": "default",
+                    "pick_id": "pick-closed-after-buy",
+                    "symbol": "000001",
+                    "action_type": "closed",
+                    "created_at": "2026-01-10 15:00:00",
+                }
+            )
+            service = RankingReplayService(store=store, data_source_manager=FakeHistoryManager(), user_id="default")
+
+            result = service.replay(
+                strategy_code="trend_breakout",
+                risk_level="medium",
+                start_date="2026-01-02",
+                end_date="2026-01-02",
+            )
+
             self.assertTrue(result["rows"][0]["was_bought"])
             self.assertEqual(result["rows"][0]["buy_action_time"], "2026-01-02 09:40:00")
 

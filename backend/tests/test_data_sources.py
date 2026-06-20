@@ -41,6 +41,27 @@ class DataSourceManagerTests(unittest.TestCase):
             self.assertIn(column, normalized.columns)
         self.assertEqual(normalized.loc[0, "open"], 10.0)
 
+    def test_normalize_history_data_maps_pct_chg_and_yyyymmdd_dates(self):
+        manager = DataSourceManager()
+        raw = pd.DataFrame(
+            {
+                "date": ["20260103", "20260102"],
+                "open": [10.2, 11.0],
+                "high": [10.6, 11.0],
+                "low": [9.9, 11.0],
+                "close": [10.3, 11.0],
+                "volume": [1200, 1000],
+                "amount": [123000000, 200000000],
+                "pct_chg": [1.2, 10.0],
+            }
+        )
+
+        normalized = manager._normalize_history_data(raw)
+
+        self.assertEqual(list(normalized["date"]), ["2026-01-02", "2026-01-03"])
+        self.assertIn("pct_change", normalized.columns)
+        self.assertEqual(normalized.loc[0, "pct_change"], 10.0)
+
     def test_normalize_money_flow_converts_wan_yuan_to_yuan(self):
         manager = DataSourceManager()
 

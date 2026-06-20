@@ -1,7 +1,11 @@
 import sys
 import tempfile
 import unittest
+import importlib
+import sqlite3
 from pathlib import Path
+
+from sqlalchemy import text
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -65,6 +69,39 @@ class CoachStorePersistenceTests(unittest.TestCase):
         self.assertEqual(len(listed), 1)
         self.assertEqual(listed[0]["run_id"], "bt_contract")
         self.assertEqual(listed[0]["result"], result)
+
+    def test_sqlite_to_postgres_migration_script_imports_without_psycopg2(self):
+        module = importlib.import_module("scripts.migrate_sqlite_to_postgres")
+
+        self.assertTrue(callable(module.migrate))
+        self.assertTrue(callable(module.fetch_all))
+
+    def test_existing_sqlite_pick_snapshots_schema_gets_risk_level_column(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "coach.sqlite3"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """
+                CREATE TABLE pick_snapshots (
+                    pick_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    name TEXT,
+                    strategy_code TEXT,
+                    snapshot_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            store = CoachStore(str(db_path))
+            with store.engine.connect() as conn:
+                columns = [row._mapping["name"] for row in conn.execute(text("PRAGMA table_info(pick_snapshots)")).fetchall()]
+
+            self.assertIn("risk_level", columns)
 
 
 if __name__ == "__main__":
