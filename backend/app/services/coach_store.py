@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from threading import RLock
 from typing import Any, Dict, List, Optional
@@ -45,6 +46,23 @@ class CoachStore:
         if row is None:
             return None
         return dict(row._mapping)
+
+    @staticmethod
+    def _normalize_trade_date(value: Any) -> Optional[str]:
+        text_value = str(value or "").strip()
+        if not text_value:
+            return None
+        for fmt in ("%Y-%m-%d", "%Y%m%d"):
+            try:
+                return datetime.strptime(text_value[:10] if fmt == "%Y-%m-%d" else text_value[:8], fmt).strftime("%Y-%m-%d")
+            except Exception:
+                continue
+        return text_value
+
+    @staticmethod
+    def _compact_trade_date(value: str) -> str:
+        normalized = CoachStore._normalize_trade_date(value) or str(value or "")
+        return normalized.replace("-", "")
 
     def _init_schema(self) -> None:
         if self._is_postgres:
@@ -881,6 +899,74 @@ class CoachStore:
             snapshot.setdefault("created_at", data.get("created_at"))
             snapshots.append(snapshot)
         return snapshots
+
+    def list_pick_snapshot_dates(self, user_id: str = "default", limit: int = 30) -> List[str]:
+        """Return recent distinct pick snapshot dates for an existing user."""
+        with self._lock:
+            with self.engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT DISTINCT trade_date
+                        FROM pick_snapshots
+                        WHERE user_id = :user_id
+                          AND trade_date IS NOT NULL
+                          AND trade_date != ''
+                        """
+                    ),
+                    {"user_id": str(user_id or "default")},
+                ).fetchall()
+
+        dates = {
+            normalized
+            for row in rows
+            for normalized in [self._normalize_trade_date(row._mapping.get("trade_date"))]
+            if normalized
+        }
+        return sorted(dates, reverse=True)[: max(1, min(int(limit or 30), 365))]
+
+    def get_latest_pick_snapshots_result(
+        self,
+        user_id: str = "default",
+        trade_date: Optional[str] = None,
+        limit: int = 60,
+        strategy_code: str = "",
+        risk_level: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """Rebuild a lightweight cached recommendation payload from stored pick snapshots."""
+        dates = self.list_pick_snapshot_dates(user_id=user_id, limit=365)
+        normalized_trade_date = self._normalize_trade_date(trade_date) if trade_date else (dates[0] if dates else None)
+        if not normalized_trade_date:
+            return None
+
+        picks = self.list_pick_snapshots(
+            strategy_code=strategy_code or "",
+            risk_level=risk_level or "",
+            trade_date=normalized_trade_date,
+            user_id=user_id,
+        )
+        if not picks and normalized_trade_date:
+            picks = self.list_pick_snapshots(
+                strategy_code=strategy_code or "",
+                risk_level=risk_level or "",
+                trade_date=self._compact_trade_date(normalized_trade_date),
+                user_id=user_id,
+            )
+        if not picks:
+            return None
+
+        picks.sort(key=lambda item: (int(item.get("rank_no") or 9999), str(item.get("pick_id") or "")))
+        limited = picks[: max(1, min(int(limit or 60), 200))]
+        latest_created_at = max((str(item.get("created_at") or "") for item in limited), default="")
+        first = limited[0] if limited else {}
+        return {
+            "status": "cached_from_store",
+            "trade_date": normalized_trade_date,
+            "updated_at": latest_created_at or normalized_trade_date,
+            "strategy_code": first.get("strategy_code") or strategy_code or "trend_breakout",
+            "risk_level": first.get("risk_level") or risk_level or "medium",
+            "picks": limited,
+        }
 
     def get_pick_snapshot(self, pick_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         clauses = ["pick_id = :pick_id"]

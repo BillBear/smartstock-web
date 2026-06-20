@@ -133,13 +133,14 @@ const SmartScreen = () => {
   const [riskLevel, setRiskLevel] = useState('medium')
   const [result, setResult] = useState(null)
   const [loadedAt, setLoadedAt] = useState('')
+  const [selectedSnapshotDate, setSelectedSnapshotDate] = useState(null)
   const [detailOpen, setDetailOpen] = useState(false)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailData, setDetailData] = useState(null)
   const latestLoadReqRef = useRef(0)
   const mountedRef = useRef(false)
 
-  const loadPicks = async (targetRisk = null) => {
+  const loadPicks = async (targetRisk = null, targetSnapshotDate = selectedSnapshotDate) => {
     const reqId = latestLoadReqRef.current + 1
     latestLoadReqRef.current = reqId
     if (mountedRef.current) {
@@ -147,18 +148,33 @@ const SmartScreen = () => {
       setError('')
     }
     try {
+      const effectiveRisk = targetRisk || riskLevel
       const params = {
         user_id: 'default',
         max_count: 30,
+        risk_level: effectiveRisk,
+        cached_only: true,
       }
-      if (targetRisk) {
-        params.risk_level = targetRisk
+      const summaryParams = {
+        user_id: 'default',
+        risk_level: effectiveRisk,
       }
-      const data = await coachApi.getTodayPicks({
-        ...params,
-      })
+      if (targetSnapshotDate) {
+        params.trade_date = targetSnapshotDate
+        summaryParams.trade_date = targetSnapshotDate
+      }
+      const [summary, data] = await Promise.all([
+        coachApi.getSmartScreenSummary(summaryParams),
+        coachApi.getTodayPicks(params),
+      ])
       if (!mountedRef.current || reqId !== latestLoadReqRef.current) return
-      setResult(data)
+      setResult({
+        ...(summary || {}),
+        ...(data || {}),
+        calendar_context: data?.calendar_context || summary?.calendar_context,
+        snapshot_dates: data?.snapshot_dates || summary?.snapshot_dates || [],
+        trade_plan: data?.trade_plan || summary?.trade_plan || {},
+      })
       const nextRisk = data?.risk_profile?.risk_level
       if (nextRisk && ['low', 'medium', 'high'].includes(nextRisk)) {
         setRiskLevel(nextRisk)
@@ -193,13 +209,77 @@ const SmartScreen = () => {
 
   const stateTag = result?.market_state?.state_tag
   const stateMeta = STATE_META[stateTag] || STATE_META.neutral
+  const calendarContext = result?.calendar_context || {}
+  const calendarActions = calendarContext?.actions || {}
+  const calendarMode = calendarContext?.mode || 'trading'
+  const isPreparationMode = calendarMode === 'preparation'
+  const isHistoricalMode = calendarMode === 'historical'
+  const isObservationMode = isPreparationMode || isHistoricalMode
+  const snapshotDates = result?.snapshot_dates || []
+  const canRefresh = calendarActions.can_refresh !== false && calendarMode === 'trading'
+  const canPaperBuy = calendarActions.can_paper_buy !== false
+  const candidateDate = calendarContext?.effective_trade_date || result?.trade_date || '-'
+  const signalAge = calendarContext?.signal_age_days
+  const signalAgeText = signalAge === null || signalAge === undefined ? '-' : `${signalAge} 天`
+  const heroKicker = isPreparationMode ? '备战观察' : (isHistoricalMode ? '历史快照' : '今日行动')
+  const heroHeadline = isPreparationMode
+    ? '备战观察'
+    : (isHistoricalMode ? '历史快照观察' : (tradePlan.headline || '等待生成交易计划'))
+  const heroSummary = isObservationMode
+    ? (calendarContext?.message || '当前只读取已保存候选池快照，不重新运行策略。')
+    : (tradePlan.summary || '系统会先判断市场环境和策略证据，再决定是否输出可执行候选。')
+  const heroBadge = isPreparationMode
+    ? { label: '观察准备', color: '#60a5fa' }
+    : (isHistoricalMode ? { label: '复盘观察', color: '#a78bfa' } : planMeta)
 
   const handleRiskChange = async (value) => {
     setRiskLevel(value)
-    await loadPicks(value)
+    await loadPicks(value, selectedSnapshotDate)
+  }
+
+  const handleSnapshotDateChange = async (value) => {
+    const nextDate = value === 'latest' ? null : value
+    setSelectedSnapshotDate(nextDate)
+    await loadPicks(riskLevel, nextDate)
+  }
+
+  const triggerRefresh = async () => {
+    if (!canRefresh) {
+      message.warning('非交易日不生成交易计划')
+      return
+    }
+    setLoading(true)
+    try {
+      const response = await coachApi.refreshTodayPicks({
+        user_id: 'default',
+        max_count: 30,
+        risk_level: riskLevel,
+      })
+      if (response?.accepted === false) {
+        message.warning(response?.calendar_context?.message || '非交易日不生成交易计划')
+        setResult((prev) => ({
+          ...(prev || {}),
+          calendar_context: response?.calendar_context || prev?.calendar_context,
+          snapshot_dates: response?.snapshot_dates || prev?.snapshot_dates || [],
+        }))
+        return
+      }
+      message.success('后台刷新完成')
+      setSelectedSnapshotDate(null)
+      await loadPicks(riskLevel, null)
+    } catch (err) {
+      console.error('刷新智能选股失败', err)
+      message.error(err?.response?.data?.message || err?.message || '刷新失败')
+    } finally {
+      setLoading(false)
+    }
   }
 
   const reportAction = async (pick, actionType) => {
+    if (actionType === 'paper_buy' && !canPaperBuy) {
+      message.warning('非交易日不生成交易计划，不能模拟买入')
+      return
+    }
     const currentAction = pick?.user_action?.action_type
     if (currentAction === actionType) {
       message.info('该动作已执行，无需重复提交')
@@ -382,7 +462,7 @@ const SmartScreen = () => {
             size="small"
             type="primary"
             loading={actionLoading === `${row.pick_id}-paper_buy`}
-            disabled={row?.decision?.mode === 'watch_only'}
+            disabled={!canPaperBuy || row?.decision?.mode === 'watch_only'}
             onClick={() => reportAction(row, 'paper_buy')}
           >
             模拟买入
@@ -410,6 +490,14 @@ const SmartScreen = () => {
       </div>
 
       {error && <Alert style={{ marginBottom: 16 }} type="error" showIcon message={error} />}
+      {isObservationMode && (
+        <Alert
+          style={{ marginBottom: 16 }}
+          type={isPreparationMode ? 'info' : 'success'}
+          showIcon
+          message={calendarContext?.message || `以下为 ${candidateDate} 候选池，仅供观察准备。`}
+        />
+      )}
       {result?.strategy_health && (
         <Alert
           style={{ marginBottom: 16 }}
@@ -431,12 +519,12 @@ const SmartScreen = () => {
       <Card className="trade-plan-hero" variant="borderless" loading={loading && !result}>
         <div className="plan-hero-main">
           <div>
-            <div className="plan-kicker">今日行动</div>
-            <h2 style={{ color: planMeta.color }}>{tradePlan.headline || '等待生成交易计划'}</h2>
-            <p>{tradePlan.summary || '系统会先判断市场环境和策略证据，再决定是否输出可执行候选。'}</p>
+            <div className="plan-kicker">{heroKicker}</div>
+            <h2 style={{ color: heroBadge.color }}>{heroHeadline}</h2>
+            <p>{heroSummary}</p>
           </div>
-          <div className="plan-badge" style={{ borderColor: planMeta.color, color: planMeta.color }}>
-            {planMeta.label}
+          <div className="plan-badge" style={{ borderColor: heroBadge.color, color: heroBadge.color }}>
+            {heroBadge.label}
           </div>
         </div>
         <Row gutter={[12, 12]} className="plan-metrics">
@@ -489,12 +577,23 @@ const SmartScreen = () => {
                     <Button
                       size="small"
                       type="primary"
-                      disabled={pick?.decision?.mode === 'watch_only'}
-                      loading={actionLoading === `${pick.pick_id}-paper_buy`}
-                      onClick={() => reportAction(pick, 'paper_buy')}
+                      ghost
+                      loading={actionLoading === `${pick.pick_id}-added_watchlist`}
+                      onClick={() => reportAction(pick, 'added_watchlist')}
                     >
-                      模拟买入
+                      加入观察
                     </Button>
+                    <Tooltip title={!canPaperBuy ? '非交易日不生成交易计划，不能模拟买入' : ''}>
+                      <Button
+                        size="small"
+                        type="primary"
+                        disabled={!canPaperBuy || pick?.decision?.mode === 'watch_only'}
+                        loading={actionLoading === `${pick.pick_id}-paper_buy`}
+                        onClick={() => reportAction(pick, 'paper_buy')}
+                      >
+                        模拟买入
+                      </Button>
+                    </Tooltip>
                   </Space>
                 </Card>
               </Col>
@@ -506,7 +605,8 @@ const SmartScreen = () => {
       <Row gutter={16} className="stats-row">
         <Col xs={24} sm={6}>
           <Card className="stat-card">
-            <Statistic title="交易日" value={result?.trade_date || '-'} />
+            <Statistic title={isObservationMode ? '候选池日期' : '交易日'} value={candidateDate} />
+            <div className="stat-extra">信号年龄：{signalAgeText}</div>
           </Card>
         </Col>
         <Col xs={24} sm={6}>
@@ -532,15 +632,23 @@ const SmartScreen = () => {
         </Col>
         <Col xs={24} sm={6}>
           <Card className="stat-card">
-            <Space>
+            <Space className="snapshot-controls" wrap>
               <Select value={riskLevel} onChange={handleRiskChange} style={{ width: 140 }}>
                 <Option value="low">低风险</Option>
                 <Option value="medium">中风险</Option>
                 <Option value="high">高风险</Option>
               </Select>
-              <Button icon={<ReloadOutlined />} loading={loading} onClick={() => loadPicks()}>
-                刷新
-              </Button>
+              <Select value={selectedSnapshotDate || 'latest'} onChange={handleSnapshotDateChange} style={{ width: 148 }}>
+                <Option value="latest">最近快照</Option>
+                {snapshotDates.map((dateText) => (
+                  <Option value={dateText} key={dateText}>{dateText}</Option>
+                ))}
+              </Select>
+              <Tooltip title={!canRefresh ? '非交易日不生成交易计划' : '刷新当前交易日候选池'}>
+                <Button icon={<ReloadOutlined />} loading={loading} disabled={!canRefresh} onClick={triggerRefresh}>
+                  后台刷新
+                </Button>
+              </Tooltip>
             </Space>
           </Card>
         </Col>

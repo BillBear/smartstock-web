@@ -140,6 +140,16 @@ export const coachApi = {
     return api.get('/coach/picks/today', { params })
   },
 
+  // 智能选股页摘要
+  getSmartScreenSummary: (params) => {
+    return api.get('/coach/smart-screen/summary', { params })
+  },
+
+  // 刷新今日推荐
+  refreshTodayPicks: (params) => {
+    return api.post('/coach/picks/refresh', null, { params })
+  },
+
   // 推荐详情
   getPickDetail: (pickId, params) => {
     return api.get(`/coach/picks/${pickId}`, { params })

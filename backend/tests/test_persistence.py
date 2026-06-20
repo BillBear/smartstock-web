@@ -103,6 +103,46 @@ class CoachStorePersistenceTests(unittest.TestCase):
 
             self.assertIn("risk_level", columns)
 
+    def test_list_pick_snapshot_dates_returns_recent_distinct_dates(self):
+        self.store.upsert_pick_snapshots(
+            user_id="default",
+            trade_date="2026-06-17",
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            picks=[
+                {
+                    "pick_id": "2026-06-17-000001-S1",
+                    "symbol": "000001",
+                    "name": "平安银行",
+                    "rank_no": 1,
+                }
+            ],
+        )
+        self.store.upsert_pick_snapshots(
+            user_id="default",
+            trade_date="2026-06-18",
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            picks=[
+                {
+                    "pick_id": "2026-06-18-000001-S1",
+                    "symbol": "000001",
+                    "name": "平安银行",
+                    "rank_no": 1,
+                },
+                {
+                    "pick_id": "2026-06-18-000333-S1",
+                    "symbol": "000333",
+                    "name": "美的集团",
+                    "rank_no": 2,
+                },
+            ],
+        )
+
+        dates = self.store.list_pick_snapshot_dates(user_id="default", limit=30)
+
+        self.assertEqual(dates, ["2026-06-18", "2026-06-17"])
+
 
 if __name__ == "__main__":
     unittest.main()

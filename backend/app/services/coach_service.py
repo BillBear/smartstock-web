@@ -260,6 +260,82 @@ class CoachService:
     def _now_ts() -> float:
         return datetime.now().timestamp()
 
+    @staticmethod
+    def _normalize_trade_date(value: Any) -> Optional[str]:
+        text_value = str(value or "").strip()
+        if not text_value:
+            return None
+        for fmt in ("%Y-%m-%d", "%Y%m%d"):
+            candidate = text_value[:10] if fmt == "%Y-%m-%d" else text_value[:8]
+            try:
+                return datetime.strptime(candidate, fmt).strftime("%Y-%m-%d")
+            except Exception:
+                continue
+        return text_value
+
+    @staticmethod
+    def _date_age_days(requested_date: Optional[str], effective_date: Optional[str]) -> Optional[int]:
+        if not requested_date or not effective_date:
+            return None
+        try:
+            requested = datetime.strptime(requested_date, "%Y-%m-%d").date()
+            effective = datetime.strptime(effective_date, "%Y-%m-%d").date()
+            return max(0, (requested - effective).days)
+        except Exception:
+            return None
+
+    def list_pick_snapshot_dates(self, user_id: str = "default", limit: int = 30) -> List[str]:
+        if hasattr(self.store, "list_pick_snapshot_dates"):
+            return self.store.list_pick_snapshot_dates(user_id=user_id, limit=limit)
+        return []
+
+    def resolve_pick_calendar_context(
+        self,
+        user_id: str = "default",
+        requested_date: Optional[str] = None,
+        trade_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        requested = self._normalize_trade_date(requested_date) or datetime.now().strftime("%Y-%m-%d")
+        explicit_trade_date = self._normalize_trade_date(trade_date)
+        snapshot_dates = self.list_pick_snapshot_dates(user_id=user_id, limit=365)
+
+        if explicit_trade_date:
+            mode = "historical"
+            effective_trade_date = explicit_trade_date
+        elif requested in snapshot_dates:
+            mode = "trading"
+            effective_trade_date = requested
+        else:
+            mode = "preparation"
+            prior_dates = [date_text for date_text in snapshot_dates if date_text <= requested]
+            effective_trade_date = prior_dates[0] if prior_dates else None
+
+        is_trading_day = mode == "trading"
+        signal_age_days = self._date_age_days(requested, effective_trade_date)
+
+        if mode == "trading":
+            message = "展示当前交易日候选池。"
+        elif mode == "historical":
+            message = f"展示 {effective_trade_date or explicit_trade_date} 历史候选池，仅供复盘观察。"
+        elif effective_trade_date:
+            message = f"今日非交易日，展示最近有效交易日 {effective_trade_date} 候选池，仅供观察准备。"
+        else:
+            message = "暂无候选池快照。非交易日不会生成新的交易计划。"
+
+        return {
+            "mode": mode,
+            "requested_date": requested,
+            "effective_trade_date": effective_trade_date,
+            "is_trading_day": is_trading_day,
+            "signal_age_days": signal_age_days,
+            "message": message,
+            "actions": {
+                "can_refresh": is_trading_day,
+                "can_paper_buy": is_trading_day,
+                "can_add_watch": True,
+            },
+        }
+
     def _curated_fallback_candidates(self, target_size: Optional[int] = None) -> List[Dict[str, Any]]:
         limit = max(30, min(int(target_size or 120), len(self.CURATED_FALLBACK_POOL)))
         return [{"symbol": symbol} for symbol in self.CURATED_FALLBACK_POOL[:limit]]
@@ -1863,7 +1939,222 @@ class CoachService:
             ],
         }
 
-    def get_today_picks(self, max_count: int = 5, user_id: str = "default", risk_level: Optional[str] = None) -> Dict[str, Any]:
+    def _market_state_from_cached_picks(self, picks: List[Dict[str, Any]]) -> Dict[str, Any]:
+        first = picks[0] if picks else {}
+        evidence = first.get("evidence_summary") or {}
+        state_tag = str(evidence.get("state_tag") or "neutral")
+        return {
+            "state_tag": state_tag,
+            "summary": "从已保存候选池快照恢复市场状态，仅用于展示。",
+            "reasons": ["当前视图只读取历史候选池快照，不重新运行策略。"],
+            "drivers": [],
+            "news_context": {},
+        }
+
+    def _build_cached_trade_plan(
+        self,
+        picks: List[Dict[str, Any]],
+        calendar_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        core = [p for p in picks if (p.get("decision") or {}).get("grade") == "A"]
+        trial = [p for p in picks if (p.get("decision") or {}).get("grade") == "B"]
+        watch = [p for p in picks if (p.get("decision") or {}).get("grade") == "C"]
+        mode = str((calendar_context or {}).get("mode") or "preparation")
+        if mode == "trading":
+            headline = "今日候选池"
+            summary = "展示当前交易日已保存候选池快照。"
+            primary_action = "paper_only" if core or trial else ("watch" if picks else "no_trade")
+        elif mode == "historical":
+            headline = "历史快照观察"
+            summary = calendar_context.get("message") or "展示指定历史候选池快照，仅供复盘观察。"
+            primary_action = "watch" if picks else "no_trade"
+        else:
+            headline = "备战观察"
+            summary = calendar_context.get("message") or "展示最近有效交易日候选池，仅供下个交易日前观察准备。"
+            primary_action = "watch" if picks else "no_trade"
+
+        return {
+            "primary_action": primary_action,
+            "headline": headline,
+            "summary": summary,
+            "core_count": len(core),
+            "trial_count": len(trial),
+            "watch_count": len(watch),
+            "recommended_count": min(len(core) + len(trial), 3),
+            "suggested_total_exposure_pct": 0.0 if mode != "trading" else 0.0,
+            "probability_model": {
+                "type": "cached_snapshot",
+                "label": "快照概率口径",
+                "calibrated": bool(any((p.get("probability_model") or {}).get("calibrated") for p in picks)),
+                "sample_count": 0,
+                "next_phase": "当前只读取已保存候选池快照，不重新生成交易计划。",
+            },
+            "execution_rules": [
+                "当前视图只读取已保存候选池快照。",
+                "非交易日允许加入观察，禁止模拟买入。",
+            ],
+        }
+
+    def _empty_cached_picks_result(
+        self,
+        user_id: str,
+        max_count: int,
+        risk_level: Optional[str],
+        calendar_context: Dict[str, Any],
+        snapshot_dates: List[str],
+    ) -> Dict[str, Any]:
+        risk_profile = self.get_risk_profile(user_id).copy()
+        if risk_level in {"low", "medium", "high"}:
+            risk_profile["risk_level"] = risk_level
+        return {
+            "status": "empty",
+            "trade_date": calendar_context.get("effective_trade_date"),
+            "market_state": self._market_state_from_cached_picks([]),
+            "risk_profile": risk_profile,
+            "universe_meta": {
+                "source": "pick_snapshots",
+                "candidate_count": 0,
+                "display_limit": max_count,
+            },
+            "strategy_health": {
+                "status": "cached_snapshot",
+                "summary": "当前没有可展示的候选池快照。",
+                "live_ready": False,
+                "credibility_score": None,
+                "credibility_grade": None,
+                "last_run_id": None,
+            },
+            "trade_plan": self._build_cached_trade_plan([], calendar_context),
+            "strategy_context": {"strategy_code": "trend_breakout", "profile_key": None, "config": {}},
+            "calendar_context": calendar_context,
+            "snapshot_dates": snapshot_dates,
+            "picks": [],
+            "no_trade": True,
+            "no_trade_reason": calendar_context.get("message") or "暂无候选池快照",
+        }
+
+    def get_cached_today_picks(
+        self,
+        max_count: int = 5,
+        user_id: str = "default",
+        risk_level: Optional[str] = None,
+        requested_date: Optional[str] = None,
+        trade_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        max_count = max(1, min(max_count, 40))
+        calendar_context = self.resolve_pick_calendar_context(
+            user_id=user_id,
+            requested_date=requested_date,
+            trade_date=trade_date,
+        )
+        snapshot_dates = self.list_pick_snapshot_dates(user_id=user_id, limit=30)
+        effective_trade_date = calendar_context.get("effective_trade_date")
+        if not effective_trade_date:
+            return self._empty_cached_picks_result(user_id, max_count, risk_level, calendar_context, snapshot_dates)
+
+        snapshot_result = self.store.get_latest_pick_snapshots_result(
+            user_id=user_id,
+            trade_date=effective_trade_date,
+            limit=max_count,
+            risk_level=risk_level if risk_level in {"low", "medium", "high"} else "",
+        )
+        if not snapshot_result:
+            snapshot_result = self.store.get_latest_pick_snapshots_result(
+                user_id=user_id,
+                trade_date=effective_trade_date,
+                limit=max_count,
+            )
+        if not snapshot_result:
+            return self._empty_cached_picks_result(user_id, max_count, risk_level, calendar_context, snapshot_dates)
+
+        picks = copy.deepcopy(snapshot_result.get("picks") or [])
+        self._attach_user_actions(picks, user_id)
+        risk_profile = self.get_risk_profile(user_id).copy()
+        if risk_level in {"low", "medium", "high"}:
+            risk_profile["risk_level"] = risk_level
+        active_strategy = self.get_active_strategy_config(user_id=user_id)
+        strategy_code = self._normalize_strategy_code(snapshot_result.get("strategy_code") or (active_strategy or {}).get("strategy_code"))
+
+        return {
+            "status": snapshot_result.get("status") or "cached_from_store",
+            "trade_date": snapshot_result.get("trade_date") or effective_trade_date,
+            "updated_at": snapshot_result.get("updated_at"),
+            "market_state": self._market_state_from_cached_picks(picks),
+            "risk_profile": risk_profile,
+            "universe_meta": {
+                "source": "pick_snapshots",
+                "candidate_count": len(picks),
+                "display_limit": max_count,
+            },
+            "strategy_health": {
+                "status": "cached_snapshot",
+                "summary": "当前候选池来自已保存快照，未重新运行策略。",
+                "live_ready": False,
+                "credibility_score": None,
+                "credibility_grade": None,
+                "last_run_id": None,
+            },
+            "trade_plan": self._build_cached_trade_plan(picks, calendar_context),
+            "strategy_context": {
+                "strategy_code": strategy_code,
+                "profile_key": (active_strategy or {}).get("profile_key"),
+                "config": {
+                    "risk_level": risk_profile.get("risk_level"),
+                    "snapshot_only": True,
+                },
+            },
+            "calendar_context": calendar_context,
+            "snapshot_dates": snapshot_dates,
+            "picks": picks[:max_count],
+            "no_trade": len(picks) == 0,
+            "no_trade_reason": calendar_context.get("message") if len(picks) == 0 else None,
+        }
+
+    def get_smart_screen_summary(
+        self,
+        user_id: str = "default",
+        risk_level: str = "medium",
+        requested_date: Optional[str] = None,
+        trade_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        data = self.get_cached_today_picks(
+            max_count=5,
+            user_id=user_id,
+            risk_level=risk_level,
+            requested_date=requested_date,
+            trade_date=trade_date,
+        )
+        return {
+            "status": data.get("status"),
+            "trade_date": data.get("trade_date"),
+            "calendar_context": data.get("calendar_context"),
+            "snapshot_dates": data.get("snapshot_dates") or [],
+            "risk_profile": data.get("risk_profile") or {},
+            "market_state": data.get("market_state") or {},
+            "trade_plan": data.get("trade_plan") or {},
+            "top_picks": data.get("picks") or [],
+            "pick_count": len(data.get("picks") or []),
+            "no_trade": data.get("no_trade"),
+            "no_trade_reason": data.get("no_trade_reason"),
+        }
+
+    def get_today_picks(
+        self,
+        max_count: int = 5,
+        user_id: str = "default",
+        risk_level: Optional[str] = None,
+        cached_only: bool = False,
+        requested_date: Optional[str] = None,
+        trade_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if cached_only:
+            return self.get_cached_today_picks(
+                max_count=max_count,
+                user_id=user_id,
+                risk_level=risk_level,
+                requested_date=requested_date,
+                trade_date=trade_date,
+            )
         max_count = max(1, min(max_count, 40))
 
         active_strategy = self.get_active_strategy_config(user_id=user_id)

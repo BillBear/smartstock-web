@@ -999,7 +999,10 @@ async def coach_symbol_strategy(symbol: str, user_id: str = "default", risk_leve
 async def coach_picks_today(
     max_count: int = 5,
     risk_level: str = "medium",
-    user_id: str = "default"
+    user_id: str = "default",
+    cached_only: bool = False,
+    requested_date: str = None,
+    trade_date: str = None,
 ):
     """获取今日可投推荐列表（投资教练）"""
     try:
@@ -1007,12 +1010,88 @@ async def coach_picks_today(
             coach_service.get_today_picks,
             max_count=max_count,
             user_id=user_id,
-            risk_level=risk_level
+            risk_level=risk_level,
+            cached_only=cached_only,
+            requested_date=requested_date,
+            trade_date=trade_date,
         )
         data = clean_nan_values(data)
         return ApiResponse(code=200, message="success", data=data)
     except Exception as e:
         logger.error(f"获取今日推荐失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/smart-screen/summary")
+async def coach_smart_screen_summary(
+    user_id: str = "default",
+    risk_level: str = "medium",
+    requested_date: str = None,
+    trade_date: str = None,
+):
+    """获取智能选股页只读摘要和日历上下文。"""
+    try:
+        data = await run_in_threadpool(
+            coach_service.get_smart_screen_summary,
+            user_id=user_id,
+            risk_level=risk_level,
+            requested_date=requested_date,
+            trade_date=trade_date,
+        )
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取智能选股摘要失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(f"{settings.API_PREFIX}/coach/picks/refresh")
+async def coach_picks_refresh(
+    max_count: int = 30,
+    risk_level: str = "medium",
+    user_id: str = "default",
+    requested_date: str = None,
+):
+    """刷新今日候选池；非交易日备战观察模式拒绝生成新交易计划。"""
+    try:
+        calendar_context = await run_in_threadpool(
+            coach_service.resolve_pick_calendar_context,
+            user_id=user_id,
+            requested_date=requested_date,
+        )
+        snapshot_dates = await run_in_threadpool(coach_service.list_pick_snapshot_dates, user_id=user_id, limit=30)
+        if not ((calendar_context.get("actions") or {}).get("can_refresh")):
+            return ApiResponse(
+                code=200,
+                message="success",
+                data={
+                    "accepted": False,
+                    "reason": "non_trading_day",
+                    "calendar_context": calendar_context,
+                    "snapshot_dates": snapshot_dates,
+                },
+            )
+
+        data = await run_in_threadpool(
+            coach_service.get_today_picks,
+            max_count=max_count,
+            user_id=user_id,
+            risk_level=risk_level,
+        )
+        data = clean_nan_values(data)
+        return ApiResponse(
+            code=200,
+            message="success",
+            data={
+                "accepted": True,
+                "reason": None,
+                "calendar_context": data.get("calendar_context") or calendar_context,
+                "snapshot_dates": data.get("snapshot_dates") or snapshot_dates,
+                "result": data,
+            },
+        )
+    except Exception as e:
+        logger.error(f"刷新今日推荐失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

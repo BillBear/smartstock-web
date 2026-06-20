@@ -178,6 +178,16 @@
   font-family: 'JetBrains Mono', monospace;
 }
 
+.stat-extra {
+  margin-top: 6px;
+  color: rgba(203, 213, 225, 0.72);
+  font-size: 12px;
+}
+
+.snapshot-controls {
+  width: 100%;
+}
+
 /* 排行榜卡片 */
 .ranking-card {
   background: rgba(255, 255, 255, 0.05);
