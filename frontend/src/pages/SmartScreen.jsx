@@ -20,6 +20,7 @@ import {
 import { InfoCircleOutlined, ReloadOutlined, ThunderboltOutlined, TrophyOutlined } from '@ant-design/icons'
 import { coachApi } from '../services/api'
 import MarketFactorExplain from '../components/MarketFactorExplain'
+import { shouldRefreshCurrentTradingPicks } from './smartScreenData.mjs'
 import './SmartScreen.css'
 
 const { Option } = Select
@@ -139,6 +140,7 @@ const SmartScreen = () => {
   const [detailData, setDetailData] = useState(null)
   const latestLoadReqRef = useRef(0)
   const mountedRef = useRef(false)
+  const refreshAttemptedForDateRef = useRef('')
 
   const loadPicks = async (targetRisk = null, targetSnapshotDate = selectedSnapshotDate) => {
     const reqId = latestLoadReqRef.current + 1
@@ -168,13 +170,39 @@ const SmartScreen = () => {
         coachApi.getTodayPicks(params),
       ])
       if (!mountedRef.current || reqId !== latestLoadReqRef.current) return
-      setResult({
+      const combinedResult = {
         ...(summary || {}),
         ...(data || {}),
         calendar_context: data?.calendar_context || summary?.calendar_context,
         snapshot_dates: data?.snapshot_dates || summary?.snapshot_dates || [],
         trade_plan: data?.trade_plan || summary?.trade_plan || {},
-      })
+      }
+      setResult(combinedResult)
+      const calendarContext = combinedResult.calendar_context || {}
+      const refreshKey = calendarContext.requested_date || calendarContext.effective_trade_date || ''
+      const canRefreshCurrent = (calendarContext.actions || {}).can_refresh !== false
+      if (
+        refreshKey
+        && refreshAttemptedForDateRef.current !== refreshKey
+        && shouldRefreshCurrentTradingPicks({
+          calendarContext,
+          canRefresh: canRefreshCurrent,
+          isRefreshing: Boolean(combinedResult.is_refreshing),
+        })
+      ) {
+        refreshAttemptedForDateRef.current = refreshKey
+        coachApi.refreshTodayPicks({
+          user_id: 'default',
+          max_count: 30,
+          risk_level: effectiveRisk,
+        }).then(() => {
+          if (mountedRef.current && reqId === latestLoadReqRef.current) {
+            loadPicks(effectiveRisk, null)
+          }
+        }).catch((refreshErr) => {
+          console.warn('自动刷新当前交易日候选池失败', refreshErr)
+        })
+      }
       const nextRisk = data?.risk_profile?.risk_level
       if (nextRisk && ['low', 'medium', 'high'].includes(nextRisk)) {
         setRiskLevel(nextRisk)

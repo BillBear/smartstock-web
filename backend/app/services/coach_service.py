@@ -289,6 +289,17 @@ class CoachService:
             return self.store.list_pick_snapshot_dates(user_id=user_id, limit=limit)
         return []
 
+    def _is_recommendation_trading_day(self, date_text: Optional[str]) -> bool:
+        target_date = self._normalize_trade_date(date_text)
+        if not target_date or not self.store or not hasattr(self.store, "get_latest_valid_market_snapshot"):
+            return False
+        try:
+            snapshot = self.store.get_latest_valid_market_snapshot(trade_date=target_date, min_count=1)
+        except Exception:
+            return False
+        snapshot_trade_date = self._normalize_trade_date((snapshot or {}).get("trade_date"))
+        return snapshot_trade_date == target_date
+
     def resolve_pick_calendar_context(
         self,
         user_id: str = "default",
@@ -298,12 +309,20 @@ class CoachService:
         requested = self._normalize_trade_date(requested_date) or datetime.now().strftime("%Y-%m-%d")
         explicit_trade_date = self._normalize_trade_date(trade_date)
         snapshot_dates = self.list_pick_snapshot_dates(user_id=user_id, limit=365)
+        has_requested_snapshot = requested in snapshot_dates
+        is_requested_trading_day = self._is_recommendation_trading_day(requested)
+        displayed_snapshot_date = None
 
         if explicit_trade_date:
             mode = "historical"
             effective_trade_date = explicit_trade_date
-        elif requested in snapshot_dates:
+        elif has_requested_snapshot:
             mode = "trading"
+            effective_trade_date = requested
+        elif is_requested_trading_day:
+            mode = "trading"
+            prior_dates = [date_text for date_text in snapshot_dates if date_text <= requested]
+            displayed_snapshot_date = prior_dates[0] if prior_dates else None
             effective_trade_date = requested
         else:
             mode = "preparation"
@@ -312,9 +331,15 @@ class CoachService:
 
         is_trading_day = mode == "trading"
         signal_age_days = self._date_age_days(requested, effective_trade_date)
+        snapshot_age_days = self._date_age_days(requested, displayed_snapshot_date)
+        can_paper_buy = mode == "trading" and has_requested_snapshot
 
-        if mode == "trading":
+        if mode == "trading" and has_requested_snapshot:
             message = "展示当前交易日候选池。"
+        elif mode == "trading" and displayed_snapshot_date:
+            message = f"今日为交易日，当前暂无 {requested} 候选快照，可后台刷新生成；暂展示最近快照 {displayed_snapshot_date} 仅供参考。"
+        elif mode == "trading":
+            message = f"今日为交易日，当前暂无 {requested} 候选快照，可后台刷新生成。"
         elif mode == "historical":
             message = f"展示 {effective_trade_date or explicit_trade_date} 历史候选池，仅供复盘观察。"
         elif effective_trade_date:
@@ -328,10 +353,12 @@ class CoachService:
             "effective_trade_date": effective_trade_date,
             "is_trading_day": is_trading_day,
             "signal_age_days": signal_age_days,
+            "snapshot_trade_date": displayed_snapshot_date,
+            "snapshot_age_days": snapshot_age_days,
             "message": message,
             "actions": {
                 "can_refresh": is_trading_day,
-                "can_paper_buy": is_trading_day,
+                "can_paper_buy": can_paper_buy,
                 "can_add_watch": True,
             },
         }
@@ -2048,7 +2075,7 @@ class CoachService:
             trade_date=trade_date,
         )
         snapshot_dates = self.list_pick_snapshot_dates(user_id=user_id, limit=30)
-        effective_trade_date = calendar_context.get("effective_trade_date")
+        effective_trade_date = calendar_context.get("snapshot_trade_date") or calendar_context.get("effective_trade_date")
         if not effective_trade_date:
             return self._empty_cached_picks_result(user_id, max_count, risk_level, calendar_context, snapshot_dates)
 

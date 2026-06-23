@@ -106,6 +106,28 @@ class NonTradingPreparationModeTests(unittest.TestCase):
         self.assertTrue(result["calendar_context"]["actions"]["can_refresh"])
         self.assertTrue(result["calendar_context"]["actions"]["can_paper_buy"])
 
+    def test_cached_only_trading_day_without_current_snapshot_allows_refresh_but_blocks_stale_paper_buy(self):
+        self.service._is_recommendation_trading_day = lambda date_text: date_text == "2026-06-22"
+        self.save_snapshot("2026-06-17")
+
+        result = self.service.get_cached_today_picks(
+            max_count=5,
+            user_id="default",
+            requested_date="2026-06-22",
+        )
+
+        self.assertEqual(result["trade_date"], "2026-06-17")
+        self.assertEqual([pick["symbol"] for pick in result["picks"]], ["000001", "000333"])
+        context = result["calendar_context"]
+        self.assertEqual(context["mode"], "trading")
+        self.assertEqual(context["requested_date"], "2026-06-22")
+        self.assertEqual(context["effective_trade_date"], "2026-06-22")
+        self.assertEqual(context["snapshot_trade_date"], "2026-06-17")
+        self.assertTrue(context["is_trading_day"])
+        self.assertTrue(context["actions"]["can_refresh"])
+        self.assertFalse(context["actions"]["can_paper_buy"])
+        self.assertTrue(context["actions"]["can_add_watch"])
+
     def test_cached_only_without_snapshots_returns_empty_preparation_context(self):
         result = self.service.get_cached_today_picks(
             max_count=5,
