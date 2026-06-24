@@ -9,7 +9,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.engine import Engine
 
 
@@ -48,6 +48,19 @@ class CoachStore:
             return None
         return dict(row._mapping)
 
+    @staticmethod
+    def _normalize_trade_date(value: Any) -> Optional[str]:
+        text_value = str(value or "").strip()
+        if not text_value:
+            return None
+        for fmt in ("%Y-%m-%d", "%Y%m%d"):
+            candidate = text_value[:10] if fmt == "%Y-%m-%d" else text_value[:8]
+            try:
+                return datetime.strptime(candidate, fmt).strftime("%Y-%m-%d")
+            except Exception:
+                continue
+        return text_value
+
     def _init_schema(self) -> None:
         if self._is_postgres:
             sql = """
@@ -81,6 +94,7 @@ class CoachStore:
                 user_id TEXT NOT NULL,
                 symbol TEXT NOT NULL,
                 name TEXT,
+                pick_id TEXT,
                 qty DOUBLE PRECISION NOT NULL,
                 avg_price DOUBLE PRECISION NOT NULL,
                 cost_amount DOUBLE PRECISION NOT NULL,
@@ -111,6 +125,27 @@ class CoachStore:
             );
             CREATE INDEX IF NOT EXISTS idx_trades_user_time ON paper_trades(user_id, id DESC);
             CREATE INDEX IF NOT EXISTS idx_trades_user_symbol ON paper_trades(user_id, symbol, id DESC);
+
+            CREATE TABLE IF NOT EXISTS paper_trade_evaluations (
+                eval_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                name TEXT,
+                pick_id TEXT,
+                status TEXT NOT NULL,
+                entry_date TEXT,
+                exit_date TEXT,
+                metrics_json TEXT NOT NULL,
+                attribution_json TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                calibration_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_paper_trade_evaluations_user_status
+                ON paper_trade_evaluations(user_id, status, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_paper_trade_evaluations_symbol
+                ON paper_trade_evaluations(user_id, symbol, updated_at DESC);
 
             CREATE TABLE IF NOT EXISTS backtest_runs (
                 run_id TEXT PRIMARY KEY,
@@ -305,6 +340,7 @@ class CoachStore:
                 user_id TEXT NOT NULL,
                 symbol TEXT NOT NULL,
                 name TEXT,
+                pick_id TEXT,
                 qty REAL NOT NULL,
                 avg_price REAL NOT NULL,
                 cost_amount REAL NOT NULL,
@@ -335,6 +371,27 @@ class CoachStore:
             );
             CREATE INDEX IF NOT EXISTS idx_trades_user_time ON paper_trades(user_id, id DESC);
             CREATE INDEX IF NOT EXISTS idx_trades_user_symbol ON paper_trades(user_id, symbol, id DESC);
+
+            CREATE TABLE IF NOT EXISTS paper_trade_evaluations (
+                eval_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                name TEXT,
+                pick_id TEXT,
+                status TEXT NOT NULL,
+                entry_date TEXT,
+                exit_date TEXT,
+                metrics_json TEXT NOT NULL,
+                attribution_json TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                calibration_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_paper_trade_evaluations_user_status
+                ON paper_trade_evaluations(user_id, status, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_paper_trade_evaluations_symbol
+                ON paper_trade_evaluations(user_id, symbol, updated_at DESC);
 
             CREATE TABLE IF NOT EXISTS backtest_runs (
                 run_id TEXT PRIMARY KEY,
@@ -503,6 +560,29 @@ class CoachStore:
             with self.engine.begin() as conn:
                 for stmt in statements:
                     conn.execute(text(stmt))
+                self._run_schema_migrations(conn)
+
+    def _run_schema_migrations(self, conn) -> None:
+        """Keep existing local databases compatible with incremental coach schema changes."""
+        def has_column(table_name: str, column_name: str) -> bool:
+            if self._is_postgres:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_name = :table_name AND column_name = :column_name
+                        LIMIT 1
+                        """
+                    ),
+                    {"table_name": table_name, "column_name": column_name},
+                ).first()
+                return bool(row)
+            rows = conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
+            return any(str(row._mapping.get("name")) == column_name for row in rows)
+
+        if not has_column("paper_positions", "pick_id"):
+            conn.execute(text("ALTER TABLE paper_positions ADD COLUMN pick_id TEXT"))
 
     def _init_market_snapshot_schema(self) -> None:
         """Create persistent market-data snapshot tables used by the recommendation pipeline."""
@@ -1066,6 +1146,107 @@ class CoachStore:
             "picks": picks,
         }
 
+    def list_pick_snapshot_dates(self, user_id: str = "default", limit: int = 30) -> List[str]:
+        """Return recent distinct persisted recommendation dates for a user."""
+        with self._lock:
+            with self.engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT DISTINCT trade_date
+                        FROM pick_snapshots
+                        WHERE user_id = :user_id
+                          AND trade_date IS NOT NULL
+                          AND trade_date != ''
+                        """
+                    ),
+                    {"user_id": str(user_id or "default")},
+                ).fetchall()
+        dates = {
+            normalized
+            for row in rows
+            for normalized in [self._normalize_trade_date(row._mapping.get("trade_date"))]
+            if normalized
+        }
+        return sorted(dates, reverse=True)[: max(1, min(int(limit or 30), 365))]
+
+    def list_pick_snapshots(
+        self,
+        user_id: str = "default",
+        trade_date: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """Return the latest persisted recommendation batch for a date."""
+        result_limit = max(1, min(int(limit or 200), 500))
+        params: Dict[str, Any] = {"user_id": user_id}
+        date_clause = ""
+        if trade_date:
+            date_clause = "AND trade_date = :trade_date"
+            params["trade_date"] = str(trade_date)
+
+        latest_date_sql = text(
+            f"""
+            SELECT trade_date
+            FROM pick_snapshots
+            WHERE user_id = :user_id {date_clause}
+            GROUP BY trade_date
+            ORDER BY trade_date DESC
+            LIMIT 1
+            """
+        )
+        with self._lock:
+            with self.engine.connect() as conn:
+                row = conn.execute(latest_date_sql, params).first()
+                if not row:
+                    return []
+                latest_trade_date = str(row._mapping["trade_date"])
+                batch_row = conn.execute(
+                    text(
+                        """
+                        SELECT created_at
+                        FROM pick_snapshots
+                        WHERE user_id = :user_id AND trade_date = :trade_date
+                        GROUP BY created_at
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"user_id": user_id, "trade_date": latest_trade_date},
+                ).first()
+                if not batch_row:
+                    return []
+                latest_created_at = str(batch_row._mapping["created_at"])
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT *
+                        FROM pick_snapshots
+                        WHERE user_id = :user_id
+                            AND trade_date = :trade_date
+                            AND created_at = :created_at
+                        ORDER BY symbol
+                        LIMIT :limit
+                        """
+                    ),
+                    {
+                        "user_id": user_id,
+                        "trade_date": latest_trade_date,
+                        "created_at": latest_created_at,
+                        "limit": result_limit,
+                    },
+                ).fetchall()
+
+        items: List[Dict[str, Any]] = []
+        for row in rows:
+            data = dict(row._mapping)
+            try:
+                data["snapshot"] = json.loads(data.get("snapshot_json") or "{}")
+            except Exception:
+                data["snapshot"] = {}
+            items.append(data)
+        items.sort(key=lambda item: int((item.get("snapshot") or {}).get("rank_no") or 9999))
+        return items
+
     def upsert_market_snapshot(
         self,
         trade_date: str,
@@ -1302,6 +1483,50 @@ class CoachStore:
             counts["total"] += count
         return counts
 
+    def get_money_flow_snapshots_by_symbols(
+        self,
+        symbols: List[str],
+        trade_date: Optional[str] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        clean_symbols = [str(symbol or "").strip() for symbol in symbols or [] if str(symbol or "").strip()]
+        if not clean_symbols:
+            return {}
+
+        params: Dict[str, Any] = {"symbols": clean_symbols}
+        date_clause = ""
+        if trade_date:
+            date_clause = "AND trade_date = :trade_date"
+            params["trade_date"] = str(trade_date)
+
+        with self._lock:
+            with self.engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        f"""
+                        SELECT trade_date, symbol, quality, source, available, payload_json, created_at
+                        FROM money_flow_snapshots
+                        WHERE symbol IN :symbols
+                        {date_clause}
+                        ORDER BY symbol, trade_date DESC, created_at DESC
+                        """
+                    ).bindparams(bindparam("symbols", expanding=True)),
+                    params,
+                ).fetchall()
+
+        snapshots: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            data = dict(row._mapping)
+            symbol = str(data.get("symbol") or "")
+            if symbol in snapshots:
+                continue
+            try:
+                payload = json.loads(data.get("payload_json") or "{}")
+            except Exception:
+                payload = {}
+            data["payload"] = payload
+            snapshots[symbol] = data
+        return snapshots
+
     def upsert_theme_snapshots(self, trade_date: str, themes: List[Dict[str, Any]], created_at: str) -> int:
         rows = []
         for item in themes or []:
@@ -1384,7 +1609,12 @@ class CoachStore:
                         text(
                             """
                             UPDATE paper_positions
-                            SET qty = :qty, avg_price = :avg_price, cost_amount = :cost_amount, name = :name, updated_at = :updated_at
+                            SET qty = :qty,
+                                avg_price = :avg_price,
+                                cost_amount = :cost_amount,
+                                name = :name,
+                                pick_id = COALESCE(:pick_id, pick_id),
+                                updated_at = :updated_at
                             WHERE id = :id
                             """
                         ),
@@ -1393,6 +1623,7 @@ class CoachStore:
                             "avg_price": avg_price,
                             "cost_amount": new_cost,
                             "name": name,
+                            "pick_id": pick_id,
                             "updated_at": created_at,
                             "id": p["id"],
                         },
@@ -1402,9 +1633,9 @@ class CoachStore:
                         text(
                             """
                             INSERT INTO paper_positions (
-                                user_id, symbol, name, qty, avg_price, cost_amount, status, opened_at, updated_at
+                                user_id, symbol, name, pick_id, qty, avg_price, cost_amount, status, opened_at, updated_at
                             ) VALUES (
-                                :user_id, :symbol, :name, :qty, :avg_price, :cost_amount, 'open', :opened_at, :updated_at
+                                :user_id, :symbol, :name, :pick_id, :qty, :avg_price, :cost_amount, 'open', :opened_at, :updated_at
                             )
                             """
                         ),
@@ -1412,6 +1643,7 @@ class CoachStore:
                             "user_id": user_id,
                             "symbol": symbol,
                             "name": name,
+                            "pick_id": pick_id,
                             "qty": qty,
                             "avg_price": price,
                             "cost_amount": amount,
@@ -1503,7 +1735,7 @@ class CoachStore:
                         INSERT INTO paper_trades (
                             user_id, symbol, name, pick_id, side, price, qty, amount, fee, reason, created_at
                         ) VALUES (
-                            :user_id, :symbol, :name, NULL, 'sell', :price, :qty, :amount, 0, :reason, :created_at
+                            :user_id, :symbol, :name, :pick_id, 'sell', :price, :qty, :amount, 0, :reason, :created_at
                         )
                         """
                     ),
@@ -1511,6 +1743,7 @@ class CoachStore:
                         "user_id": user_id,
                         "symbol": symbol,
                         "name": p.get("name"),
+                        "pick_id": p.get("pick_id"),
                         "price": close_price,
                         "qty": qty,
                         "amount": amount,
@@ -1535,6 +1768,7 @@ class CoachStore:
                         "user_id": user_id,
                         "symbol": symbol,
                         "name": p.get("name"),
+                        "pick_id": p.get("pick_id"),
                         "qty": 0,
                         "avg_price": avg_price,
                         "cost_amount": 0,
@@ -1571,6 +1805,7 @@ class CoachStore:
                     result = self._row_to_dict(row) or {}
                 result["realized_pnl"] = realized_pnl
                 result["closed_qty"] = qty
+                result["pick_id"] = p.get("pick_id")
                 return result
 
     def list_open_positions(self, user_id: str) -> List[Dict[str, Any]]:
@@ -1635,6 +1870,130 @@ class CoachStore:
                     {"user_id": user_id, "limit": max(1, min(limit, 2000))},
                 ).fetchall()
                 return [dict(row._mapping) for row in rows]
+
+    def save_paper_trade_evaluation(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        payload = {
+            "eval_id": str(record.get("eval_id")),
+            "user_id": str(record.get("user_id") or "default"),
+            "symbol": str(record.get("symbol") or ""),
+            "name": record.get("name"),
+            "pick_id": record.get("pick_id"),
+            "status": str(record.get("status") or "open"),
+            "entry_date": record.get("entry_date"),
+            "exit_date": record.get("exit_date"),
+            "metrics_json": json.dumps(record.get("metrics") or {}, ensure_ascii=False),
+            "attribution_json": json.dumps(record.get("attribution") or {}, ensure_ascii=False),
+            "snapshot_json": json.dumps(record.get("snapshot") or {}, ensure_ascii=False),
+            "calibration_json": json.dumps(record.get("calibration") or {}, ensure_ascii=False),
+            "created_at": str(record.get("created_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            "updated_at": str(record.get("updated_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        }
+        with self._lock:
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO paper_trade_evaluations (
+                            eval_id, user_id, symbol, name, pick_id, status, entry_date, exit_date,
+                            metrics_json, attribution_json, snapshot_json, calibration_json, created_at, updated_at
+                        ) VALUES (
+                            :eval_id, :user_id, :symbol, :name, :pick_id, :status, :entry_date, :exit_date,
+                            :metrics_json, :attribution_json, :snapshot_json, :calibration_json, :created_at, :updated_at
+                        )
+                        ON CONFLICT(eval_id) DO UPDATE SET
+                            name=excluded.name,
+                            pick_id=excluded.pick_id,
+                            status=excluded.status,
+                            entry_date=excluded.entry_date,
+                            exit_date=excluded.exit_date,
+                            metrics_json=excluded.metrics_json,
+                            attribution_json=excluded.attribution_json,
+                            snapshot_json=excluded.snapshot_json,
+                            calibration_json=excluded.calibration_json,
+                            updated_at=excluded.updated_at
+                        """
+                    ),
+                    payload,
+                )
+        return {
+            "eval_id": payload["eval_id"],
+            "user_id": payload["user_id"],
+            "symbol": payload["symbol"],
+            "name": payload["name"],
+            "pick_id": payload["pick_id"],
+            "status": payload["status"],
+            "entry_date": payload["entry_date"],
+            "exit_date": payload["exit_date"],
+            "metrics": record.get("metrics") or {},
+            "attribution": record.get("attribution") or {},
+            "snapshot": record.get("snapshot") or {},
+            "calibration": record.get("calibration") or {},
+            "created_at": payload["created_at"],
+            "updated_at": payload["updated_at"],
+        }
+
+    def list_paper_trade_evaluations(
+        self,
+        user_id: str,
+        status: Optional[str] = None,
+        limit: int = 500,
+    ) -> List[Dict[str, Any]]:
+        clauses = ["user_id = :user_id"]
+        params: Dict[str, Any] = {"user_id": str(user_id), "limit": max(1, min(int(limit or 500), 2000))}
+        if status:
+            clauses.append("status = :status")
+            params["status"] = str(status)
+        sql = text(
+            f"""
+            SELECT *
+            FROM paper_trade_evaluations
+            WHERE {' AND '.join(clauses)}
+            ORDER BY updated_at DESC
+            LIMIT :limit
+            """
+        )
+        with self._lock:
+            with self.engine.connect() as conn:
+                rows = conn.execute(sql, params).fetchall()
+
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            data = dict(row._mapping)
+            for source_key, target_key, default in (
+                ("metrics_json", "metrics", {}),
+                ("attribution_json", "attribution", {}),
+                ("snapshot_json", "snapshot", {}),
+                ("calibration_json", "calibration", {}),
+            ):
+                try:
+                    data[target_key] = json.loads(data.get(source_key) or json.dumps(default, ensure_ascii=False))
+                except Exception:
+                    data[target_key] = default
+            out.append(data)
+        return out
+
+    def delete_orphan_open_paper_trade_evaluations(self, user_id: str) -> int:
+        """Remove open evaluation rows whose open position no longer exists."""
+        with self._lock:
+            with self.engine.begin() as conn:
+                result = conn.execute(
+                    text(
+                        """
+                        DELETE FROM paper_trade_evaluations
+                        WHERE user_id = :user_id
+                          AND status = 'open'
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM paper_positions p
+                              WHERE p.user_id = paper_trade_evaluations.user_id
+                                AND p.symbol = paper_trade_evaluations.symbol
+                                AND p.status = 'open'
+                          )
+                        """
+                    ),
+                    {"user_id": str(user_id)},
+                )
+                return int(result.rowcount or 0)
 
     def save_backtest_run(
         self,
@@ -2011,7 +2370,12 @@ class CoachStore:
             labels = {
                 "future_return_pct": float(item.get("future_return_pct") or 0.0),
                 "future_max_drawdown_pct": float(item.get("future_max_drawdown_pct") or 0.0),
+                "future_return_3d_pct": float(item.get("future_return_3d_pct") or 0.0),
+                "future_max_return_3d_pct": float(item.get("future_max_return_3d_pct") or 0.0),
+                "future_max_drawdown_3d_pct": float(item.get("future_max_drawdown_3d_pct") or 0.0),
                 "label_up": int(item.get("label_up") or 0),
+                "label_swing_up_15d": int(item.get("label_swing_up_15d") or item.get("label_up") or 0),
+                "label_short_continuation_3d": int(item.get("label_short_continuation_3d") or 0),
                 "label_dd": int(item.get("label_dd") or 0),
                 "label_risk_adjusted_return": float(item.get("label_risk_adjusted_return") or 0.0),
             }
@@ -2128,6 +2492,113 @@ class CoachStore:
                     {"model_id": str(model_id), "limit": int(limit)},
                 ).fetchall()
         return [dict(row._mapping) for row in rows]
+
+    def save_ml_model_metrics(self, model_id: str, metrics: Dict[str, Any]) -> int:
+        """Persist calibration/readiness metrics as queryable rows."""
+        if not model_id or not metrics:
+            return 0
+
+        rows: List[Dict[str, Any]] = []
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        def _append(prefix: str, value: Any) -> None:
+            key = prefix.strip(".")
+            if not key:
+                return
+            if isinstance(value, bool):
+                rows.append(
+                    {
+                        "model_id": str(model_id),
+                        "metric_key": key,
+                        "metric_value": 1.0 if value else 0.0,
+                        "metric_json": None,
+                        "created_at": now_str,
+                    }
+                )
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                rows.append(
+                    {
+                        "model_id": str(model_id),
+                        "metric_key": key,
+                        "metric_value": float(value),
+                        "metric_json": None,
+                        "created_at": now_str,
+                    }
+                )
+            elif isinstance(value, dict):
+                scalar_items = {k: v for k, v in value.items() if isinstance(v, (bool, int, float))}
+                if scalar_items:
+                    for child_key, child_value in scalar_items.items():
+                        _append(f"{key}.{child_key}", child_value)
+                non_scalar = {k: v for k, v in value.items() if not isinstance(v, (bool, int, float))}
+                if non_scalar:
+                    rows.append(
+                        {
+                            "model_id": str(model_id),
+                            "metric_key": key,
+                            "metric_value": None,
+                            "metric_json": json.dumps(non_scalar, ensure_ascii=False),
+                            "created_at": now_str,
+                        }
+                    )
+            elif isinstance(value, list):
+                rows.append(
+                    {
+                        "model_id": str(model_id),
+                        "metric_key": key,
+                        "metric_value": None,
+                        "metric_json": json.dumps(value, ensure_ascii=False),
+                        "created_at": now_str,
+                    }
+                )
+
+        for metric_key, metric_value in metrics.items():
+            _append(str(metric_key), metric_value)
+
+        if not rows:
+            return 0
+        with self._lock:
+            with self.engine.begin() as conn:
+                conn.execute(text("DELETE FROM ml_model_metrics WHERE model_id = :model_id"), {"model_id": str(model_id)})
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO ml_model_metrics (
+                            model_id, metric_key, metric_value, metric_json, created_at
+                        ) VALUES (
+                            :model_id, :metric_key, :metric_value, :metric_json, :created_at
+                        )
+                        """
+                    ),
+                    rows,
+                )
+        return len(rows)
+
+    def list_ml_model_metrics(self, model_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+        with self._lock:
+            with self.engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT metric_key, metric_value, metric_json, created_at
+                        FROM ml_model_metrics
+                        WHERE model_id = :model_id
+                        ORDER BY metric_key ASC
+                        LIMIT :limit
+                        """
+                    ),
+                    {"model_id": str(model_id), "limit": max(1, min(int(limit or 200), 1000))},
+                ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            data = dict(row._mapping)
+            if data.get("metric_json"):
+                try:
+                    data["metric_payload"] = json.loads(data.get("metric_json") or "null")
+                except Exception:
+                    data["metric_payload"] = None
+            out.append(data)
+        return out
 
     def save_ml_prediction(self, record: Dict[str, Any]) -> None:
         payload = {
@@ -2263,7 +2734,16 @@ class CoachStore:
         suggestions: List[Dict[str, Any]],
         diagnostics: Dict[str, Any],
         created_at: str,
+        failure_reasons: Optional[List[Dict[str, Any]]] = None,
+        execution_deviation: Optional[Dict[str, Any]] = None,
+        strategy_adjustments: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
+        diagnostics_payload = {
+            **(diagnostics or {}),
+            "failure_reasons": failure_reasons or [],
+            "execution_deviation": execution_deviation or {},
+            "strategy_adjustments": strategy_adjustments or [],
+        }
         payload = {
             "report_id": str(report_id),
             "user_id": str(user_id),
@@ -2271,7 +2751,7 @@ class CoachStore:
             "report_type": str(report_type or "daily"),
             "summary_json": json.dumps(summary or {}, ensure_ascii=False),
             "suggestions_json": json.dumps(suggestions or [], ensure_ascii=False),
-            "diagnostics_json": json.dumps(diagnostics or {}, ensure_ascii=False),
+            "diagnostics_json": json.dumps(diagnostics_payload, ensure_ascii=False),
             "created_at": str(created_at),
         }
         with self._lock:
@@ -2302,7 +2782,10 @@ class CoachStore:
             "report_type": payload["report_type"],
             "summary": summary or {},
             "suggestions": suggestions or [],
-            "diagnostics": diagnostics or {},
+            "diagnostics": diagnostics_payload,
+            "failure_reasons": failure_reasons or [],
+            "execution_deviation": execution_deviation or {},
+            "strategy_adjustments": strategy_adjustments or [],
             "created_at": payload["created_at"],
         }
 
@@ -2337,4 +2820,8 @@ class CoachStore:
                 data[target_key] = json.loads(data.get(source_key) or json.dumps(default, ensure_ascii=False))
             except Exception:
                 data[target_key] = default
+        diagnostics = data.get("diagnostics") or {}
+        data["failure_reasons"] = diagnostics.get("failure_reasons") or []
+        data["execution_deviation"] = diagnostics.get("execution_deviation") or {}
+        data["strategy_adjustments"] = diagnostics.get("strategy_adjustments") or []
         return data

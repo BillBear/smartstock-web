@@ -68,3 +68,55 @@
   color: rgba(255, 255, 255, 0.88);
   font-weight: 600;
 }
+
+/* Terminal refresh overrides */
+.backtest-container {
+  padding: clamp(16px, 2.2vw, 28px);
+  background:
+    linear-gradient(180deg, rgba(12, 17, 24, 0.98), rgba(8, 11, 16, 1)),
+    var(--bg-primary);
+  min-height: 100dvh;
+}
+
+.backtest-header {
+  border-bottom: 1px solid var(--border-primary);
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+}
+
+.config-card,
+.info-card,
+.evidence-package-card {
+  background: linear-gradient(180deg, rgba(17, 23, 32, 0.98), rgba(13, 17, 24, 0.98)) !important;
+  border: 1px solid var(--border-secondary) !important;
+  border-radius: var(--radius-lg) !important;
+  box-shadow: var(--shadow-sm) !important;
+}
+
+.config-card .ant-card-head-title,
+.info-card h3,
+.config-card .ant-descriptions-title,
+.config-card .ant-table-title {
+  color: var(--text-primary);
+}
+
+.config-card .ant-form-item-label > label,
+.info-card ul li,
+.config-card .ant-descriptions-item-label,
+.evidence-package-card .ant-alert-description {
+  color: var(--text-secondary);
+}
+
+.config-card .ant-card-head {
+  border-bottom-color: var(--border-secondary) !important;
+}
+
+.info-card ul {
+  margin-bottom: 0;
+}
+
+@media (max-width: 768px) {
+  .backtest-container {
+    padding: 14px;
+  }
+}

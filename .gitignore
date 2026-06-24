@@ -24,6 +24,7 @@ postgres/*.log
 postgres/data/
 backend/data/*.db
 backend/data/*.sqlite*
+backend/data/ml_models/
 
 # Local secrets
 .env

@@ -13,28 +13,31 @@ class ScoringService:
 
     RANK_WEIGHTS: Dict[str, Dict[str, float]] = {
         "low": {
-            "anti_dd": 0.30,
-            "edge": 0.22,
-            "risk_adjusted": 0.21,
-            "profit_factor": 0.09,
-            "total": 0.10,
-            "theme": 0.08,
+            "leader": 0.18,
+            "anti_dd": 0.26,
+            "edge": 0.18,
+            "risk_adjusted": 0.18,
+            "profit_factor": 0.07,
+            "total": 0.07,
+            "theme": 0.06,
         },
         "medium": {
-            "up": 0.18,
-            "anti_dd": 0.18,
-            "edge": 0.25,
-            "profit_factor": 0.13,
-            "total": 0.17,
-            "theme": 0.09,
+            "leader": 0.28,
+            "up": 0.14,
+            "anti_dd": 0.14,
+            "edge": 0.18,
+            "profit_factor": 0.09,
+            "total": 0.10,
+            "theme": 0.07,
         },
         "high": {
-            "up": 0.20,
-            "edge": 0.27,
-            "profit_factor": 0.16,
-            "total": 0.16,
-            "anti_dd": 0.10,
-            "theme": 0.11,
+            "leader": 0.34,
+            "up": 0.16,
+            "edge": 0.18,
+            "profit_factor": 0.10,
+            "total": 0.09,
+            "anti_dd": 0.05,
+            "theme": 0.08,
         },
     }
 
@@ -68,8 +71,10 @@ class ScoringService:
         edge_pct = self._safe_float(pick.get("expected_edge_pct"), 0)
         profit_factor = self._safe_float(pick.get("profit_factor_proxy"), 1)
         theme_score = self._safe_float(pick.get("theme_rank_score"), 0)
+        leader_score = self._safe_float(pick.get("leader_score"), 0)
 
         components = {
+            "leader": leader_score if leader_score > 0 else 45.0,
             "up": up_prob * 100,
             "anti_dd": (1 - dd_prob) * 100,
             "edge": self._clamp(50 + edge_pct * 6, 0, 100),
@@ -80,11 +85,178 @@ class ScoringService:
         }
         return sum(components.get(key, 0) * weight for key, weight in weights.items())
 
+    def apply_ranking_scores(self, picks: List[Dict[str, Any]], market_state: Dict[str, Any] = None) -> None:
+        """Attach strategy ranking scores used for final ordering.
+
+        The display score remains useful for explanation, but final ordering
+        should optimize for a verifiable objective: 15-day swing quality plus
+        near-term continuation while keeping drawdown risk explicit.
+        """
+        state_tag = str((market_state or {}).get("state_tag") or "neutral")
+        state_bonus = 2.0 if state_tag == "offensive" else (-2.0 if state_tag == "defensive" else 0.0)
+
+        for pick in picks or []:
+            breakdown = pick.get("score_breakdown") or {}
+            metrics = pick.get("market_metrics") or {}
+            feature_payload = (pick.get("feature_snapshot") or {}).get("features") or {}
+
+            total_score = self._safe_float(breakdown.get("total"), 0)
+            risk_adjusted = self._safe_float(breakdown.get("risk_adjusted"), total_score)
+            trend_score = self._safe_float(breakdown.get("trend"), total_score)
+            turnover_score = self._safe_float(breakdown.get("turnover_liquidity"), 50)
+            up_prob = self._safe_float(pick.get("up_prob"), 0)
+            dd_prob = self._safe_float(pick.get("dd_prob"), 1)
+            if up_prob > 1:
+                up_prob /= 100.0
+            if dd_prob > 1:
+                dd_prob /= 100.0
+
+            edge_pct = self._safe_float(pick.get("expected_edge_pct"), 0)
+            profit_factor = self._safe_float(pick.get("profit_factor_proxy"), 1)
+            theme_score = self._safe_float(pick.get("theme_rank_score"), self._safe_float(breakdown.get("theme"), 0))
+            flow_yi = self._safe_float(metrics.get("main_net_inflow_yi"), 0)
+            money_quality = str(pick.get("money_flow_quality") or metrics.get("money_flow_quality") or "")
+            real_flow_bonus = 4.0 if money_quality == "real" and flow_yi > 0 else 0.0
+            leader_score = self._safe_float(pick.get("leader_score"), 0)
+
+            return_5d = self._safe_float(feature_payload.get("return_5d_pct"), 0)
+            return_20d = self._safe_float(feature_payload.get("return_20d_pct"), 0)
+            ma20_gap = self._safe_float(feature_payload.get("ma20_gap_pct"), 0)
+            rsi = self._safe_float(feature_payload.get("rsi"), 50)
+            volume_ratio_20 = self._safe_float(feature_payload.get("volume_ratio_20"), 1)
+            intraday_range = self._safe_float(feature_payload.get("intraday_range_pct"), 0)
+            from_high = self._safe_float(feature_payload.get("from_20d_high_pct"), 0)
+
+            edge_score = self._clamp(50 + edge_pct * 6.5, 0, 100)
+            pf_score = self._clamp(45 + (profit_factor - 1) * 22, 0, 100)
+            anti_dd_score = self._clamp((1 - dd_prob) * 100, 0, 100)
+            up_score = self._clamp(up_prob * 100, 0, 100)
+
+            swing_score = self._clamp(
+                up_score * 0.28
+                + anti_dd_score * 0.18
+                + edge_score * 0.22
+                + pf_score * 0.14
+                + risk_adjusted * 0.10
+                + total_score * 0.08,
+                0,
+                100,
+            )
+
+            volume_score = self._clamp(45 + (volume_ratio_20 - 1) * 14, 0, 100)
+            theme_component = theme_score if theme_score > 0 else 42.0
+            flow_score = self._clamp(50 + flow_yi * (7.0 if money_quality == "real" else 3.0), 0, 100)
+            start_signal_bonus = 0.0
+            if 2 <= return_5d <= 15 and -4 <= return_20d <= 18:
+                start_signal_bonus += 4.0
+            if -6 <= from_high <= 0.5:
+                start_signal_bonus += 3.0
+            if 45 <= rsi <= 68:
+                start_signal_bonus += 3.0
+            overheat_penalty = 0.0
+            if return_5d > 18 or ma20_gap > 14 or rsi > 72:
+                overheat_penalty += 8.0
+            if intraday_range > 9:
+                overheat_penalty += 3.0
+
+            continuation_score = self._clamp(
+                trend_score * 0.18
+                + turnover_score * 0.12
+                + volume_score * 0.20
+                + theme_component * 0.22
+                + flow_score * 0.18
+                + up_score * 0.10
+                + start_signal_bonus
+                + real_flow_bonus
+                + state_bonus
+                - overheat_penalty,
+                0,
+                100,
+            )
+
+            risk_control_score = self._clamp(
+                anti_dd_score * 0.45
+                + risk_adjusted * 0.25
+                + self._clamp(100 - max(intraday_range - 4, 0) * 6, 0, 100) * 0.15
+                + self._clamp(100 - max(ma20_gap - 9, 0) * 5, 0, 100) * 0.15,
+                0,
+                100,
+            )
+
+            ranking_score = self._clamp(
+                (leader_score if leader_score > 0 else continuation_score) * 0.38
+                + swing_score * 0.38
+                + continuation_score * 0.16
+                + risk_control_score * 0.08,
+                0,
+                100,
+            )
+            gate_status = str(pick.get("risk_gate_status") or "pass")
+            if gate_status == "watch":
+                ranking_score = self._clamp(ranking_score - 6.0, 0, 100)
+            elif gate_status == "block":
+                ranking_score = self._clamp(ranking_score - 18.0, 0, 100)
+            reasons: List[str] = []
+            if leader_score >= 70:
+                reasons.append("市场强势分位居前")
+            if swing_score >= 68:
+                reasons.append("15日波段赔率/风险组合较好")
+            if continuation_score >= 70:
+                reasons.append("短线延续信号较强")
+            if theme_score >= 75:
+                reasons.append("匹配前排市场主线")
+            if money_quality == "real" and flow_yi > 0:
+                reasons.append("真实资金流净流入")
+            if overheat_penalty > 0:
+                reasons.append("短线过热已降权")
+            if not reasons:
+                reasons.append("排序分由波段胜率、短线延续和风控约束综合得到")
+
+            pick["swing_score"] = round(swing_score, 2)
+            pick["continuation_score"] = round(continuation_score, 2)
+            pick["risk_control_score"] = round(risk_control_score, 2)
+            pick["ranking_score"] = round(ranking_score, 2)
+            pick["expected_rank_score"] = round(ranking_score, 2)
+            pick["ranking_reason"] = reasons[:4]
+            pick["ranking_diagnostics"] = {
+                "formula": "leader_score * 0.38 + swing_score * 0.38 + continuation_score * 0.16 + risk_control_score * 0.08 - risk_gate_penalty",
+                "swing_score": round(swing_score, 2),
+                "continuation_score": round(continuation_score, 2),
+                "risk_control_score": round(risk_control_score, 2),
+                "leader_score": round(leader_score, 2),
+                "ranking_score": round(ranking_score, 2),
+                "signal_features": {
+                    "return_5d_pct": round(return_5d, 4),
+                    "return_20d_pct": round(return_20d, 4),
+                    "volume_ratio_20": round(volume_ratio_20, 4),
+                    "rsi": round(rsi, 4),
+                    "ma20_gap_pct": round(ma20_gap, 4),
+                    "from_20d_high_pct": round(from_high, 4),
+                    "theme_rank_score": round(theme_score, 2),
+                    "main_net_inflow_yi": round(flow_yi, 4),
+                    "money_flow_quality": money_quality or "unavailable",
+                },
+            }
+            breakdown["ranking_score"] = round(ranking_score, 2)
+            breakdown["swing_score"] = round(swing_score, 2)
+            breakdown["continuation_score"] = round(continuation_score, 2)
+            breakdown["risk_control_score"] = round(risk_control_score, 2)
+            pick["score_breakdown"] = breakdown
+
     def risk_specific_sort_key(self, pick: Dict[str, Any], risk_level: str = "medium") -> float:
         breakdown = pick.get("score_breakdown") or {}
         metrics = pick.get("market_metrics") or {}
         risk_level = str(risk_level or "medium")
-        base = self.rank_score(pick, risk_level)
+        ranking_score = self._safe_float(pick.get("ranking_score"), 0)
+        base = ranking_score if ranking_score > 0 else self.rank_score(pick, risk_level)
+        leader_score = self._safe_float(pick.get("leader_score"), 0)
+        if leader_score > 0 and ranking_score <= 0:
+            base = base * 0.72 + leader_score * 0.28
+        gate_status = str(pick.get("risk_gate_status") or "pass")
+        if gate_status == "watch":
+            base -= 6.0
+        elif gate_status == "block":
+            base -= 18.0
         symbol = str(pick.get("symbol") or "")
         board_penalty = 4.0 if symbol.startswith(("300", "688")) else 0.0
 

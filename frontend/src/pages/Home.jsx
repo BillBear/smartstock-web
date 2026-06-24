@@ -207,7 +207,9 @@ const Home = () => {
 
   const renderAdvancedLoadingCard = (tip) => (
     <Card className="card-shadow" variant="borderless">
-      <Spin tip={tip} />
+      <Spin tip={tip}>
+        <div style={{ minHeight: 72 }} />
+      </Spin>
     </Card>
   )
 
@@ -429,7 +431,7 @@ const Home = () => {
         <div className="footer-content">
           <div>SmartStock AI © 2024 - 智能股票投资助手</div>
           <div className="footer-disclaimer">
-            ⚠️ 免责声明: 本系统仅供学习参考，不构成投资建议。股市有风险，投资需谨慎。
+            免责声明: 本系统仅供学习参考，不构成投资建议。股市有风险，投资需谨慎。
           </div>
         </div>
       </Footer>

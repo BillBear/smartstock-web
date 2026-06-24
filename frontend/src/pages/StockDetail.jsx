@@ -707,12 +707,12 @@ const StockDetail = () => {
           </Card>
 
           {/* 技术面分析 */}
-          <Card title="📈 技术面分析" className="analysis-card">
+          <Card title="技术面分析" className="analysis-card">
             <div className="analysis-header">
               <Tag color="blue">趋势: {stockData.technicalAnalysis.trend}</Tag>
               <Progress
                 percent={stockData.scores.technical}
-                strokeColor="#1890ff"
+                strokeColor="#27C08A"
                 style={{ width: 200 }}
               />
             </div>
@@ -729,14 +729,14 @@ const StockDetail = () => {
           </Card>
 
           {/* 资金面分析 */}
-          <Card title="💰 资金流向分析" className="analysis-card">
+          <Card title="资金流向分析" className="analysis-card">
             <Row gutter={16}>
               <Col span={8}>
                 <Statistic
                   title="主力净流入"
                   value={stockData.moneyFlowAnalysis.mainNetInflow}
                   suffix="亿"
-                  valueStyle={{ color: '#cf1322' }}
+                  valueStyle={{ color: 'var(--bull-color)' }}
                   prefix={<RiseOutlined />}
                 />
               </Col>
@@ -745,7 +745,7 @@ const StockDetail = () => {
                   title="主力控盘度"
                   value={stockData.moneyFlowAnalysis.controlRatio}
                   suffix="%"
-                  valueStyle={{ color: '#1890ff' }}
+                  valueStyle={{ color: 'var(--info-color)' }}
                 />
               </Col>
               <Col span={8}>
@@ -764,7 +764,7 @@ const StockDetail = () => {
           </Card>
 
           {/* 基本面分析 */}
-          <Card title="💎 基本面分析" className="analysis-card">
+          <Card title="基本面分析" className="analysis-card">
             <div className="fundamental-source-line">
               <Tag color={stockData.fundamentalAnalysis.isAvailable ? 'green' : 'orange'}>
                 {stockData.fundamentalAnalysis.isAvailable ? '财报摘要已接入' : '财报摘要暂缺'}
@@ -795,7 +795,7 @@ const StockDetail = () => {
                   value={hasValue(stockData.fundamentalAnalysis.roe) ? Number(stockData.fundamentalAnalysis.roe) : '-'}
                   precision={hasValue(stockData.fundamentalAnalysis.roe) ? 2 : 0}
                   suffix={hasValue(stockData.fundamentalAnalysis.roe) ? '%' : ''}
-                  valueStyle={{ color: '#52c41a' }}
+                  valueStyle={{ color: 'var(--bear-color)' }}
                 />
               </Col>
               <Col span={6}>
@@ -804,7 +804,7 @@ const StockDetail = () => {
                   value={hasValue(stockData.fundamentalAnalysis.netProfitGrowth) ? Number(stockData.fundamentalAnalysis.netProfitGrowth) : '-'}
                   precision={hasValue(stockData.fundamentalAnalysis.netProfitGrowth) ? 2 : 0}
                   suffix={hasValue(stockData.fundamentalAnalysis.netProfitGrowth) ? '%' : ''}
-                  valueStyle={{ color: '#cf1322' }}
+                  valueStyle={{ color: 'var(--bull-color)' }}
                   prefix={hasValue(stockData.fundamentalAnalysis.netProfitGrowth) ? <RiseOutlined /> : null}
                 />
               </Col>
@@ -852,7 +852,7 @@ const StockDetail = () => {
             </Timeline>
           </Card>
 
-          <Card title="📰 关联资讯" className="analysis-card">
+          <Card title="关联资讯" className="analysis-card">
             <div className="stock-news-head">
               <Tag color={stockData.news.sentiment === 'positive' ? 'green' : stockData.news.sentiment === 'negative' ? 'red' : 'blue'}>
                 {stockData.news.sentiment === 'positive' ? '偏正面' : stockData.news.sentiment === 'negative' ? '偏负面' : '中性'}
@@ -882,7 +882,7 @@ const StockDetail = () => {
           </Card>
 
           {/* 风险提示 */}
-          <Card title="⚠️ 风险提示" className="risk-card">
+          <Card title="风险提示" className="risk-card">
             <ul className="risk-list">
               {stockData.riskWarnings.map((warning, i) => (
                 <li key={i}>{warning}</li>
@@ -891,7 +891,7 @@ const StockDetail = () => {
           </Card>
 
           {/* 策略证据 */}
-          <Card title="📊 策略证据" className="backtest-card">
+          <Card title="策略证据" className="backtest-card">
             <div className="backtest-summary-head">
               <div>
                 <p>
@@ -945,7 +945,7 @@ const StockDetail = () => {
                   value={stockData.backtestPerformance.winRate ?? '-'}
                   precision={stockData.backtestPerformance.winRate === null ? undefined : 1}
                   suffix="%"
-                  valueStyle={{ color: '#52c41a' }}
+                  valueStyle={{ color: 'var(--bear-color)' }}
                 />
               </Col>
               <Col xs={12} md={6}>
@@ -954,7 +954,7 @@ const StockDetail = () => {
                   value={stockData.backtestPerformance.annualReturn ?? '-'}
                   precision={stockData.backtestPerformance.annualReturn === null ? undefined : 1}
                   suffix="%"
-                  valueStyle={{ color: '#cf1322' }}
+                  valueStyle={{ color: 'var(--bull-color)' }}
                 />
               </Col>
               <Col xs={12} md={6}>
@@ -963,7 +963,7 @@ const StockDetail = () => {
                   value={stockData.backtestPerformance.maxDrawdown ?? '-'}
                   precision={stockData.backtestPerformance.maxDrawdown === null ? undefined : 1}
                   suffix="%"
-                  valueStyle={{ color: '#faad14' }}
+                  valueStyle={{ color: 'var(--warning-color)' }}
                 />
               </Col>
               <Col xs={12} md={6}>
@@ -1105,7 +1105,7 @@ const StockDetail = () => {
             <Button
               type="text"
               size="large"
-              icon={stockData.isWatchlist ? <StarFilled style={{ color: '#faad14' }} /> : <StarOutlined />}
+              icon={stockData.isWatchlist ? <StarFilled style={{ color: 'var(--warning-color)' }} /> : <StarOutlined />}
               onClick={toggleWatchlist}
             />
           </div>
@@ -1127,7 +1127,7 @@ const StockDetail = () => {
             type="dashboard"
             percent={stockData.totalScore}
             width={132}
-            strokeColor={stockData.scoreSource === 'strategy' ? '#22d3ee' : '#faad14'}
+            strokeColor={stockData.scoreSource === 'strategy' ? '#27C08A' : '#D7A84A'}
             trailColor="rgba(148, 163, 184, 0.16)"
             format={(percent) => <span className="score-number">{Number(percent || 0).toFixed(1)}</span>}
           />
@@ -1144,10 +1144,10 @@ const StockDetail = () => {
             <Statistic title="开盘" value={stockData.open.toFixed(2)} />
           </Col>
           <Col xs={12} md={4}>
-            <Statistic title="最高" value={stockData.high.toFixed(2)} valueStyle={{ color: '#cf1322' }} />
+            <Statistic title="最高" value={stockData.high.toFixed(2)} valueStyle={{ color: 'var(--bull-color)' }} />
           </Col>
           <Col xs={12} md={4}>
-            <Statistic title="最低" value={stockData.low.toFixed(2)} valueStyle={{ color: '#52c41a' }} />
+            <Statistic title="最低" value={stockData.low.toFixed(2)} valueStyle={{ color: 'var(--bear-color)' }} />
           </Col>
           <Col xs={12} md={4}>
             <Statistic title="成交量" value={stockData.volume} suffix="万手" />
@@ -1170,7 +1170,7 @@ const StockDetail = () => {
 
       {/* 免责声明 */}
       <div className="disclaimer-footer">
-        💡 以上数据和分析仅供参考，不构成投资建议。投资有风险，决策需谨慎。
+        以上数据和分析仅供参考，不构成投资建议。投资有风险，决策需谨慎。
       </div>
     </div>
   )

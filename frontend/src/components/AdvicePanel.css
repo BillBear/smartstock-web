@@ -17,34 +17,34 @@
 }
 
 .advice-content {
-  background: var(--bg-elevated);
+  background: var(--bg-inset);
   padding: 16px;
   border-radius: 8px;
-  border-left: 3px solid #00C076;
+  border: 1px solid var(--border-secondary);
 }
 
 .advice-highlight {
   font-size: 16px;
   font-weight: 600;
-  color: #4DA3FF;
+  color: var(--info-color);
 }
 
 .profit-target {
   font-size: 16px;
   font-weight: 600;
-  color: #FF5550;
+  color: var(--bull-color);
 }
 
 .loss-ratio {
   font-size: 16px;
   font-weight: 600;
-  color: #FFB020;
+  color: var(--warning-color);
 }
 
 .price-highlight {
   font-size: 16px;
   font-weight: 600;
-  color: #4DA3FF;
+  color: var(--info-color);
 }
 
 .risk-list {
@@ -65,4 +65,9 @@
   margin-top: 16px;
   padding-top: 16px;
   border-top: 1px solid var(--border-primary);
+}
+
+.advice-panel-card {
+  background: linear-gradient(180deg, rgba(17, 23, 32, 0.98), rgba(13, 17, 24, 0.98)) !important;
+  border: 1px solid var(--border-secondary) !important;
 }

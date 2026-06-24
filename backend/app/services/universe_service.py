@@ -41,6 +41,7 @@ class UniverseService:
             "last_refresh_attempt_ts": 0.0,
             "last_incremental_refresh_ts": 0.0,
             "last_incremental_refresh_at": None,
+            "last_snapshot_payload": {},
             "last_meta": {},
         }
 
@@ -111,7 +112,7 @@ class UniverseService:
         diversified = self._diversify_by_industry(filtered, rules, target_candidate_size)
         candidates = diversified[:target_candidate_size]
         self._refresh_intraday_candidates([row["symbol"] for row in candidates])
-        refreshed_candidates, full_refresh_at, incremental_refresh_at = self._merge_refreshed_quotes(candidates)
+        refreshed_candidates, full_refresh_at, incremental_refresh_at, snapshot_payload = self._merge_refreshed_quotes(candidates)
 
         if not refreshed_candidates:
             meta = self._build_meta(
@@ -129,6 +130,9 @@ class UniverseService:
                 full_refresh_at=full_refresh_at,
                 incremental_refresh_at=incremental_refresh_at,
                 pipeline_counts={"snapshot": len(entries), "prefilter": len(filtered), "candidate": 0},
+                trade_date=snapshot_payload.get("trade_date"),
+                stale_snapshot=snapshot_payload.get("stale_snapshot"),
+                stale_reason=snapshot_payload.get("stale_reason"),
             )
             return {"candidates": [], "theme_watchlist": [], "meta": meta}
 
@@ -147,6 +151,9 @@ class UniverseService:
             full_refresh_at=full_refresh_at,
             incremental_refresh_at=incremental_refresh_at,
             pipeline_counts={"snapshot": len(entries), "prefilter": len(filtered), "candidate": len(refreshed_candidates)},
+            trade_date=snapshot_payload.get("trade_date"),
+            stale_snapshot=snapshot_payload.get("stale_snapshot"),
+            stale_reason=snapshot_payload.get("stale_reason"),
         )
         return {"candidates": refreshed_candidates, "theme_watchlist": [], "meta": meta}
 
@@ -168,12 +175,18 @@ class UniverseService:
             self._state["last_refresh_attempt_ts"] = now_ts
 
         items: List[Dict[str, Any]] = []
+        snapshot_payload: Dict[str, Any] = {}
         executor = ThreadPoolExecutor(max_workers=1)
         future = executor.submit(self._load_snapshot_payload)
         try:
             completed, _ = wait([future], timeout=8)
             if future in completed:
-                items = future.result() or []
+                result = future.result() or {}
+                if isinstance(result, dict):
+                    snapshot_payload = result
+                    items = list((result or {}).get("items") or [])
+                else:
+                    items = list(result or [])
             else:
                 future.cancel()
         except Exception:
@@ -192,12 +205,12 @@ class UniverseService:
             self._state["entry_map"] = entry_map
             self._state["last_full_refresh_ts"] = now_ts
             self._state["last_full_refresh_at"] = refresh_at
+            self._state["last_snapshot_payload"] = copy.deepcopy(snapshot_payload)
         return copy.deepcopy(items)
 
-    def _load_snapshot_payload(self) -> List[Dict[str, Any]]:
+    def _load_snapshot_payload(self):
         if self.market_snapshot_service:
-            payload = self.market_snapshot_service.ensure_snapshot_for_recommendation()
-            return list((payload or {}).get("items") or [])
+            return self.market_snapshot_service.ensure_snapshot_for_recommendation()
         return self.data_source_manager.get_a_share_snapshot() or []
 
     def _get_industry_map(self) -> Dict[str, str]:
@@ -283,9 +296,9 @@ class UniverseService:
             intraday_score = self._clamp((1 - abs(intraday_position - 0.45)) * 100, 0, 100)
             pre_score = 0.34 * liquidity_score + 0.24 * turnover_score + 0.22 * intraday_score + 0.20 * (momentum_score * 8.2)
         else:
-            momentum_score = self._clamp(12 - abs(pct_change - 2.5), 0, 12)
+            momentum_score = self._clamp(50 + pct_change * 7.5 - max(pct_change - 7.5, 0) * 8.0, 0, 100)
             intraday_score = self._clamp((0.25 + intraday_position) * 80, 0, 100)
-            pre_score = 0.38 * liquidity_score + 0.26 * turnover_score + 0.20 * intraday_score + 0.16 * (momentum_score * 8.2)
+            pre_score = 0.34 * liquidity_score + 0.22 * turnover_score + 0.18 * intraday_score + 0.26 * momentum_score
 
         industry = str(industry_map.get(symbol) or item.get("industry") or self._infer_board_industry(symbol)).strip()
         row = copy.deepcopy(item)
@@ -362,11 +375,12 @@ class UniverseService:
             self._state["last_incremental_refresh_ts"] = now_ts
             self._state["last_incremental_refresh_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    def _merge_refreshed_quotes(self, candidates: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], Optional[str], Optional[str]]:
+    def _merge_refreshed_quotes(self, candidates: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], Optional[str], Optional[str], Dict[str, Any]]:
         with self._lock:
             entry_map = copy.deepcopy(self._state.get("entry_map") or {})
             full_refresh_at = self._state.get("last_full_refresh_at")
             incremental_refresh_at = self._state.get("last_incremental_refresh_at")
+            snapshot_payload = copy.deepcopy(self._state.get("last_snapshot_payload") or {})
         rows = []
         for row in candidates:
             merged = copy.deepcopy(row)
@@ -374,7 +388,7 @@ class UniverseService:
             if latest:
                 merged.update(latest)
             rows.append(merged)
-        return rows, full_refresh_at, incremental_refresh_at
+        return rows, full_refresh_at, incremental_refresh_at, snapshot_payload
 
     def _build_insufficient_result(
         self,
@@ -397,12 +411,18 @@ class UniverseService:
             full_refresh_at=self._state.get("last_full_refresh_at"),
             incremental_refresh_at=self._state.get("last_incremental_refresh_at"),
             pipeline_counts={"snapshot": len(entries), "prefilter": 0, "candidate": 0},
+            trade_date=(self._state.get("last_snapshot_payload") or {}).get("trade_date"),
+            stale_snapshot=(self._state.get("last_snapshot_payload") or {}).get("stale_snapshot"),
+            stale_reason=(self._state.get("last_snapshot_payload") or {}).get("stale_reason"),
         )
         return {"candidates": [], "theme_watchlist": [], "meta": meta}
 
     def _build_meta(self, **kwargs) -> Dict[str, Any]:
         meta = {
             "source": kwargs["source"],
+            "trade_date": kwargs.get("trade_date"),
+            "stale_snapshot": bool(kwargs.get("stale_snapshot")),
+            "stale_reason": kwargs.get("stale_reason"),
             "snapshot_count": kwargs["snapshot_count"],
             "fallback_reason": kwargs["fallback_reason"],
             "data_source_status": kwargs["source_status"],

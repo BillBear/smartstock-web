@@ -865,3 +865,122 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* Terminal refresh overrides */
+.stock-detail-container {
+  padding: clamp(16px, 2.2vw, 28px);
+  background:
+    linear-gradient(180deg, rgba(12, 17, 24, 0.98), rgba(8, 11, 16, 1)),
+    var(--bg-primary);
+  min-height: 100dvh;
+}
+
+.detail-header,
+.basic-info-card,
+.score-card,
+.analysis-card,
+.risk-card,
+.backtest-card,
+.operation-plan-card {
+  background: linear-gradient(180deg, rgba(17, 23, 32, 0.98), rgba(13, 17, 24, 0.98)) !important;
+  border: 1px solid var(--border-secondary) !important;
+  border-radius: var(--radius-lg) !important;
+  box-shadow: var(--shadow-sm) !important;
+}
+
+.detail-header {
+  padding: clamp(18px, 2.4vw, 28px);
+}
+
+.detail-header::before {
+  background:
+    linear-gradient(90deg, rgba(39, 192, 138, 0.06), transparent 32%),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.028) 0 1px, transparent 1px 64px);
+}
+
+.back-btn {
+  background: var(--bg-inset);
+  border-color: var(--border-secondary);
+  color: var(--text-secondary);
+}
+
+.back-btn:hover {
+  border-color: var(--focus-color);
+  color: var(--focus-color);
+}
+
+.stock-title h1,
+.current-price,
+.hero-score-card .score-number,
+.score-card .ant-card-head-title,
+.analysis-card .ant-card-head-title,
+.risk-card .ant-card-head-title,
+.backtest-card .ant-card-head-title,
+.operation-plan-head h2,
+.operation-cell strong,
+.evidence-proof-item strong,
+.backtest-state-item strong {
+  color: var(--text-primary);
+}
+
+.stock-code,
+.score-label,
+.score-footnote,
+.stock-news-meta,
+.backtest-muted,
+.disclaimer-footer,
+.operation-cell span,
+.operation-risk-chip,
+.evidence-notes {
+  color: var(--text-secondary);
+}
+
+.hero-score-card,
+.score-radar-shell,
+.score-radar-chart,
+.score-radar-panel > *,
+.operation-cell,
+.operation-risk-chip,
+.operation-evidence-note,
+.evidence-proof-item,
+.evidence-assumption-box,
+.evidence-gate-item,
+.backtest-state-item,
+.evidence-sample-table,
+.evidence-notes,
+.stock-news-item {
+  background: var(--bg-inset) !important;
+  border: 1px solid var(--border-secondary) !important;
+  border-radius: var(--radius-md) !important;
+}
+
+.price-change-large.up,
+.positive-text {
+  color: var(--bull-color) !important;
+}
+
+.price-change-large.down,
+.negative-text {
+  color: var(--bear-color) !important;
+}
+
+.section-kicker,
+.fundamental-source-line,
+.stock-news-title a:hover {
+  color: var(--focus-color);
+}
+
+.stock-news-title a {
+  color: var(--text-primary);
+  border-bottom-color: rgba(167, 176, 189, 0.28);
+}
+
+.score-radar-chart {
+  min-height: 300px;
+}
+
+@media (max-width: 768px) {
+  .stock-detail-container {
+    padding: 14px;
+  }
+}

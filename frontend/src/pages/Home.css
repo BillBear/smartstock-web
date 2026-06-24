@@ -30,8 +30,7 @@
 
 .logo-icon {
   font-size: 32px;
-  color: var(--bull-color);
-  filter: drop-shadow(0 0 8px var(--bull-glow));
+  color: var(--focus-color);
 }
 
 .logo-text {
@@ -118,3 +117,67 @@
   }
 }
 
+/* Terminal refresh overrides */
+.app-content {
+  padding: clamp(16px, 2.2vw, 28px);
+  background:
+    linear-gradient(180deg, rgba(12, 17, 24, 0.98), rgba(8, 11, 16, 1)),
+    var(--bg-primary);
+  min-height: 100dvh;
+}
+
+.content-wrapper {
+  max-width: 1480px;
+}
+
+.search-card,
+.loading-card,
+.empty-card {
+  background: linear-gradient(180deg, rgba(17, 23, 32, 0.98), rgba(13, 17, 24, 0.98)) !important;
+  border: 1px solid var(--border-secondary) !important;
+  border-radius: var(--radius-lg) !important;
+  box-shadow: var(--shadow-sm) !important;
+}
+
+.search-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.search-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.035);
+}
+
+.search-card .ant-form-item-label > label {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.action-buttons {
+  border-top: 1px solid var(--border-secondary);
+}
+
+.empty-card {
+  padding: clamp(28px, 5vw, 54px) 0;
+}
+
+.empty-tips,
+.footer-disclaimer,
+.app-footer {
+  color: var(--text-secondary);
+}
+
+.app-footer {
+  background: var(--bg-shell);
+  border-top: 1px solid var(--border-primary);
+}
+
+@media (max-width: 768px) {
+  .app-content {
+    padding: 14px;
+  }
+}

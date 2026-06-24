@@ -140,7 +140,9 @@ class MLDatasetBuilder:
             "date", "symbol", "name",
             *feature_names,
             "future_return_pct", "future_max_drawdown_pct",
-            "label_up", "label_dd", "label_risk_adjusted_return",
+            "future_return_3d_pct", "future_max_return_3d_pct", "future_max_drawdown_3d_pct",
+            "label_up", "label_swing_up_15d", "label_short_continuation_3d",
+            "label_dd", "label_risk_adjusted_return",
         ]
         dataset = dataset[keep_cols].replace([float("inf"), float("-inf")], 0).fillna(0)
         samples = dataset.to_dict(orient="records")

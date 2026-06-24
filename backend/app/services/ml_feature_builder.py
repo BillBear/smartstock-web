@@ -38,13 +38,21 @@ class MLFeatureBuilder:
         FeatureSpec("boll_position", "布林带位置", "trend_momentum", "moderate_better", "价格在布林带内的位置。"),
         FeatureSpec("volume_ratio_5", "5日量比", "volume_money", "moderate_better", "当前成交量相对5日均量。"),
         FeatureSpec("volume_ratio_20", "20日量比", "volume_money", "moderate_better", "当前成交量相对20日均量。"),
+        FeatureSpec("volume_expansion_3d", "3日量能扩张", "volume_money", "moderate_better", "近3日量能是否持续放大。"),
         FeatureSpec("amount_yi", "成交额(亿)", "volume_money", "higher_better", "流动性强度。"),
         FeatureSpec("turnover_rate", "换手率", "volume_money", "moderate_better", "交易活跃度，过高代表博弈风险。"),
         FeatureSpec("money_flow_proxy_yi", "资金强弱代理(亿)", "volume_money", "higher_better", "无逐日资金流时由成交额和涨跌幅构造。"),
+        FeatureSpec("real_money_flow_delta_yi", "真实资金流变化(亿)", "volume_money", "higher_better", "可用时记录真实资金流边际变化。"),
         FeatureSpec("volatility_20d", "20日波动率", "volatility_risk", "lower_better", "历史收益波动。"),
         FeatureSpec("max_drawdown_20d", "20日区间回撤", "volatility_risk", "lower_better", "近期价格回撤压力。"),
         FeatureSpec("intraday_range_pct", "日内振幅", "volatility_risk", "lower_better", "单日波动风险。"),
         FeatureSpec("from_20d_high_pct", "距20日高点", "volatility_risk", "higher_better", "越接近高点，趋势越强但也需防追高。"),
+        FeatureSpec("close_position_intraday", "日内收盘位置", "trend_momentum", "higher_better", "收盘价在当日振幅区间的位置，越高代表承接更强。"),
+        FeatureSpec("large_bull_candle", "大阳线状态", "trend_momentum", "higher_better", "是否出现强势大阳线。"),
+        FeatureSpec("limit_up_cooldown_days", "涨停冷却天数", "volatility_risk", "moderate_better", "距离最近一次涨停/近涨停的交易日数。"),
+        FeatureSpec("theme_rank_score", "主题排名强度", "market_context", "higher_better", "候选所属市场主线的强度分。"),
+        FeatureSpec("theme_money_flow_score", "主题资金强度", "market_context", "higher_better", "主题层面的资金确认强度。"),
+        FeatureSpec("signal_age_days", "信号年龄", "market_context", "lower_better", "推荐信号生成后已经经过的自然日数。"),
         FeatureSpec("market_state_score", "市场状态分", "market_context", "higher_better", "市场环境综合分。"),
         FeatureSpec("market_offensive", "进攻市场", "market_context", "higher_better", "市场是否处于进攻状态。"),
         FeatureSpec("market_defensive", "防守市场", "market_context", "lower_better", "市场是否处于防守状态。"),
@@ -81,6 +89,10 @@ class MLFeatureBuilder:
         news_factor: Optional[Dict[str, Any]] = None,
         money_flow_proxy_yi: Optional[float] = None,
         turnover_rate: Optional[float] = None,
+        real_money_flow_delta_yi: Optional[float] = None,
+        theme_rank_score: Optional[float] = None,
+        theme_money_flow_score: Optional[float] = None,
+        signal_age_days: Optional[float] = None,
     ) -> pd.DataFrame:
         local = cls._ensure_indicators(df)
         if local.empty:
@@ -107,6 +119,7 @@ class MLFeatureBuilder:
         local["boll_position"] = ((close - local["boll_lower"].astype(float)) / boll_width).replace([np.inf, -np.inf], np.nan).fillna(0.5)
         local["volume_ratio_5"] = cls._safe_div(volume, volume.rolling(5).mean(), 1.0).clip(0, 8)
         local["volume_ratio_20"] = cls._safe_div(volume, volume.rolling(20).mean(), 1.0).clip(0, 8)
+        local["volume_expansion_3d"] = cls._safe_div(volume.rolling(3).mean(), volume.rolling(20).mean(), 1.0).clip(0, 8)
         local["amount_yi"] = amount / 100000000
         inferred_turnover = cls._safe_div(local["amount_yi"], local["amount_yi"].rolling(20).mean(), 1.0).clip(0.1, 10) * 3
         local["turnover_rate"] = float(turnover_rate) if turnover_rate is not None else inferred_turnover
@@ -115,12 +128,30 @@ class MLFeatureBuilder:
             if money_flow_proxy_yi is not None
             else (local["amount_yi"] * pct_change / 12.0).clip(-5, 5)
         )
+        local["real_money_flow_delta_yi"] = float(real_money_flow_delta_yi) if real_money_flow_delta_yi is not None else 0.0
         returns = close.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0)
         local["volatility_20d"] = returns.rolling(20).std().replace([np.inf, -np.inf], np.nan).fillna(0) * np.sqrt(252) * 100
         rolling_high = high.rolling(20).max().replace(0, np.nan)
         local["max_drawdown_20d"] = ((close / rolling_high) - 1).replace([np.inf, -np.inf], np.nan).fillna(0) * 100
         local["intraday_range_pct"] = cls._safe_div(high - low, close, 0.0) * 100
         local["from_20d_high_pct"] = ((close / rolling_high) - 1).replace([np.inf, -np.inf], np.nan).fillna(0) * 100
+        local["close_position_intraday"] = cls._safe_div(close - low, high - low, 0.5).clip(0, 1)
+        local["large_bull_candle"] = ((pct_change >= 5.0) & (local["close_position_intraday"] >= 0.72)).astype(float)
+        limit_like = pct_change >= 9.5
+        cooldown: List[float] = []
+        last_limit_idx: Optional[int] = None
+        for idx, is_limit in enumerate(limit_like.tolist()):
+            if is_limit:
+                last_limit_idx = idx
+                cooldown.append(0.0)
+            elif last_limit_idx is None:
+                cooldown.append(30.0)
+            else:
+                cooldown.append(float(min(idx - last_limit_idx, 30)))
+        local["limit_up_cooldown_days"] = cooldown
+        local["theme_rank_score"] = float(theme_rank_score) if theme_rank_score is not None else 0.0
+        local["theme_money_flow_score"] = float(theme_money_flow_score) if theme_money_flow_score is not None else 0.0
+        local["signal_age_days"] = float(signal_age_days) if signal_age_days is not None else 0.0
 
         state_tag = str((market_state or {}).get("state_tag") or "neutral")
         local["market_state_score"] = float((market_state or {}).get("state_score") or 50.0)
@@ -149,10 +180,22 @@ class MLFeatureBuilder:
         future_close = close.shift(-horizon_days)
         future_high = local["high"].astype(float).shift(-1).rolling(horizon_days).max().shift(-(horizon_days - 1))
         future_low = local["low"].astype(float).shift(-1).rolling(horizon_days).min().shift(-(horizon_days - 1))
+        short_horizon = min(3, max(1, horizon_days))
+        future_close_3d = close.shift(-short_horizon)
+        future_high_3d = local["high"].astype(float).shift(-1).rolling(short_horizon).max().shift(-(short_horizon - 1))
+        future_low_3d = local["low"].astype(float).shift(-1).rolling(short_horizon).min().shift(-(short_horizon - 1))
         local["future_return_pct"] = (future_close / close - 1).replace([np.inf, -np.inf], np.nan) * 100
         local["future_max_return_pct"] = (future_high / close - 1).replace([np.inf, -np.inf], np.nan) * 100
         local["future_max_drawdown_pct"] = (future_low / close - 1).replace([np.inf, -np.inf], np.nan) * 100
+        local["future_return_3d_pct"] = (future_close_3d / close - 1).replace([np.inf, -np.inf], np.nan) * 100
+        local["future_max_return_3d_pct"] = (future_high_3d / close - 1).replace([np.inf, -np.inf], np.nan) * 100
+        local["future_max_drawdown_3d_pct"] = (future_low_3d / close - 1).replace([np.inf, -np.inf], np.nan) * 100
         local["label_up"] = (local["future_return_pct"] >= float(target_return_pct)).astype(int)
+        local["label_swing_up_15d"] = local["label_up"]
+        local["label_short_continuation_3d"] = (
+            (local["future_return_3d_pct"] >= 4.0)
+            | (local["future_max_return_3d_pct"] >= 6.0)
+        ).astype(int)
         local["label_dd"] = (local["future_max_drawdown_pct"] <= -float(drawdown_pct)).astype(int)
         local["label_risk_adjusted_return"] = local["future_return_pct"].fillna(0) + local["future_max_drawdown_pct"].fillna(0) * 0.45
         return local
@@ -165,6 +208,10 @@ class MLFeatureBuilder:
         news_factor: Optional[Dict[str, Any]],
         money_flow_proxy_yi: float,
         turnover_rate: float,
+        real_money_flow_delta_yi: Optional[float] = None,
+        theme_rank_score: Optional[float] = None,
+        theme_money_flow_score: Optional[float] = None,
+        signal_age_days: Optional[float] = None,
     ) -> Dict[str, Any]:
         frame = cls.build_feature_frame(
             history_df,
@@ -172,6 +219,10 @@ class MLFeatureBuilder:
             news_factor=news_factor,
             money_flow_proxy_yi=money_flow_proxy_yi,
             turnover_rate=turnover_rate,
+            real_money_flow_delta_yi=real_money_flow_delta_yi,
+            theme_rank_score=theme_rank_score,
+            theme_money_flow_score=theme_money_flow_score,
+            signal_age_days=signal_age_days,
         )
         if frame.empty:
             return {"features": {}, "missing_flags": {}, "as_of_date": None}

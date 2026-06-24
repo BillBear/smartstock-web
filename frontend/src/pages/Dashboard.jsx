@@ -39,6 +39,8 @@ const Dashboard = () => {
   const [previewPicks, setPreviewPicks] = useState([])
   const [weeklyLesson, setWeeklyLesson] = useState(null)
   const [paperReview, setPaperReview] = useState(null)
+  const [monitorFeedback, setMonitorFeedback] = useState(null)
+  const [latestModel, setLatestModel] = useState(null)
   const [newsList, setNewsList] = useState([])
   const [newsPage, setNewsPage] = useState(1)
   const [newsHasNext, setNewsHasNext] = useState(false)
@@ -51,14 +53,18 @@ const Dashboard = () => {
     setLoading(true)
     setError('')
     try {
-      const [state, lesson, review] = await Promise.all([
+      const [state, lesson, review, feedback, model] = await Promise.all([
         coachApi.getMarketStateToday(),
         coachApi.getWeeklyLessonLatest(),
         coachApi.getPaperReview({ user_id: 'default' }),
+        coachApi.getMonitorFeedback({ user_id: 'default' }),
+        coachApi.getLatestModel(),
       ])
       setMarketState(state)
       setWeeklyLesson(lesson)
       setPaperReview(review)
+      setMonitorFeedback(feedback)
+      setLatestModel(model)
       setPreviewPicks([])
       setLoadedAt(new Date().toLocaleString('zh-CN'))
     } catch (err) {
@@ -121,7 +127,7 @@ const Dashboard = () => {
         <Progress
           percent={Number(value || 0)}
           size="small"
-          strokeColor={value >= 65 ? '#ff4d4f' : value >= 45 ? '#faad14' : '#52c41a'}
+          strokeColor={value >= 65 ? '#D95F59' : value >= 45 ? '#D7A84A' : '#27C08A'}
         />
       ),
     },
@@ -165,6 +171,15 @@ const Dashboard = () => {
   const newsEvents = newsList
   const sourceCounts = marketState?.news_context?.source_counts || {}
   const reviewMetrics = paperReview?.metrics || {}
+  const feedbackSummary = monitorFeedback?.summary || {}
+  const feedbackReasons = monitorFeedback?.failure_reasons || []
+  const strategyAdjustments = monitorFeedback?.strategy_adjustments || []
+  const modelStatus = latestModel?.available ? latestModel.status : 'unavailable'
+  const systemBetterStatus = feedbackSummary.review_status === 'tracking' && Number(feedbackSummary.strategy_health_score || 0) >= 60
+    ? '改善中'
+    : feedbackSummary.review_status === 'insufficient_sample'
+      ? '样本不足'
+      : '需收紧'
   const coachAction = marketState?.state_tag === 'defensive'
     ? '先防守复盘，暂停追高'
     : reviewMetrics.reviewed_position_count < 10
@@ -186,7 +201,9 @@ const Dashboard = () => {
 
       {loading ? (
         <Card variant="borderless" className="sentiment-card">
-          <Spin tip="加载市场状态中..." />
+          <Spin tip="加载市场状态中...">
+            <div style={{ minHeight: 96 }} />
+          </Spin>
         </Card>
       ) : (
         <>
@@ -241,8 +258,7 @@ const Dashboard = () => {
                 <div className="sentiment-label">市场状态评分</div>
                 <Progress
                   percent={Number(marketState?.state_score || 0)}
-                  strokeColor={{ '0%': '#52c41a', '50%': '#faad14', '100%': '#ff4d4f' }}
-                  strokeWidth={20}
+                  strokeColor={{ '0%': '#27C08A', '50%': '#D7A84A', '100%': '#D95F59' }}
                 />
                 <div style={{ marginTop: 10, color: '#d9d9d9' }}>{marketState?.summary || '-'}</div>
               </Col>
@@ -280,6 +296,33 @@ const Dashboard = () => {
                 <Statistic title="资讯评分" value={marketState?.drivers?.news_score || 0} precision={1} />
               </Col>
             </Row>
+          </Card>
+
+          <Card className="statistics-card" variant="borderless" style={{ marginBottom: 16 }}>
+            <div className="system-status-title">本周系统状态</div>
+            <Row gutter={[16, 16]}>
+              <Col xs={12} md={6}>
+                <Statistic title="系统是否变好" value={systemBetterStatus} />
+              </Col>
+              <Col xs={12} md={6}>
+                <Statistic title="策略健康分" value={Number(feedbackSummary.strategy_health_score || 0)} precision={1} />
+              </Col>
+              <Col xs={12} md={6}>
+                <Statistic title="风险样本" value={Number(feedbackSummary.risk_flag_count || 0)} suffix="个" />
+              </Col>
+              <Col xs={12} md={6}>
+                <Statistic title="模型状态" value={modelStatus === 'live_ready' ? '可准入' : modelStatus === 'paper_only' ? '仅模拟' : '未训练'} />
+              </Col>
+            </Row>
+            <Space wrap style={{ marginTop: 12 }}>
+              <Tag color={feedbackReasons.length ? 'orange' : 'green'}>
+                归因 {feedbackReasons.length}
+              </Tag>
+              <Tag color={strategyAdjustments.length ? 'gold' : 'blue'}>
+                策略调整 {strategyAdjustments.length}
+              </Tag>
+              {latestModel?.model_id && <Tag color="cyan">{latestModel.model_id}</Tag>}
+            </Space>
           </Card>
 
           <MarketFactorExplain

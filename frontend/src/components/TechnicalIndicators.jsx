@@ -95,7 +95,7 @@ const TechnicalIndicators = ({ data, indicators }) => {
           name: 'MACD',
           type: 'line',
           data: macdData,
-          lineStyle: { color: '#00C076', width: 2 },
+          lineStyle: { color: '#27C08A', width: 2 },
           showSymbol: false
         },
         {
@@ -111,7 +111,7 @@ const TechnicalIndicators = ({ data, indicators }) => {
           data: histData,
           itemStyle: {
             color: function(params) {
-              return params.value >= 0 ? '#00C076' : '#FF5550'
+              return params.value >= 0 ? '#D95F59' : '#27C08A'
             }
           }
         }
@@ -220,7 +220,7 @@ const TechnicalIndicators = ({ data, indicators }) => {
           name: 'K值',
           type: 'line',
           data: kData,
-          lineStyle: { color: '#00C076', width: 2 },
+          lineStyle: { color: '#27C08A', width: 2 },
           showSymbol: false
         },
         {
@@ -255,7 +255,7 @@ const TechnicalIndicators = ({ data, indicators }) => {
 
   if (!indicators) {
     return (
-      <Card title="📊 技术指标详情" variant="borderless">
+      <Card title="技术指标详情" variant="borderless">
         <div style={{ textAlign: 'center', padding: 40, color: '#9AA0A6' }}>
           暂无技术指标数据
         </div>
@@ -291,7 +291,7 @@ const TechnicalIndicators = ({ data, indicators }) => {
                 <div style={{ textAlign: 'center' }}>
                   <div style={{ color: '#9AA0A6', fontSize: 12 }}>柱状图</div>
                   <div style={{
-                    color: (indicators.macd_hist || 0) > 0 ? '#00C076' : '#FF5550',
+                    color: (indicators.macd_hist || 0) > 0 ? 'var(--bull-color)' : 'var(--bear-color)',
                     fontSize: 18,
                     fontWeight: 600,
                     fontFamily: 'IBM Plex Mono, monospace'
@@ -315,7 +315,7 @@ const TechnicalIndicators = ({ data, indicators }) => {
             <div style={{ textAlign: 'center', marginBottom: 16 }}>
               <div style={{ color: '#9AA0A6', fontSize: 12 }}>RSI值</div>
               <div style={{
-                color: indicators.rsi > 70 ? '#FF5550' : indicators.rsi < 30 ? '#00C076' : '#4DA3FF',
+                color: indicators.rsi > 70 ? 'var(--bear-color)' : indicators.rsi < 30 ? 'var(--bull-color)' : 'var(--info-color)',
                 fontSize: 32,
                 fontWeight: 700,
                 fontFamily: 'IBM Plex Mono, monospace'
@@ -341,7 +341,7 @@ const TechnicalIndicators = ({ data, indicators }) => {
               <Col span={8}>
                 <div style={{ textAlign: 'center' }}>
                   <div style={{ color: '#9AA0A6', fontSize: 12 }}>K值</div>
-                  <div style={{ color: '#00C076', fontSize: 18, fontWeight: 600, fontFamily: 'IBM Plex Mono, monospace' }}>
+                  <div style={{ color: 'var(--bull-color)', fontSize: 18, fontWeight: 600, fontFamily: 'var(--font-mono)' }}>
                     {indicators.k?.toFixed(1) || '--'}
                   </div>
                 </div>
@@ -371,7 +371,7 @@ const TechnicalIndicators = ({ data, indicators }) => {
   ]
 
   return (
-    <Card title="📊 技术指标详情" variant="borderless" style={{ background: 'var(--bg-card)' }}>
+    <Card title="技术指标详情" variant="borderless" style={{ background: 'var(--bg-card)' }}>
       <Tabs defaultActiveKey="macd" items={items} />
     </Card>
   )

@@ -23,7 +23,10 @@ class MarketDataSnapshotService:
         return self.store.get_latest_valid_market_snapshot(trade_date=trade_date, min_count=self.min_reliable_count)
 
     def refresh_today_snapshot(self, force: bool = False) -> Dict[str, Any]:
-        items: List[Dict[str, Any]] = self.data_source_manager.get_a_share_snapshot() or []
+        try:
+            items: List[Dict[str, Any]] = self.data_source_manager.get_a_share_snapshot(force=force) or []
+        except TypeError:
+            items = self.data_source_manager.get_a_share_snapshot() or []
         trade_date = self._infer_trade_date(items)
         cached = None if force else self.get_latest_valid_snapshot(trade_date)
         if cached and cached.get("trade_date") == trade_date:
@@ -54,11 +57,17 @@ class MarketDataSnapshotService:
     def ensure_snapshot_for_recommendation(self, trade_date: Optional[str] = None) -> Dict[str, Any]:
         trade_date = trade_date or datetime.now().strftime("%Y-%m-%d")
         snapshot = self.get_latest_valid_snapshot(trade_date)
-        if snapshot:
+        snapshot_trade_date = str((snapshot or {}).get("trade_date") or "")
+        if snapshot and snapshot_trade_date >= trade_date:
             return {**snapshot, "is_reliable": True}
 
-        refreshed = self.refresh_today_snapshot(force=False)
+        refreshed = self.refresh_today_snapshot(force=bool(snapshot))
         refreshed["is_reliable"] = int(refreshed.get("snapshot_count") or 0) >= self.min_reliable_count
+        if not refreshed["is_reliable"] and snapshot:
+            restored = {**snapshot, "is_reliable": True}
+            restored["stale_snapshot"] = True
+            restored["stale_reason"] = "最新全A快照重建失败，临时回退到最近有效快照。"
+            return restored
         return refreshed
 
     @staticmethod

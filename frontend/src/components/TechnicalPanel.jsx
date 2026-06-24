@@ -4,7 +4,6 @@ import {
   RiseOutlined,
   FallOutlined,
   MinusOutlined,
-  BulbOutlined,
   WarningOutlined,
   CheckCircleOutlined
 } from '@ant-design/icons'
@@ -17,37 +16,37 @@ const TechnicalPanel = ({ indicators, signalAnalysis }) => {
   const getMACDExplanation = () => {
     const { macd, macd_signal, macd_hist } = indicators
     if (macd_hist > 0 && macd > macd_signal) {
-      return { signal: '看涨', color: '#00C076', icon: <RiseOutlined />, desc: 'MACD金叉，短期趋势向上，可以考虑买入' }
+      return { signal: '看涨', color: 'var(--bull-color)', icon: <RiseOutlined />, desc: 'MACD金叉，短期趋势向上，可以考虑买入' }
     } else if (macd_hist < 0 && macd < macd_signal) {
-      return { signal: '看跌', color: '#FF5550', icon: <FallOutlined />, desc: 'MACD死叉，短期趋势向下，建议观望或减仓' }
+      return { signal: '看跌', color: 'var(--bear-color)', icon: <FallOutlined />, desc: 'MACD死叉，短期趋势向下，建议观望或减仓' }
     }
-    return { signal: '中性', color: '#FFB020', icon: <MinusOutlined />, desc: 'MACD处于震荡区间，等待明确信号' }
+    return { signal: '中性', color: 'var(--warning-color)', icon: <MinusOutlined />, desc: 'MACD处于震荡区间，等待明确信号' }
   }
 
   // 解读RSI
   const getRSIExplanation = () => {
     const { rsi } = indicators
     if (rsi > 70) {
-      return { signal: '超买', color: '#FF5550', icon: <WarningOutlined />, desc: `RSI=${rsi.toFixed(1)}，市场过热，股价可能回调，不建议追高` }
+      return { signal: '超买', color: 'var(--bear-color)', icon: <WarningOutlined />, desc: `RSI=${rsi.toFixed(1)}，市场过热，股价可能回调，不建议追高` }
     } else if (rsi < 30) {
-      return { signal: '超卖', color: '#00C076', icon: <CheckCircleOutlined />, desc: `RSI=${rsi.toFixed(1)}，市场超卖，股价可能反弹，可以关注买入机会` }
+      return { signal: '超卖', color: 'var(--bull-color)', icon: <CheckCircleOutlined />, desc: `RSI=${rsi.toFixed(1)}，市场超卖，股价可能反弹，可以关注买入机会` }
     }
-    return { signal: '正常', color: '#4DA3FF', icon: <CheckCircleOutlined />, desc: `RSI=${rsi.toFixed(1)}，市场情绪正常，可以结合其他指标判断` }
+    return { signal: '正常', color: 'var(--info-color)', icon: <CheckCircleOutlined />, desc: `RSI=${rsi.toFixed(1)}，市场情绪正常，可以结合其他指标判断` }
   }
 
   // 解读KDJ
   const getKDJExplanation = () => {
     const { k, d, j } = indicators
     if (k > 80 && d > 80) {
-      return { signal: '超买', color: '#FF5550', desc: 'KDJ高位，短期可能回调' }
+      return { signal: '超买', color: 'var(--bear-color)', desc: 'KDJ高位，短期可能回调' }
     } else if (k < 20 && d < 20) {
-      return { signal: '超卖', color: '#00C076', desc: 'KDJ低位，短期可能反弹' }
+      return { signal: '超卖', color: 'var(--bull-color)', desc: 'KDJ低位，短期可能反弹' }
     } else if (k > d && j > k) {
-      return { signal: '金叉', color: '#00C076', desc: 'KDJ金叉形成，短线看涨' }
+      return { signal: '金叉', color: 'var(--bull-color)', desc: 'KDJ金叉形成，短线看涨' }
     } else if (k < d && j < k) {
-      return { signal: '死叉', color: '#FF5550', desc: 'KDJ死叉形成，短线看跌' }
+      return { signal: '死叉', color: 'var(--bear-color)', desc: 'KDJ死叉形成，短线看跌' }
     }
-    return { signal: '震荡', color: '#FFB020', desc: 'KDJ震荡中，等待方向' }
+    return { signal: '震荡', color: 'var(--warning-color)', desc: 'KDJ震荡中，等待方向' }
   }
 
   // 综合建议
@@ -61,17 +60,17 @@ const TechnicalPanel = ({ indicators, signalAnalysis }) => {
 
     if (score > 30) {
       action = '买入'
-      actionColor = '#00C076'
+      actionColor = 'var(--bull-color)'
       actionIcon = <RiseOutlined />
       reason = '多个指标显示上涨信号，短期趋势向好'
     } else if (score < -30) {
       action = '卖出'
-      actionColor = '#FF5550'
+      actionColor = 'var(--bear-color)'
       actionIcon = <FallOutlined />
       reason = '多个指标显示下跌信号，建议减仓规避风险'
     } else {
       action = '观望'
-      actionColor = '#FFB020'
+      actionColor = 'var(--warning-color)'
       actionIcon = <MinusOutlined />
       reason = '指标信号不明确，建议等待更清晰的趋势'
     }
@@ -83,7 +82,7 @@ const TechnicalPanel = ({ indicators, signalAnalysis }) => {
 
   return (
     <Card
-      title="📊 交易信号分析"
+      title="交易信号分析"
       className="technical-panel-card"
       variant="borderless"
     >
@@ -94,7 +93,7 @@ const TechnicalPanel = ({ indicators, signalAnalysis }) => {
             <span style={{ fontSize: 18, fontWeight: 700, color: advice.actionColor }}>
               {advice.actionIcon} 综合建议：{advice.action}
             </span>
-            <Tag color={advice.actionColor === '#00C076' ? 'success' : advice.actionColor === '#FF5550' ? 'error' : 'warning'}>
+            <Tag color={advice.action === '买入' ? 'red' : advice.action === '卖出' ? 'green' : 'warning'}>
               评分：{signalAnalysis.score}
             </Tag>
           </div>
@@ -103,7 +102,7 @@ const TechnicalPanel = ({ indicators, signalAnalysis }) => {
           <div style={{ marginTop: 8, fontSize: 14 }}>
             <div style={{ marginBottom: 8 }}><strong>原因：</strong>{advice.reason}</div>
             <div style={{ color: 'var(--text-secondary)' }}>
-              <BulbOutlined /> 提示：建议结合基本面和资金流向综合判断，不要仅依赖技术指标
+              提示：建议结合基本面和资金流向综合判断，不要仅依赖技术指标
             </div>
           </div>
         }
@@ -115,7 +114,7 @@ const TechnicalPanel = ({ indicators, signalAnalysis }) => {
       {/* 趋势判断 */}
       <div style={{ marginBottom: 24 }}>
         <div style={{ fontSize: 16, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 12 }}>
-          📈 市场趋势
+          市场趋势
         </div>
         <Tag color={signalAnalysis.trend === '上升' ? 'success' : 'error'} style={{ fontSize: 14, padding: '4px 12px' }}>
           当前趋势：{signalAnalysis.trend}
@@ -158,7 +157,7 @@ const TechnicalPanel = ({ indicators, signalAnalysis }) => {
                   MACD是判断趋势的指标，像股票的"体温计"。
                 </div>
                 <div style={{ fontSize: 14, color: advice.macd.color, fontWeight: 500 }}>
-                  💡 {advice.macd.desc}
+                  {advice.macd.desc}
                 </div>
               </div>
             </div>
@@ -198,7 +197,7 @@ const TechnicalPanel = ({ indicators, signalAnalysis }) => {
                   />
                 </div>
                 <div style={{ fontSize: 14, color: advice.rsi.color, fontWeight: 500 }}>
-                  💡 {advice.rsi.desc}
+                  {advice.rsi.desc}
                 </div>
               </div>
             </div>
@@ -231,7 +230,7 @@ const TechnicalPanel = ({ indicators, signalAnalysis }) => {
                   KDJ是判断短线买卖点的指标。K线上穿D线=金叉（买入信号），K线下穿D线=死叉（卖出信号）。
                 </div>
                 <div style={{ fontSize: 14, color: advice.kdj.color, fontWeight: 500 }}>
-                  💡 {advice.kdj.desc}
+                  {advice.kdj.desc}
                 </div>
               </div>
             </div>

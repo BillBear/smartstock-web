@@ -3,12 +3,12 @@
 }
 
 .kline-chart-card .ant-card-head {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-  border-bottom: none;
+  background: var(--bg-card) !important;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-secondary);
 }
 
 .kline-chart-card .ant-card-head-title {
-  color: white;
+  color: var(--text-primary);
   font-weight: 600;
 }

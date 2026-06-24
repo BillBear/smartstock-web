@@ -20,16 +20,16 @@ const AdvicePanel = ({ advice }) => {
 
   // 获取信号颜色
   const getSignalColor = (signal) => {
-    if (signal.includes('强烈买入') || signal.includes('买入')) return '#00C076'
-    if (signal.includes('卖出')) return '#FF5550'
-    return '#FFB020'
+    if (signal.includes('强烈买入') || signal.includes('买入')) return 'var(--bull-color)'
+    if (signal.includes('卖出')) return 'var(--bear-color)'
+    return 'var(--warning-color)'
   }
 
   const signalColor = getSignalColor(signal_analysis.overall_signal)
 
   return (
     <Card
-      title="💡 投资建议（小白版）"
+      title="投资建议（小白版）"
       className="advice-panel-card"
       variant="borderless"
     >
@@ -40,7 +40,7 @@ const AdvicePanel = ({ advice }) => {
             <span style={{ fontSize: 18, fontWeight: 700, color: signalColor }}>
               <RocketOutlined /> 当前建议：{signal_analysis.overall_signal}
             </span>
-            <Tag color={signalColor === '#00C076' ? 'success' : signalColor === '#FF5550' ? 'error' : 'warning'}>
+            <Tag color={adviceData.signal?.includes('买入') ? 'red' : adviceData.signal?.includes('卖出') ? 'green' : 'warning'}>
               {adviceData.entry.action}
             </Tag>
           </div>
@@ -88,7 +88,7 @@ const AdvicePanel = ({ advice }) => {
                 建仓就是<strong style={{ color: 'var(--text-primary)' }}>第一次买入股票</strong>。就像你去超市买东西，建仓就是把商品放进购物车。
               </div>
               <div style={{ fontSize: 14, color: '#4DA3FF', fontWeight: 500 }}>
-                💡 建议价位：{adviceData.entry.entry_price} | 仓位：{adviceData.entry.position_size}
+                建议价位：{adviceData.entry.entry_price} | 仓位：{adviceData.entry.position_size}
               </div>
               <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 8 }}>
                 策略：{adviceData.entry.strategy}
@@ -102,10 +102,10 @@ const AdvicePanel = ({ advice }) => {
               background: 'var(--bg-elevated)',
               padding: 16,
               borderRadius: 8,
-              borderLeft: `3px solid #00C076`
+              border: '1px solid var(--border-secondary)'
             }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                <RiseOutlined style={{ color: '#00C076', fontSize: 16 }} />
+                <RiseOutlined style={{ color: 'var(--bull-color)', fontSize: 16 }} />
                 <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }}>
                   什么是止盈？
                 </span>
@@ -113,8 +113,8 @@ const AdvicePanel = ({ advice }) => {
               <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 12 }}>
                 止盈就是<strong style={{ color: 'var(--text-primary)' }}>赚够了就卖出</strong>。设定一个目标价格，涨到这个价格就卖掉赚钱，别太贪心！
               </div>
-              <div style={{ fontSize: 14, color: '#00C076', fontWeight: 500 }}>
-                💰 目标收益：{adviceData.take_profit.target_return} | 目标价：¥{adviceData.take_profit.target_price}
+              <div style={{ fontSize: 14, color: 'var(--bull-color)', fontWeight: 500 }}>
+                目标收益：{adviceData.take_profit.target_return} | 目标价：¥{adviceData.take_profit.target_price}
               </div>
               <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 8 }}>
                 策略：{adviceData.take_profit.strategy}
@@ -140,7 +140,7 @@ const AdvicePanel = ({ advice }) => {
                 止损就是<strong style={{ color: 'var(--text-primary)' }}>亏太多就卖出止血</strong>。设定一个底线价格，跌到这个价格就卖掉，防止亏更多！
               </div>
               <div style={{ fontSize: 14, color: '#FF5550', fontWeight: 500 }}>
-                ⚠️ 止损比例：{adviceData.stop_loss.stop_loss_ratio} | 止损价：¥{adviceData.stop_loss.stop_loss_price}
+                止损比例：{adviceData.stop_loss.stop_loss_ratio} | 止损价：¥{adviceData.stop_loss.stop_loss_price}
               </div>
               <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 8 }}>
                 策略：{adviceData.stop_loss.strategy}
@@ -166,7 +166,7 @@ const AdvicePanel = ({ advice }) => {
                 加仓就是<strong style={{ color: 'var(--text-primary)' }}>趋势好的时候再买一些</strong>。就像你发现商品在打折，再多买一点囤货。
               </div>
               <div style={{ fontSize: 14, color: '#FFB020', fontWeight: 500 }}>
-                📈 加仓条件：{adviceData.add_position.condition}
+                加仓条件：{adviceData.add_position.condition}
               </div>
               <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 8 }}>
                 加仓仓位：{adviceData.add_position.size}
@@ -184,7 +184,7 @@ const AdvicePanel = ({ advice }) => {
       {/* 风险提示 */}
       <div>
         <div style={{ fontSize: 16, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 12 }}>
-          ⚠️ 风险提示（必读）
+          风险提示（必读）
         </div>
         <Alert
           message="投资有风险，入市需谨慎"

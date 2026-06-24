@@ -98,7 +98,7 @@ class MLModelService:
         if len(set(label.tolist())) < 2:
             model = DummyClassifier(strategy="prior")
         else:
-            model = LogisticRegression(max_iter=800, class_weight="balanced", random_state=42)
+            model = LogisticRegression(max_iter=800, class_weight="balanced", random_state=42, solver="liblinear")
         return Pipeline([("scaler", StandardScaler()), ("model", model)])
 
     def _walk_forward_metrics(self, df: pd.DataFrame, feature_names: List[str]) -> Dict[str, Any]:
@@ -111,28 +111,40 @@ class MLModelService:
         tscv = TimeSeriesSplit(n_splits=split_count)
         up_true: List[int] = []
         up_prob: List[float] = []
+        short_true: List[int] = []
+        short_prob: List[float] = []
         dd_true: List[int] = []
         dd_prob: List[float] = []
+        has_short_label = "label_short_continuation_3d" in ordered.columns
         for train_idx, test_idx in tscv.split(ordered):
             train = ordered.iloc[train_idx]
             test = ordered.iloc[test_idx]
             x_train = train[feature_names].astype(float)
             x_test = test[feature_names].astype(float)
             up_model = self._make_pipeline(train["label_up"].astype(int).to_numpy())
+            short_model = self._make_pipeline(train["label_short_continuation_3d"].astype(int).to_numpy()) if has_short_label else None
             dd_model = self._make_pipeline(train["label_dd"].astype(int).to_numpy())
             up_model.fit(x_train, train["label_up"].astype(int))
+            if short_model is not None:
+                short_model.fit(x_train, train["label_short_continuation_3d"].astype(int))
             dd_model.fit(x_train, train["label_dd"].astype(int))
             up_true.extend(test["label_up"].astype(int).tolist())
             dd_true.extend(test["label_dd"].astype(int).tolist())
             up_prob.extend(up_model.predict_proba(x_test)[:, 1].tolist())
+            if short_model is not None:
+                short_true.extend(test["label_short_continuation_3d"].astype(int).tolist())
+                short_prob.extend(short_model.predict_proba(x_test)[:, 1].tolist())
             dd_prob.extend(dd_model.predict_proba(x_test)[:, 1].tolist())
 
-        return {
+        metrics = {
             "method": "walk_forward_timeseries_split",
             "split_count": split_count,
             "up_model": self._evaluate_classifier(np.array(up_true), np.array(up_prob)),
             "dd_model": self._evaluate_classifier(np.array(dd_true), np.array(dd_prob)),
         }
+        if short_true:
+            metrics["short_continuation_model"] = self._evaluate_classifier(np.array(short_true), np.array(short_prob))
+        return metrics
 
     def train_model(self, payload: Dict[str, Any], user_id: str = "default") -> Dict[str, Any]:
         try:
@@ -149,11 +161,15 @@ class MLModelService:
         feature_names = self.feature_builder.FEATURE_NAMES
         x = df[feature_names].astype(float)
         y_up = df["label_up"].astype(int)
+        y_short = df["label_short_continuation_3d"].astype(int) if "label_short_continuation_3d" in df.columns else None
         y_dd = df["label_dd"].astype(int)
 
         model_up = self._make_pipeline(y_up.to_numpy())
+        model_short = self._make_pipeline(y_short.to_numpy()) if y_short is not None else None
         model_dd = self._make_pipeline(y_dd.to_numpy())
         model_up.fit(x, y_up)
+        if model_short is not None:
+            model_short.fit(x, y_short)
         model_dd.fit(x, y_dd)
 
         tree = DecisionTreeClassifier(max_depth=max(3, min(5, int(payload.get("tree_max_depth") or 4))), min_samples_leaf=30, random_state=42)
@@ -174,6 +190,8 @@ class MLModelService:
         artifact_dir = self.artifact_root / model_id
         artifact_dir.mkdir(parents=True, exist_ok=True)
         joblib.dump(model_up, artifact_dir / "up_model.joblib")
+        if model_short is not None:
+            joblib.dump(model_short, artifact_dir / "short_model.joblib")
         joblib.dump(model_dd, artifact_dir / "dd_model.joblib")
         joblib.dump(tree, artifact_dir / "tree_model.joblib")
 
@@ -187,6 +205,7 @@ class MLModelService:
                 "up_brier_lte_0_24": (up_metrics.get("brier_score") or 1) <= 0.24,
                 "up_ece_lte_0_12": (up_metrics.get("ece") or 1) <= 0.12,
                 "dd_brier_lte_0_26": (dd_metrics.get("brier_score") or 1) <= 0.26,
+                "short_continuation_reported": bool(metrics.get("short_continuation_model")),
             },
             "tree_rules": tree_rules[:6000],
         }
@@ -205,6 +224,8 @@ class MLModelService:
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         self.store.save_ml_model_version(record)
+        if hasattr(self.store, "save_ml_model_metrics"):
+            self.store.save_ml_model_metrics(model_id, full_metrics)
         self.store.save_ml_factor_importance(model_id, importance)
         self.store.save_ml_training_samples(model_id, dataset.get("samples") or [], feature_names=feature_names)
         self._loaded_model_id = None
@@ -259,6 +280,9 @@ class MLModelService:
             "up_model": joblib.load(artifact_path / "up_model.joblib"),
             "dd_model": joblib.load(artifact_path / "dd_model.joblib"),
         }
+        short_path = artifact_path / "short_model.joblib"
+        if short_path.exists():
+            loaded["short_model"] = joblib.load(short_path)
         self._loaded_model_id = model_id
         self._loaded = loaded
         return loaded
@@ -271,6 +295,9 @@ class MLModelService:
             "available": True,
             **latest,
             "factor_importance": self.store.list_ml_factor_importance(latest.get("model_id"), limit=30),
+            "metric_rows": self.store.list_ml_model_metrics(latest.get("model_id"), limit=200)
+            if hasattr(self.store, "list_ml_model_metrics")
+            else [],
             "feature_schema": self.feature_builder.describe_features(),
         }
 
@@ -282,6 +309,9 @@ class MLModelService:
             "available": True,
             **record,
             "factor_importance": self.store.list_ml_factor_importance(model_id, limit=50),
+            "metric_rows": self.store.list_ml_model_metrics(model_id, limit=200)
+            if hasattr(self.store, "list_ml_model_metrics")
+            else [],
             "feature_schema": self.feature_builder.describe_features(),
         }
 
@@ -370,13 +400,15 @@ class MLModelService:
         features = feature_payload.get("features") or {}
         x = pd.DataFrame([[features.get(name, 0.0) for name in feature_names]], columns=feature_names)
         model_up_prob = self._predict_class1(loaded["up_model"], x)
+        model_short_prob = self._predict_class1(loaded["short_model"], x) if loaded.get("short_model") is not None else None
         model_dd_prob = self._predict_class1(loaded["dd_model"], x)
 
         take_profit = float((pick_context or {}).get("take_profit_ratio") or 0.14)
         stop_loss = float((pick_context or {}).get("stop_loss_ratio") or 0.08)
         liquidity = min(100.0, max(0.0, float(features.get("amount_yi", 0.0)) * 5.0))
         probability_edge = (model_up_prob * take_profit - model_dd_prob * stop_loss) * 100.0
-        probability_score = max(0.0, min(100.0, 50.0 + probability_edge * 9.0))
+        continuation_lift = ((model_short_prob or model_up_prob) - 0.5) * 8.0
+        probability_score = max(0.0, min(100.0, 50.0 + probability_edge * 9.0 + continuation_lift))
         risk_score = max(0.0, min(100.0, (1.0 - model_dd_prob) * 100.0))
         evidence_score = 82.0 if record.get("status") == "live_ready" else 58.0
         final_score = probability_score * 0.42 + risk_score * 0.28 + evidence_score * 0.20 + liquidity * 0.10
@@ -387,6 +419,7 @@ class MLModelService:
             "model_version_id": record.get("model_id"),
             "model_probability": {
                 "model_up_prob": round(model_up_prob, 4),
+                "model_short_continuation_prob": round(model_short_prob, 4) if model_short_prob is not None else None,
                 "model_dd_prob": round(model_dd_prob, 4),
                 "probability_edge_pct": round(probability_edge, 4),
                 "final_score": round(final_score, 2),
@@ -400,6 +433,7 @@ class MLModelService:
             "similar_sample_evidence": similar,
             "calibration_metrics": {
                 "up_model": (record.get("metrics") or {}).get("up_model") or {},
+                "short_continuation_model": (record.get("metrics") or {}).get("short_continuation_model") or {},
                 "dd_model": (record.get("metrics") or {}).get("dd_model") or {},
                 "walk_forward": {
                     "method": (record.get("metrics") or {}).get("method"),

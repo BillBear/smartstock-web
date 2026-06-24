@@ -313,10 +313,10 @@ class DataSourceManager:
         logger.error(f"所有数据源均失败: {symbol}")
         return None
 
-    def get_a_share_snapshot(self) -> List[Dict[str, Any]]:
+    def get_a_share_snapshot(self, force: bool = False) -> List[Dict[str, Any]]:
         """获取全A实时快照（优先 AKShare）。"""
         cache_key = "market:a_share_snapshot"
-        cached = self._get_cache(cache_key)
+        cached = None if force else self._get_cache(cache_key)
         if cached is not None:
             return cached
 
@@ -627,17 +627,21 @@ class DataSourceManager:
 
     def _convert_to_tushare_code(self, symbol: str) -> str:
         """转换为TuShare格式代码"""
-        if '.' in symbol:
-            return symbol
+        text = str(symbol or "").strip()
+        lowered = text.lower()
+        if len(lowered) >= 8 and lowered[:2] in {"sh", "sz", "bj"}:
+            return f"{lowered[-6:]}.{lowered[:2].upper()}"
+        if '.' in text:
+            return text
 
-        if symbol.startswith('6'):
-            return f"{symbol}.SH"
-        elif symbol.startswith(('0', '3')):
-            return f"{symbol}.SZ"
-        elif symbol.startswith(('4', '8')):
-            return f"{symbol}.BJ"
+        if text.startswith('6'):
+            return f"{text}.SH"
+        elif text.startswith(('0', '3')):
+            return f"{text}.SZ"
+        elif text.startswith(('4', '8')):
+            return f"{text}.BJ"
         else:
-            return f"{symbol}.SH"
+            return f"{text}.SH"
 
     def get_health_status(self) -> Dict[str, Any]:
         """获取各数据源健康状态

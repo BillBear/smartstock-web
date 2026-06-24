@@ -5,39 +5,49 @@
 
 /* === CSS Variables === */
 :root {
-  /* Dark Background System */
-  --bg-primary: #0B0E11;
-  --bg-card: #151A21;
-  --bg-elevated: #1A1F28;
-  --bg-hover: #1F242E;
+  /* Professional terminal surface system */
+  --bg-primary: #080B10;
+  --bg-shell: #0D1118;
+  --bg-card: #111720;
+  --bg-elevated: #161D28;
+  --bg-inset: #0A0F16;
+  --bg-hover: #1B2532;
+  --bg-active: rgba(39, 192, 138, 0.12);
 
-  /* Neon Accent Colors */
-  --bull-color: #00C076;
-  --bull-glow: rgba(0, 192, 118, 0.3);
-  --bear-color: #FF5550;
-  --bear-glow: rgba(255, 85, 80, 0.3);
+  /* A-share market semantics */
+  --bull-color: #D95F59;
+  --bull-soft: rgba(217, 95, 89, 0.12);
+  --bear-color: #27C08A;
+  --bear-soft: rgba(39, 192, 138, 0.12);
+  --focus-color: #27C08A;
+  --focus-soft: rgba(39, 192, 138, 0.16);
+  --warning-color: #D7A84A;
+  --warning-soft: rgba(215, 168, 74, 0.12);
+  --info-color: #4DA3FF;
+  --info-soft: rgba(77, 163, 255, 0.12);
 
-  /* Neutral Grays */
-  --text-primary: #E8EAED;
-  --text-secondary: #9AA0A6;
-  --text-muted: #5F6368;
-  --border-primary: #2A2F38;
-  --border-hover: #3A3F48;
+  /* Neutral text and structure */
+  --text-primary: #F2F5F8;
+  --text-secondary: #A7B0BD;
+  --text-muted: #6E7A89;
+  --border-primary: #263142;
+  --border-secondary: #1B2532;
+  --border-hover: #344258;
 
-  /* Accent Colors */
-  --accent-blue: #4DA3FF;
-  --accent-amber: #FFB020;
-  --accent-purple: #A78BFA;
-
-  /* Shadows & Glows */
-  --glow-sm: 0 0 10px;
-  --glow-md: 0 0 20px;
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.4);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
+  /* Shadows */
+  --shadow-sm: 0 10px 24px rgba(0, 0, 0, 0.22);
+  --shadow-md: 0 18px 42px rgba(0, 0, 0, 0.28);
+  --shadow-inset: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 
   /* Typography */
-  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  --font-mono: 'IBM Plex Mono', 'Roboto Mono', 'Consolas', monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font-mono: 'SFMono-Regular', 'Roboto Mono', 'Consolas', 'Liberation Mono', monospace;
+
+  /* Radii */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
 
   /* Spacing */
   --space-1: 4px;
@@ -67,11 +77,11 @@ body {
 /* === Layout === */
 .ant-layout {
   background: var(--bg-primary) !important;
-  min-height: 100vh;
+  min-height: 100dvh;
 }
 
 .ant-layout-sider {
-  background: var(--bg-card) !important;
+  background: var(--bg-shell) !important;
   border-right: 1px solid var(--border-primary) !important;
 }
 
@@ -87,22 +97,21 @@ body {
   align-items: center;
   justify-content: center;
   padding: 0 var(--space-6);
-  background: var(--bg-card) !important;
+  background: var(--bg-shell) !important;
   border-bottom: 1px solid var(--border-primary);
   gap: var(--space-2);
 }
 
 .logo-icon {
   font-size: 24px;
-  color: var(--bull-color);
-  filter: drop-shadow(0 0 8px var(--bull-glow));
+  color: var(--focus-color);
 }
 
 .logo-text {
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 700;
   color: var(--text-primary);
-  letter-spacing: -0.02em;
+  letter-spacing: -0.01em;
 }
 
 .route-loading {
@@ -117,7 +126,7 @@ body {
 
 /* === Sidebar Menu === */
 .ant-menu {
-  background: var(--bg-card) !important;
+  background: var(--bg-shell) !important;
   border: none !important;
   padding: var(--space-2) 0;
 }
@@ -125,18 +134,18 @@ body {
 .ant-menu-item {
   color: var(--text-secondary) !important;
   margin: var(--space-1) var(--space-3) !important;
-  border-radius: 8px !important;
+  border-radius: var(--radius-md) !important;
   height: 44px !important;
   line-height: 44px !important;
   font-size: 14px !important;
   font-weight: 500 !important;
-  transition: all 0.2s !important;
+  transition: background 0.2s ease, color 0.2s ease, transform 0.2s ease !important;
 }
 
 .ant-menu-item-selected {
-  background: rgba(0, 192, 118, 0.1) !important;
-  color: var(--bull-color) !important;
-  border-left: 3px solid var(--bull-color);
+  background: var(--bg-active) !important;
+  color: var(--focus-color) !important;
+  border-left: 3px solid var(--focus-color);
 }
 
 .ant-menu-item:hover {
@@ -147,10 +156,11 @@ body {
 /* === Cards === */
 .ant-card {
   background: var(--bg-card) !important;
-  border: 1px solid var(--border-primary) !important;
-  border-radius: 8px !important;
+  border: 1px solid var(--border-secondary) !important;
+  border-radius: var(--radius-lg) !important;
   box-shadow: var(--shadow-sm) !important;
   margin-bottom: var(--space-4);
+  overflow: hidden;
 }
 
 .ant-card:hover {
@@ -177,11 +187,12 @@ body {
   color: var(--text-primary) !important;
 }
 
-/* 强制所有卡片内的文字颜色 */
-.ant-card .ant-descriptions-item-label,
-.ant-card .ant-descriptions-item-content,
-.ant-card p,
-.ant-card div {
+/* AntD content text inherits component-level hierarchy. */
+.ant-card .ant-descriptions-item-label {
+  color: var(--text-secondary) !important;
+}
+
+.ant-card .ant-descriptions-item-content {
   color: var(--text-primary) !important;
 }
 
@@ -218,21 +229,22 @@ body {
 
 /* === Buttons === */
 .ant-btn {
-  border-radius: 6px !important;
+  border-radius: var(--radius-md) !important;
   font-weight: 500 !important;
-  transition: all 0.2s !important;
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease, transform 0.2s ease !important;
 }
 
 .ant-btn-primary {
-  background: var(--bull-color) !important;
-  border-color: var(--bull-color) !important;
-  color: #000 !important;
+  background: var(--focus-color) !important;
+  border-color: var(--focus-color) !important;
+  color: #06110D !important;
   font-weight: 600 !important;
 }
 
 .ant-btn-primary:hover {
-  background: var(--bull-color) !important;
-  box-shadow: 0 0 20px var(--bull-glow) !important;
+  background: #32D399 !important;
+  border-color: #32D399 !important;
+  box-shadow: none !important;
   transform: translateY(-1px);
 }
 
@@ -243,8 +255,8 @@ body {
 }
 
 .ant-btn-default:hover {
-  border-color: var(--bull-color) !important;
-  color: var(--bull-color) !important;
+  border-color: var(--focus-color) !important;
+  color: var(--focus-color) !important;
 }
 
 /* === Form Inputs === */
@@ -254,7 +266,7 @@ body {
   background: var(--bg-elevated) !important;
   border-color: var(--border-primary) !important;
   color: var(--text-primary) !important;
-  border-radius: 6px !important;
+  border-radius: var(--radius-md) !important;
 }
 
 .ant-input::placeholder,
@@ -270,8 +282,8 @@ body {
 .ant-input:focus,
 .ant-input-focused,
 .ant-select-focused .ant-select-selector {
-  border-color: var(--bull-color) !important;
-  box-shadow: 0 0 0 2px rgba(0, 192, 118, 0.1) !important;
+  border-color: var(--focus-color) !important;
+  box-shadow: 0 0 0 2px var(--focus-soft) !important;
 }
 
 /* === Tags === */
@@ -291,14 +303,13 @@ body {
 }
 
 .ant-tabs-tab-active .ant-tabs-tab-btn {
-  color: var(--bull-color) !important;
+  color: var(--focus-color) !important;
   font-weight: 600 !important;
 }
 
 .ant-tabs-ink-bar {
-  background: var(--bull-color) !important;
+  background: var(--focus-color) !important;
   height: 3px !important;
-  box-shadow: 0 0 8px var(--bull-glow);
 }
 
 /* === Market Colors === */
@@ -319,24 +330,24 @@ body {
 }
 
 .bg-up {
-  background: rgba(0, 192, 118, 0.15) !important;
+  background: var(--bull-soft) !important;
   color: var(--bull-color) !important;
-  border: 1px solid rgba(0, 192, 118, 0.3);
+  border: 1px solid rgba(217, 95, 89, 0.24);
 }
 
 .bg-down {
-  background: rgba(255, 85, 80, 0.15) !important;
+  background: var(--bear-soft) !important;
   color: var(--bear-color) !important;
-  border: 1px solid rgba(255, 85, 80, 0.3);
+  border: 1px solid rgba(39, 192, 138, 0.24);
 }
 
 /* === Neon Glow Effects === */
 .glow-bull {
-  box-shadow: 0 0 20px var(--bull-glow);
+  box-shadow: none;
 }
 
 .glow-bear {
-  box-shadow: 0 0 20px var(--bear-glow);
+  box-shadow: none;
 }
 
 /* === Spotlight Search === */
@@ -357,9 +368,8 @@ body {
 }
 
 .spotlight-search input:focus {
-  border-color: var(--bull-color) !important;
-  box-shadow: 0 0 0 3px rgba(0, 192, 118, 0.1),
-              0 0 30px rgba(0, 192, 118, 0.2) !important;
+  border-color: var(--focus-color) !important;
+  box-shadow: 0 0 0 3px var(--focus-soft) !important;
   transform: translateY(-2px);
 }
 
@@ -443,13 +453,13 @@ body {
 
 /* === Loading States === */
 .ant-spin {
-  color: var(--bull-color) !important;
+  color: var(--focus-color) !important;
 }
 
 /* === Accessibility === */
 .ant-btn:focus-visible,
 .ant-input:focus-visible {
-  outline: 2px solid var(--bull-color);
+  outline: 2px solid var(--focus-color);
   outline-offset: 2px;
 }
 
@@ -478,6 +488,176 @@ body {
 
 .fade-in {
   animation: fadeIn 0.3s ease-out;
+}
+
+/* === Terminal UI refresh layer === */
+html {
+  background: var(--bg-primary);
+  scroll-behavior: smooth;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 18% 0%, rgba(39, 192, 138, 0.08), transparent 26rem),
+    radial-gradient(circle at 88% 12%, rgba(77, 163, 255, 0.055), transparent 24rem),
+    var(--bg-primary);
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.ant-layout-sider-trigger {
+  background: var(--bg-inset) !important;
+  border-top: 1px solid var(--border-primary);
+  color: var(--text-secondary) !important;
+}
+
+.ant-layout-sider-trigger:hover {
+  color: var(--focus-color) !important;
+}
+
+.ant-menu-item:active,
+.ant-btn:active {
+  transform: translateY(1px);
+}
+
+.ant-card-head-title,
+.ant-modal-title,
+.ant-drawer-title {
+  letter-spacing: -0.01em;
+}
+
+.ant-table-wrapper {
+  overflow-x: auto;
+}
+
+.ant-table {
+  font-variant-numeric: tabular-nums;
+}
+
+.ant-table-thead > tr > th {
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.ant-table-tbody > tr > td {
+  transition: background 0.18s ease !important;
+}
+
+.ant-statistic-content,
+.ant-progress-text,
+.ant-input-number-input,
+.stock-code,
+.stock-price,
+.percentage,
+.volume,
+.amount,
+.price-value,
+.index-value,
+.current-price,
+.score-number,
+.summary-score {
+  font-family: var(--font-mono) !important;
+  font-variant-numeric: tabular-nums;
+}
+
+.page-title {
+  color: var(--text-primary) !important;
+  letter-spacing: -0.03em;
+}
+
+.page-title .anticon {
+  color: var(--focus-color) !important;
+}
+
+.page-subtitle,
+.update-time {
+  color: var(--text-secondary) !important;
+}
+
+.card-shadow,
+.config-card,
+.info-card,
+.statistics-card,
+.data-table-card,
+.ranking-card,
+.stat-card,
+.watchlist-card,
+.basic-info-card,
+.analysis-card,
+.risk-card,
+.backtest-card,
+.report-card,
+.technical-panel-card,
+.advice-panel-card,
+.stock-info-card,
+.kline-chart-card {
+  background: linear-gradient(180deg, rgba(17, 23, 32, 0.98), rgba(13, 17, 24, 0.98)) !important;
+  border: 1px solid var(--border-secondary) !important;
+  box-shadow: var(--shadow-sm) !important;
+}
+
+.card-shadow:hover,
+.config-card:hover,
+.info-card:hover,
+.statistics-card:hover,
+.data-table-card:hover,
+.ranking-card:hover,
+.stat-card:hover,
+.watchlist-card:hover,
+.basic-info-card:hover,
+.analysis-card:hover,
+.risk-card:hover,
+.backtest-card:hover,
+.report-card:hover {
+  border-color: var(--border-hover) !important;
+}
+
+.ant-alert {
+  border-radius: var(--radius-lg) !important;
+}
+
+.ant-empty-description {
+  color: var(--text-secondary) !important;
+}
+
+.ant-skeleton .ant-skeleton-title,
+.ant-skeleton .ant-skeleton-paragraph > li {
+  background: linear-gradient(90deg, var(--bg-elevated) 25%, var(--bg-hover) 37%, var(--bg-elevated) 63%) !important;
+  background-size: 400% 100% !important;
+}
+
+.dashboard-container,
+.smart-screen-container,
+.watchlist-container,
+.stock-detail-container,
+.backtest-container {
+  min-height: 100dvh;
+}
+
+@media (max-width: 768px) {
+  .ant-card-body {
+    padding: 16px !important;
+  }
+
+  .ant-table {
+    min-width: 680px;
+  }
+
+  .ant-layout-sider {
+    max-width: 72px !important;
+    min-width: 72px !important;
+    width: 72px !important;
+  }
 }
 
 /* === Reduced Motion === */

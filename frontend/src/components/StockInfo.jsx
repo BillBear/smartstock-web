@@ -72,7 +72,7 @@ const StockInfo = ({ data }) => {
             title="最高"
             value={formatNumber(data.high)}
             prefix="¥"
-            valueStyle={{ fontSize: '16px', color: '#cf1322' }}
+            valueStyle={{ fontSize: '16px', color: 'var(--bull-color)' }}
           />
         </Col>
         <Col xs={12} sm={6}>
@@ -80,7 +80,7 @@ const StockInfo = ({ data }) => {
             title="最低"
             value={formatNumber(data.low)}
             prefix="¥"
-            valueStyle={{ fontSize: '16px', color: '#3f8600' }}
+            valueStyle={{ fontSize: '16px', color: 'var(--bear-color)' }}
           />
         </Col>
       </Row>

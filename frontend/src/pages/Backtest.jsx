@@ -25,6 +25,20 @@ const DEFAULT_FORM_CONFIG = {
   universe_size: 90,
 }
 
+const EVIDENCE_STATUS_META = {
+  verified: { label: '证据达标', color: 'green' },
+  paper_only: { label: '仅限模拟', color: 'orange' },
+  insufficient_sample: { label: '样本不足', color: 'gold' },
+  invalid: { label: '证据无效', color: 'red' },
+  unverified: { label: '未验证', color: 'default' },
+}
+
+const VALIDITY_STATUS_META = {
+  verified: { label: '真实历史回放', color: 'green' },
+  demo: { label: 'Demo/Smoke', color: 'orange' },
+  invalid: { label: '无效记录', color: 'red' },
+}
+
 const pickConfigFields = (values = {}) => ({
   holding_days: values.holding_days,
   stop_profit_pct: values.stop_profit_pct,
@@ -43,15 +57,20 @@ const Backtest = () => {
   const [runningBacktest, setRunningBacktest] = useState(false)
   const [loadingBacktestResult, setLoadingBacktestResult] = useState(false)
   const [loadingConfigOptions, setLoadingConfigOptions] = useState(false)
+  const [loadingLatestModel, setLoadingLatestModel] = useState(false)
   const [applyingStrategyConfig, setApplyingStrategyConfig] = useState(false)
   const [evidence, setEvidence] = useState(null)
   const [result, setResult] = useState(null)
+  const [latestModel, setLatestModel] = useState(null)
   const [strategyConfigOptions, setStrategyConfigOptions] = useState([])
   const [recommendedProfileKey, setRecommendedProfileKey] = useState(null)
 
   const strategyCode = Form.useWatch('strategy_code', form) || 'trend_breakout'
   const queryRunId = searchParams.get('run_id')
   const queryStrategyCode = searchParams.get('strategy_code') || searchParams.get('strategy')
+  const evidenceMeta = EVIDENCE_STATUS_META[evidence?.evidence_status] || EVIDENCE_STATUS_META.unverified
+  const resultEvidenceMeta = EVIDENCE_STATUS_META[result?.evidence_status] || EVIDENCE_STATUS_META.unverified
+  const resultValidityMeta = VALIDITY_STATUS_META[result?.validity_status] || VALIDITY_STATUS_META.invalid
 
   const loadEvidence = async (code) => {
     setLoadingEvidence(true)
@@ -92,9 +111,23 @@ const Backtest = () => {
     }
   }
 
+  const loadLatestModel = async () => {
+    setLoadingLatestModel(true)
+    try {
+      const data = await coachApi.getLatestModel()
+      setLatestModel(data)
+    } catch (err) {
+      console.error('加载模型状态失败', err)
+      setLatestModel(null)
+    } finally {
+      setLoadingLatestModel(false)
+    }
+  }
+
   useEffect(() => {
     loadEvidence(strategyCode)
     loadStrategyConfigOptions(strategyCode)
+    loadLatestModel()
   }, [strategyCode])
 
   useEffect(() => {
@@ -237,7 +270,7 @@ const Backtest = () => {
     xField: 'date',
     yField: 'value',
     smooth: true,
-    color: '#00C076',
+    color: '#27C08A',
     point: { size: 4 },
     yAxis: { label: { formatter: (v) => `${v}%` } },
   }
@@ -380,7 +413,30 @@ const Backtest = () => {
       width: 120,
       render: (_, row) => <Tag color={row?.credibility?.live_ready ? 'green' : 'orange'}>{row?.credibility?.grade || '待验证'}</Tag>,
     },
+    {
+      title: '证据状态',
+      key: 'evidence_status',
+      width: 120,
+      render: (_, row) => {
+        const meta = EVIDENCE_STATUS_META[row?.evidence_status] || EVIDENCE_STATUS_META.unverified
+        return <Tag color={meta.color}>{meta.label}</Tag>
+      },
+    },
   ]
+
+  const modelMetricRows = useMemo(
+    () => (latestModel?.metric_rows || []).filter((row) => [
+      'live_ready',
+      'up_model.brier_score',
+      'up_model.ece',
+      'up_model.high_beats_low',
+      'up_model.high_prob_hit_rate',
+      'up_model.low_prob_hit_rate',
+      'dd_model.brier_score',
+      'readiness_rules.up_high_prob_beats_low',
+    ].includes(row.metric_key)),
+    [latestModel]
+  )
 
   return (
     <div className="backtest-container">
@@ -514,15 +570,17 @@ const Backtest = () => {
 
       <Card className="config-card" title="策略证据（样本外）" variant="borderless">
         {loadingEvidence ? (
-          <Spin tip="策略证据加载中..." />
+          <Spin tip="策略证据加载中...">
+            <div style={{ minHeight: 72 }} />
+          </Spin>
         ) : evidence ? (
           <>
             <Alert
               showIcon
-              type={evidence?.unavailable ? 'warning' : 'info'}
+              type={evidence?.live_allowed ? 'success' : (evidence?.unavailable || evidence?.evidence_status === 'invalid' ? 'warning' : 'info')}
               style={{ marginBottom: 12 }}
               message={evidence?.evidence_source?.label || '策略级历史回放证据'}
-              description={`展示口径：${evidence?.evidence_source?.display_scope || 'overall'}；闭环交易合计 ${Number(evidence?.sample_summary?.closed_roundtrips || 0)} 笔；回放次数 ${Number(evidence?.sample_summary?.sample_runs || 0)} 次。`}
+              description={`证据状态：${evidenceMeta.label}；展示口径：${evidence?.evidence_source?.display_scope || 'overall'}；闭环交易合计 ${Number(evidence?.sample_summary?.closed_roundtrips || 0)} 笔；回放次数 ${Number(evidence?.sample_summary?.sample_runs || 0)} 次；已排除非验证记录 ${Number(evidence?.excluded_run_count || 0)} 条。`}
             />
             <Row gutter={16}>
               <Col xs={12} md={6}>
@@ -540,11 +598,15 @@ const Backtest = () => {
             </Row>
             <Descriptions bordered column={3} size="small" style={{ marginTop: 12 }} title="证据摘要">
               <Descriptions.Item label="可验证回测ID">{evidence?.display_run?.run_id || '总体聚合证据'}</Descriptions.Item>
-              <Descriptions.Item label="最新回测ID">{evidence?.latest_run?.run_id || '-'}</Descriptions.Item>
+              <Descriptions.Item label="最新可信回测ID">{evidence?.latest_verified_run_id || evidence?.latest_run?.run_id || '-'}</Descriptions.Item>
               <Descriptions.Item label="证据指纹">{evidence?.display_run?.evidence_hash || '-'}</Descriptions.Item>
               <Descriptions.Item label="样本标的">{Number(evidence?.sample_summary?.valid_history_symbols || 0)} / {Number(evidence?.sample_summary?.universe_size || 0)}</Descriptions.Item>
               <Descriptions.Item label="回测天数">{Number(evidence?.sample_summary?.calendar_days || 0)}</Descriptions.Item>
               <Descriptions.Item label="可信等级">{evidence?.credibility_summary?.grade || '-'}</Descriptions.Item>
+              <Descriptions.Item label="准入状态">
+                <Tag color={evidenceMeta.color}>{evidenceMeta.label}</Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="已排除记录">{Number(evidence?.excluded_run_count || 0)}</Descriptions.Item>
             </Descriptions>
             <Table
               style={{ marginTop: 12 }}
@@ -582,6 +644,36 @@ const Backtest = () => {
         )}
       </Card>
 
+      <Card className="config-card" title="模型状态" variant="borderless" loading={loadingLatestModel}>
+        {latestModel?.available ? (
+          <>
+            <Alert
+              showIcon
+              type={latestModel.status === 'live_ready' ? 'success' : 'warning'}
+              message={latestModel.status === 'live_ready' ? '模型已达实盘级校准门槛' : '模型仅参与解释或模拟验证'}
+              description={`模型 ${latestModel.model_id}；样本 ${Number(latestModel.sample_count || 0)} 条；训练区间 ${latestModel.train_start || '-'} → ${latestModel.train_end || '-'}。高概率组必须跑赢低概率组，否则保持 paper_only。`}
+            />
+            <Table
+              style={{ marginTop: 12 }}
+              rowKey={(row) => row.metric_key}
+              dataSource={modelMetricRows}
+              pagination={false}
+              size="small"
+              columns={[
+                { title: '指标', dataIndex: 'metric_key', key: 'metric_key' },
+                {
+                  title: '值',
+                  key: 'metric_value',
+                  render: (_, row) => row.metric_value === null || row.metric_value === undefined ? '-' : Number(row.metric_value).toFixed(4),
+                },
+              ]}
+            />
+          </>
+        ) : (
+          <Alert showIcon type="warning" message={latestModel?.message || '暂无已训练模型'} description="完成首版训练后，这里会展示 Brier Score、ECE、高低概率分层命中率和模型准入状态。" />
+        )}
+      </Card>
+
       {loadingBacktestResult && (
         <Card className="config-card" variant="borderless">
           <Space>
@@ -594,10 +686,25 @@ const Backtest = () => {
       {result && (
         <>
           <Card className="config-card" title={`回测结果 (${result.run_id})`} variant="borderless">
+            {result?.validity_status !== 'verified' && (
+              <Alert
+                style={{ marginBottom: 12 }}
+                type="warning"
+                showIcon
+                message={`${resultValidityMeta.label}，不参与策略证据汇总`}
+                description={result?.validity_message || '该记录不是可验证 historical_replay 历史回放。'}
+              />
+            )}
             <Descriptions bordered column={3} size="small">
               <Descriptions.Item label="状态">{result.status}</Descriptions.Item>
               <Descriptions.Item label="策略">{result.strategy_code}</Descriptions.Item>
               <Descriptions.Item label="完成时间">{result.finished_at}</Descriptions.Item>
+              <Descriptions.Item label="记录类型">
+                <Tag color={resultValidityMeta.color}>{resultValidityMeta.label}</Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="证据状态">
+                <Tag color={resultEvidenceMeta.color}>{resultEvidenceMeta.label}</Tag>
+              </Descriptions.Item>
               <Descriptions.Item label="年化收益">{(Number(result?.metrics?.annual_return || 0) * 100).toFixed(2)}%</Descriptions.Item>
               <Descriptions.Item label="最大回撤">{(Number(result?.metrics?.max_drawdown || 0) * 100).toFixed(2)}%</Descriptions.Item>
               <Descriptions.Item label="夏普">{Number(result?.metrics?.sharpe || 0).toFixed(2)}</Descriptions.Item>
@@ -605,9 +712,9 @@ const Backtest = () => {
               <Descriptions.Item label="盈亏比">{Number(result?.metrics?.profit_loss_ratio || 0).toFixed(2)}</Descriptions.Item>
               <Descriptions.Item label="可信度评分">{Number(result?.credibility?.score || 0).toFixed(2)}</Descriptions.Item>
               <Descriptions.Item label="可信等级">{result?.credibility?.grade || '-'}</Descriptions.Item>
-              <Descriptions.Item label="实盘准入">
-                <Tag color={result?.live_readiness?.ready ? 'green' : 'red'}>
-                  {result?.live_readiness?.ready ? '通过' : '未通过'}
+              <Descriptions.Item label="策略准入">
+                <Tag color={result?.live_allowed ? 'green' : 'red'}>
+                  {result?.live_allowed ? '通过' : '未通过'}
                 </Tag>
               </Descriptions.Item>
             </Descriptions>
@@ -619,16 +726,17 @@ const Backtest = () => {
             />
             <Alert
               style={{ marginTop: 12 }}
-              type={result?.live_readiness?.ready ? 'success' : 'error'}
+              type={result?.live_allowed ? 'success' : 'error'}
               showIcon
-              message={result?.live_readiness?.summary || result?.credibility?.summary || '暂无实盘准入结论'}
+              message={result?.live_readiness?.summary || result?.credibility?.summary || '暂无策略准入结论'}
             />
           </Card>
 
           <Card className="config-card evidence-package-card" title="证据包" variant="borderless">
             <Descriptions bordered column={3} size="small">
               <Descriptions.Item label="证据来源">策略级历史回放</Descriptions.Item>
-              <Descriptions.Item label="回测引擎">{result?.backtest_engine || 'historical_replay_v1'}</Descriptions.Item>
+              <Descriptions.Item label="回测引擎">{result?.backtest_engine || 'historical_replay'}</Descriptions.Item>
+              <Descriptions.Item label="有效性">{resultValidityMeta.label}</Descriptions.Item>
               <Descriptions.Item label="策略代码">{result?.strategy_code || '-'}</Descriptions.Item>
               <Descriptions.Item label="回测区间">{result?.config?.test_start || '-'} → {result?.config?.test_end || '-'}</Descriptions.Item>
               <Descriptions.Item label="有效样本">{Number(result?.diagnostics?.valid_history_symbols || 0)} / {Number(result?.diagnostics?.universe_size || result?.config?.universe_size || 0)}</Descriptions.Item>
@@ -636,6 +744,18 @@ const Backtest = () => {
               <Descriptions.Item label="买入规则">信号后下一交易日开盘成交</Descriptions.Item>
               <Descriptions.Item label="卖出规则">止盈/止损/持有期/评分退出后收盘近似成交</Descriptions.Item>
               <Descriptions.Item label="成本假设">佣金 {result?.config?.commission ?? '-'}，滑点 {result?.config?.slippage ?? '-'}</Descriptions.Item>
+              <Descriptions.Item label="A股约束">
+                {result?.execution_constraints?.limit_up_buy_blocked ? '涨停不可买；' : ''}
+                {result?.execution_constraints?.limit_down_sell_blocked ? '跌停不可卖；' : ''}
+                {result?.execution_constraints?.suspended_skip ? '停牌跳过；' : ''}
+                {result?.execution_constraints?.lot_size ? `${result.execution_constraints.lot_size}股整手` : '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="成交跳过">
+                买入涨停 {Number(result?.diagnostics?.execution_counters?.buy_limit_up_blocked || 0)}，
+                卖出跌停 {Number(result?.diagnostics?.execution_counters?.sell_limit_down_blocked || 0)}，
+                停牌/无价 {Number(result?.diagnostics?.execution_counters?.suspended_or_invalid_skipped || 0)}
+              </Descriptions.Item>
+              <Descriptions.Item label="股票池口径">{result?.diagnostics?.historical_universe_policy || '-'}</Descriptions.Item>
             </Descriptions>
             <Alert
               style={{ marginTop: 12 }}

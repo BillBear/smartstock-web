@@ -34,9 +34,18 @@ class TencentService:
 
     @staticmethod
     def _to_market_symbol(symbol: str) -> str:
-        if symbol.startswith("6"):
-            return f"sh{symbol}"
-        return f"sz{symbol}"
+        text = str(symbol or "").strip()
+        lowered = text.lower()
+        if len(lowered) >= 8 and lowered[:2] in {"sh", "sz", "bj"}:
+            return lowered
+        upper = text.upper()
+        if "." in upper:
+            code, market = upper.split(".", 1)
+            if market in {"SH", "SZ", "BJ"} and code:
+                return f"{market.lower()}{code}"
+        if text.startswith("6"):
+            return f"sh{text}"
+        return f"sz{text}"
 
     @staticmethod
     def _to_plain_symbol(market_symbol: str) -> str:

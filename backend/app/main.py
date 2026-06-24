@@ -1033,10 +1033,21 @@ def _run_coach_refresh(max_count: int, risk_level: str, user_id: str):
 
 
 @app.get(f"{settings.API_PREFIX}/coach/smart-screen/summary")
-async def coach_smart_screen_summary(user_id: str = "default", risk_level: str = "medium"):
+async def coach_smart_screen_summary(
+    user_id: str = "default",
+    risk_level: str = "medium",
+    requested_date: str = None,
+    trade_date: str = None,
+):
     """快速返回智能选股首屏摘要，不触发重型全量选股。"""
     try:
-        data = await run_in_threadpool(coach_service.get_smart_screen_summary, user_id=user_id, risk_level=risk_level)
+        data = await run_in_threadpool(
+            coach_service.get_smart_screen_summary,
+            user_id=user_id,
+            risk_level=risk_level,
+            requested_date=requested_date,
+            trade_date=trade_date,
+        )
         data = clean_nan_values(data)
         return ApiResponse(code=200, message="success", data=data)
     except Exception as e:
@@ -1061,6 +1072,14 @@ def _enrich_theme_stocks_with_picks(payload: dict, user_id: str = "default") -> 
     data = dict(payload or {})
     cached = coach_service.get_cached_today_picks(max_count=60, user_id=user_id) or {}
     pick_map = {str(item.get("symbol") or ""): item for item in (cached.get("picks") or [])}
+    symbols = [str(item.get("symbol") or "").strip() for item in data.get("stocks") or [] if str(item.get("symbol") or "").strip()]
+    trade_date = data.get("trade_date") or data_quality_service.current_trade_date()
+    money_flow_map = {}
+    if symbols and hasattr(coach_store, "get_money_flow_snapshots_by_symbols"):
+        try:
+            money_flow_map = coach_store.get_money_flow_snapshots_by_symbols(symbols, trade_date=trade_date) or {}
+        except Exception as exc:
+            logger.warning(f"读取主题成分股资金流快照失败: {exc}")
     enriched = []
     for item in data.get("stocks") or []:
         row = dict(item)
@@ -1072,6 +1091,14 @@ def _enrich_theme_stocks_with_picks(payload: dict, user_id: str = "default") -> 
             row["money_flow_quality"] = pick.get("money_flow_quality") or row.get("money_flow_quality")
             row["exclusion_reason"] = None
         else:
+            money_snapshot = money_flow_map.get(str(row.get("symbol") or ""))
+            if money_snapshot:
+                payload_json = money_snapshot.get("payload") or {}
+                quality = str(money_snapshot.get("quality") or payload_json.get("quality") or "unavailable")
+                row["money_flow_quality"] = quality
+                row["money_flow_source"] = money_snapshot.get("source") or payload_json.get("source")
+                row["money_flow_available"] = bool(money_snapshot.get("available"))
+                row["money_flow_display_mode"] = "proxy" if quality == "proxy" else ("normal" if quality == "real" else "unavailable")
             row["selected"] = False
             row["exclusion_reason"] = row.get("exclusion_reason") or "未进入当前策略核心候选，可能未通过风险、趋势、资金或流动性闸门。"
         enriched.append(row)
@@ -1118,9 +1145,33 @@ async def coach_theme_stocks(theme_id: str, user_id: str = "default", limit: int
 
 
 @app.post(f"{settings.API_PREFIX}/coach/picks/refresh")
-async def coach_picks_refresh(max_count: int = 30, risk_level: str = "medium", user_id: str = "default"):
+async def coach_picks_refresh(
+    max_count: int = 30,
+    risk_level: str = "medium",
+    user_id: str = "default",
+    requested_date: str = None,
+):
     """触发后台刷新，避免智能选股页面首屏被全量分析阻塞。"""
     try:
+        calendar_context = await run_in_threadpool(
+            coach_service.resolve_pick_calendar_context,
+            user_id=user_id,
+            requested_date=requested_date,
+        )
+        if not ((calendar_context.get("actions") or {}).get("can_refresh")):
+            snapshot_dates = await run_in_threadpool(coach_service.list_pick_snapshot_dates, user_id=user_id, limit=30)
+            return ApiResponse(
+                code=200,
+                message="success",
+                data={
+                    "accepted": False,
+                    "status": "non_trading_day",
+                    "reason": "non_trading_day",
+                    "calendar_context": calendar_context,
+                    "snapshot_dates": snapshot_dates,
+                    **coach_service.get_refresh_state(),
+                },
+            )
         state = coach_service.get_refresh_state()
         if state.get("is_refreshing"):
             return ApiResponse(code=200, message="success", data={"accepted": False, "status": "refreshing", "reason": "refreshing", **state})
@@ -1148,12 +1199,24 @@ async def coach_picks_refresh(max_count: int = 30, risk_level: str = "medium", u
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get(f"{settings.API_PREFIX}/coach/picks/refresh-state")
+async def coach_picks_refresh_state():
+    """查询智能选股后台刷新状态。"""
+    try:
+        return ApiResponse(code=200, message="success", data=coach_service.get_refresh_state())
+    except Exception as e:
+        logger.error(f"获取智能选股刷新状态失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get(f"{settings.API_PREFIX}/coach/picks/today")
 async def coach_picks_today(
     max_count: int = 5,
     risk_level: str = "medium",
     user_id: str = "default",
-    cached_only: bool = False
+    cached_only: bool = False,
+    requested_date: str = None,
+    trade_date: str = None,
 ):
     """获取今日可投推荐列表（投资教练）"""
     try:
@@ -1164,6 +1227,8 @@ async def coach_picks_today(
                 user_id=user_id,
                 risk_level=risk_level,
                 cached_only=True,
+                requested_date=requested_date,
+                trade_date=trade_date,
             )
             if not data:
                 data = {
@@ -1212,6 +1277,27 @@ async def coach_picks_history(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get(f"{settings.API_PREFIX}/coach/picks/batch-review")
+async def coach_picks_batch_review(
+    trade_date: str = None,
+    user_id: str = "default",
+    limit: int = 200,
+):
+    """获取同批智能选股横向复盘。"""
+    try:
+        data = await run_in_threadpool(
+            coach_service.get_pick_batch_review,
+            user_id=user_id,
+            trade_date=trade_date,
+            limit=limit,
+        )
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取同批推荐复盘失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get(f"{settings.API_PREFIX}/coach/watchlist")
 async def coach_watchlist(user_id: str = "default"):
     """获取用户自选候选池（由推荐动作沉淀）"""
@@ -1257,6 +1343,30 @@ async def coach_paper_review(user_id: str = "default"):
         return ApiResponse(code=200, message="success", data=data)
     except Exception as e:
         logger.error(f"获取模拟复盘失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/paper/performance")
+async def coach_paper_performance(user_id: str = "default"):
+    """获取模拟交易收益评估（投资教练）"""
+    try:
+        data = await run_in_threadpool(coach_service.get_paper_performance, user_id=user_id)
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取模拟收益评估失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/paper/attribution")
+async def coach_paper_attribution(user_id: str = "default"):
+    """获取模拟交易结构化归因（投资教练）"""
+    try:
+        data = await run_in_threadpool(coach_service.get_paper_attribution, user_id=user_id)
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取模拟交易归因失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1518,6 +1628,9 @@ async def coach_record_pick_action(
             payload=request.dict()
         )
         return ApiResponse(code=200, message="success", data=record)
+    except ValueError as e:
+        logger.warning(f"记录推荐动作被拒绝: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"记录推荐动作失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -12,7 +12,7 @@ const BacktestReport = ({ data }) => {
     xField: 'date',
     yField: 'value',
     smooth: true,
-    color: '#1890ff',
+    color: '#27C08A',
     lineStyle: {
       lineWidth: 3,
     },
@@ -20,8 +20,8 @@ const BacktestReport = ({ data }) => {
       size: 5,
       shape: 'circle',
       style: {
-        fill: '#1890ff',
-        stroke: '#fff',
+        fill: '#27C08A',
+        stroke: '#F2F5F8',
         lineWidth: 2,
       },
     },
@@ -54,7 +54,7 @@ const BacktestReport = ({ data }) => {
     data: monthlyReturns,
     xField: 'month',
     yField: 'return',
-    color: ({ return: ret }) => (ret >= 0 ? '#cf1322' : '#52c41a'),
+    color: ({ return: ret }) => (ret >= 0 ? '#D95F59' : '#27C08A'),
     columnStyle: {
       radius: [4, 4, 0, 0],
     },
@@ -128,7 +128,7 @@ const BacktestReport = ({ data }) => {
       key: 'profit',
       render: (profit) =>
         profit ? (
-          <span style={{ color: profit > 0 ? '#cf1322' : '#52c41a', fontWeight: 500 }}>
+          <span style={{ color: profit > 0 ? 'var(--bull-color)' : 'var(--bear-color)', fontWeight: 500 }}>
             {profit > 0 ? '+' : ''}
             {profit.toFixed(2)}
           </span>
@@ -142,7 +142,7 @@ const BacktestReport = ({ data }) => {
       key: 'return',
       render: (ret) =>
         ret ? (
-          <span style={{ color: ret > 0 ? '#cf1322' : '#52c41a', fontWeight: 600 }}>
+          <span style={{ color: ret > 0 ? 'var(--bull-color)' : 'var(--bear-color)', fontWeight: 600 }}>
             {ret > 0 ? '+' : ''}
             {ret}%
           </span>
@@ -155,7 +155,7 @@ const BacktestReport = ({ data }) => {
   return (
     <div className="backtest-report">
       {/* 核心指标 */}
-      <Card className="report-card" title="📊 回测结果概览" variant="borderless">
+      <Card className="report-card" title="回测结果概览" variant="borderless">
         <Row gutter={16}>
           <Col xs={12} sm={8} md={6}>
             <Statistic
@@ -163,7 +163,7 @@ const BacktestReport = ({ data }) => {
               value={performance.totalReturn}
               precision={1}
               suffix="%"
-              valueStyle={{ color: '#cf1322', fontSize: 24 }}
+              valueStyle={{ color: 'var(--bull-color)', fontSize: 24 }}
               prefix={<RiseOutlined />}
             />
           </Col>
@@ -173,7 +173,7 @@ const BacktestReport = ({ data }) => {
               value={performance.annualReturn}
               precision={1}
               suffix="%"
-              valueStyle={{ color: '#cf1322', fontSize: 24 }}
+              valueStyle={{ color: 'var(--bull-color)', fontSize: 24 }}
             />
           </Col>
           <Col xs={12} sm={8} md={6}>
@@ -182,7 +182,7 @@ const BacktestReport = ({ data }) => {
               value={Math.abs(performance.maxDrawdown)}
               precision={1}
               suffix="%"
-              valueStyle={{ color: '#52c41a', fontSize: 24 }}
+              valueStyle={{ color: 'var(--bear-color)', fontSize: 24 }}
               prefix={<FallOutlined />}
             />
           </Col>
@@ -191,7 +191,7 @@ const BacktestReport = ({ data }) => {
               title="夏普比率"
               value={performance.sharpeRatio}
               precision={2}
-              valueStyle={{ color: '#1890ff', fontSize: 24 }}
+              valueStyle={{ color: 'var(--info-color)', fontSize: 24 }}
             />
           </Col>
           <Col xs={12} sm={8} md={6}>
@@ -237,7 +237,7 @@ const BacktestReport = ({ data }) => {
               value={performance.alpha}
               precision={1}
               suffix="%"
-              valueStyle={{ color: '#faad14' }}
+              valueStyle={{ color: 'var(--warning-color)' }}
             />
           </Col>
           <Col xs={12} md={6}>
@@ -269,17 +269,17 @@ const BacktestReport = ({ data }) => {
       </Card>
 
       {/* 收益曲线 */}
-      <Card className="report-card" title="📈 收益曲线" variant="borderless">
+      <Card className="report-card" title="收益曲线" variant="borderless">
         <Line {...equityConfig} height={300} />
       </Card>
 
       {/* 月度收益 */}
-      <Card className="report-card" title="📊 月度收益统计" variant="borderless">
+      <Card className="report-card" title="月度收益统计" variant="borderless">
         <Column {...monthlyConfig} height={300} />
       </Card>
 
       {/* 交易明细 */}
-      <Card className="report-card" title="📋 交易明细" variant="borderless">
+      <Card className="report-card" title="交易明细" variant="borderless">
         <Table
           columns={tradeColumns}
           dataSource={trades}

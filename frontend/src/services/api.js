@@ -165,6 +165,11 @@ export const coachApi = {
     return api.post('/coach/picks/refresh', null, { params })
   },
 
+  // 后台刷新状态
+  getTodayPicksRefreshState: () => {
+    return api.get('/coach/picks/refresh-state')
+  },
+
   // 资金流覆盖状态
   getMoneyFlowCoverage: () => {
     return api.get('/money-flow/coverage')
@@ -185,6 +190,11 @@ export const coachApi = {
     return api.get('/coach/picks/history', { params })
   },
 
+  // 同批推荐横向复盘
+  getPickBatchReview: (params) => {
+    return api.get('/coach/picks/batch-review', { params })
+  },
+
   // 推荐动作沉淀的自选池
   getWatchlist: (params) => {
     return api.get('/coach/watchlist', { params })
@@ -203,6 +213,16 @@ export const coachApi = {
   // 模拟复盘摘要
   getPaperReview: (params) => {
     return api.get('/coach/paper-review', { params })
+  },
+
+  // 模拟交易收益评估
+  getPaperPerformance: (params) => {
+    return api.get('/coach/paper/performance', { params })
+  },
+
+  // 模拟交易结构化归因
+  getPaperAttribution: (params) => {
+    return api.get('/coach/paper/attribution', { params })
   },
 
   // 已选股票监控总览

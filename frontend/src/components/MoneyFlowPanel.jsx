@@ -5,8 +5,8 @@ import { ArrowUpOutlined, ArrowDownOutlined, DollarOutlined } from '@ant-design/
 const MoneyFlowPanel = ({ data }) => {
   if (!data) {
     return (
-      <Card title="💰 资金流向分析" variant="borderless">
-        <div style={{ textAlign: 'center', padding: '40px', color: '#999' }}>
+      <Card title="资金流向分析" variant="borderless">
+        <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>
           暂无资金流向数据
         </div>
       </Card>
@@ -22,15 +22,15 @@ const MoneyFlowPanel = ({ data }) => {
     const details = money_flow.analysis?.details || signal.signals || []
     return (
       <Card
-        title="💰 资金流向分析"
+        title="资金流向分析"
         variant="borderless"
         style={{ marginTop: 16 }}
       >
         <div style={{
           padding: '20px',
           borderRadius: 12,
-          background: 'linear-gradient(135deg, rgba(250, 173, 20, 0.12), rgba(24, 144, 255, 0.08))',
-          border: '1px solid rgba(250, 173, 20, 0.25)'
+          background: 'var(--bg-inset)',
+          border: '1px solid var(--border-secondary)'
         }}>
           <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
             <Tag color="gold" style={{ fontSize: 14 }}>资金流数据暂不可用</Tag>
@@ -57,7 +57,7 @@ const MoneyFlowPanel = ({ data }) => {
 
   return (
     <Card
-      title="💰 资金流向分析"
+      title="资金流向分析"
       variant="borderless"
       style={{ marginTop: 16 }}
     >
@@ -68,7 +68,7 @@ const MoneyFlowPanel = ({ data }) => {
             title="主力净流入"
             value={Math.abs(money_flow.main_net_inflow / 100000000).toFixed(2)}
             precision={2}
-            valueStyle={{ color: isInflow ? '#cf1322' : '#3f8600' }}
+            valueStyle={{ color: isInflow ? 'var(--bull-color)' : 'var(--bear-color)' }}
             prefix={isInflow ? <ArrowUpOutlined /> : <ArrowDownOutlined />}
             suffix="亿元"
           />
@@ -79,12 +79,12 @@ const MoneyFlowPanel = ({ data }) => {
             value={money_flow.control_ratio}
             precision={1}
             suffix="%"
-            valueStyle={{ color: '#1890ff' }}
+            valueStyle={{ color: 'var(--info-color)' }}
           />
         </Col>
         <Col span={8}>
           <div>
-            <div style={{ fontSize: 14, color: '#666', marginBottom: 8 }}>资金趋势</div>
+            <div style={{ fontSize: 14, color: 'var(--text-secondary)', marginBottom: 8 }}>资金趋势</div>
             <Tag color={isInflow ? 'red' : 'green'} style={{ fontSize: 16 }}>
               {money_flow.trend} ({money_flow.strength})
             </Tag>
@@ -108,7 +108,7 @@ const MoneyFlowPanel = ({ data }) => {
           <Tag color={Number(signal.score || 0) > 0 ? 'red' : 'green'} style={{ fontSize: 14 }}>
             {signal.overall}
           </Tag>
-          <span style={{ marginLeft: 8, color: '#666' }}>
+          <span style={{ marginLeft: 8, color: 'var(--text-secondary)' }}>
             评分: {signal.score ?? '未评分'}
           </span>
         </div>
@@ -130,18 +130,19 @@ const MoneyFlowPanel = ({ data }) => {
         <>
           <Divider />
           <div>
-            <h4>📊 详细分析</h4>
+            <h4>详细分析</h4>
             <div style={{
               padding: '12px',
-              background: 'var(--bg-elevated)',
-              borderRadius: 4,
+              background: 'var(--bg-inset)',
+              border: '1px solid var(--border-secondary)',
+              borderRadius: 8,
               marginTop: 8
             }}>
               <div style={{ fontWeight: 500, marginBottom: 8 }}>
                 {money_flow.analysis.conclusion}
               </div>
               {money_flow.analysis.details.map((detail, index) => (
-                <div key={index} style={{ color: '#666', fontSize: 13, marginTop: 4 }}>
+                <div key={index} style={{ color: 'var(--text-secondary)', fontSize: 13, marginTop: 4 }}>
                   {detail}
                 </div>
               ))}

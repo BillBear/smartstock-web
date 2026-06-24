@@ -18,9 +18,16 @@ class RecommendationService:
         risk_level: str = "medium",
         max_count: int = 30,
         cached_only: bool = False,
+        requested_date: Optional[str] = None,
+        trade_date: Optional[str] = None,
     ) -> Dict[str, Any]:
         if cached_only:
-            return self.coach_service.get_cached_today_picks(max_count=max_count, user_id=user_id) or {
+            return self.coach_service.get_cached_today_picks(
+                max_count=max_count,
+                user_id=user_id,
+                requested_date=requested_date,
+                trade_date=trade_date,
+            ) or {
                 "status": "empty",
                 "picks": [],
             }

@@ -31,9 +31,9 @@ const FACTOR_META = {
 }
 
 const scoreColor = (value) => {
-  if (value >= 65) return '#ff4d4f'
-  if (value >= 45) return '#faad14'
-  return '#52c41a'
+  if (value >= 65) return '#D95F59'
+  if (value >= 45) return '#D7A84A'
+  return '#27C08A'
 }
 
 const MarketFactorExplain = ({ drivers, loadedAt, mode = 'dashboard' }) => {

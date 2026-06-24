@@ -178,12 +178,76 @@
   font-family: 'JetBrains Mono', monospace;
 }
 
+.stat-extra {
+  margin-top: 6px;
+  color: rgba(203, 213, 225, 0.72);
+  font-size: 12px;
+}
+
+.snapshot-controls {
+  width: 100%;
+}
+
 /* 排行榜卡片 */
 .ranking-card {
   background: rgba(255, 255, 255, 0.05);
   border-radius: 16px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   margin-bottom: 24px;
+}
+
+.batch-review-card {
+  margin-bottom: 18px;
+  border-radius: 16px;
+  background: rgba(15, 23, 42, 0.82);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.batch-review-metrics {
+  margin-top: 4px;
+}
+
+.batch-review-metric {
+  min-height: 92px;
+  padding: 14px;
+  border-radius: 12px;
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.batch-review-metric span,
+.ranking-score-cell span {
+  display: block;
+  color: rgba(203, 213, 225, 0.68);
+  font-size: 12px;
+}
+
+.batch-review-metric strong {
+  display: block;
+  margin: 5px 0;
+  color: #f8fafc;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 24px;
+}
+
+.batch-review-metric em {
+  color: rgba(203, 213, 225, 0.74);
+  font-style: normal;
+  font-size: 12px;
+}
+
+.batch-case-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.ranking-score-cell strong {
+  display: block;
+  color: #67e8f9;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 16px;
 }
 
 .ranking-card-title {
@@ -798,5 +862,185 @@
 
   .plan-badge {
     width: 100%;
+  }
+}
+
+/* Terminal refresh overrides */
+.smart-screen-container {
+  padding: clamp(16px, 2.2vw, 28px);
+  background:
+    linear-gradient(180deg, rgba(12, 17, 24, 0.98), rgba(8, 11, 16, 1)),
+    var(--bg-primary);
+  min-height: 100dvh;
+}
+
+.screen-header {
+  border-bottom: 1px solid var(--border-primary);
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+}
+
+.trade-plan-hero,
+.core-pick-card,
+.stat-card,
+.theme-rank-card,
+.money-quality-card,
+.ranking-card,
+.info-card,
+.diagnostic-card {
+  background: linear-gradient(180deg, rgba(17, 23, 32, 0.98), rgba(13, 17, 24, 0.98)) !important;
+  border: 1px solid var(--border-secondary) !important;
+  border-radius: var(--radius-lg) !important;
+  box-shadow: var(--shadow-sm) !important;
+}
+
+.trade-plan-hero {
+  position: relative;
+}
+
+.trade-plan-hero::before,
+.theme-rank-card::before,
+.money-quality-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.035);
+}
+
+.plan-kicker,
+.section-title-row p,
+.ranking-card-title span,
+.theme-rank-name span,
+.theme-rank-meta span,
+.money-quality-grid span,
+.news-panel-stat span,
+.news-panel-item-time,
+.stock-code {
+  color: var(--text-secondary);
+}
+
+.plan-hero-main h2,
+.section-title-row h3,
+.ranking-card-title h3,
+.theme-rank-name strong,
+.money-quality-grid strong,
+.news-panel-stat strong,
+.news-panel-item-title,
+.stock-name,
+.price-value {
+  color: var(--text-primary);
+}
+
+.plan-badge {
+  background: var(--bg-inset);
+  border-radius: var(--radius-md);
+  min-width: 148px;
+}
+
+.core-pick-grid span,
+.theme-rank-item,
+.money-quality-grid > div,
+.theme-drawer-summary > div,
+.diagnostic-metric,
+.theme-watch-item,
+.news-panel-stat,
+.news-panel-item {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-secondary);
+  border-radius: var(--radius-md);
+}
+
+.core-pick-score,
+.theme-rank-index,
+.theme-watch-score span {
+  color: var(--focus-color);
+}
+
+.theme-rank-index {
+  background: var(--bg-active);
+  border-color: rgba(39, 192, 138, 0.24);
+}
+
+.theme-rank-button:hover {
+  background: rgba(39, 192, 138, 0.08);
+  border-color: rgba(39, 192, 138, 0.34);
+  transform: translateY(-1px);
+}
+
+.stock-tag {
+  background: var(--info-soft);
+  border-color: rgba(77, 163, 255, 0.28);
+  color: var(--info-color);
+}
+
+.price-change.up {
+  color: var(--bull-color);
+}
+
+.price-change.down {
+  color: var(--bear-color);
+}
+
+.score-explain h4,
+.score-explain li::before,
+.ranking-card .ant-tabs-tab-active .ant-tabs-tab-btn {
+  color: var(--focus-color);
+}
+
+.ranking-card .ant-tabs-ink-bar {
+  background: var(--focus-color);
+}
+
+.disclaimer,
+.excluded-item em {
+  color: var(--warning-color);
+}
+
+.excluded-item {
+  background: var(--warning-soft);
+  border-color: rgba(215, 168, 74, 0.22);
+}
+
+.news-panel-item-title a {
+  color: var(--text-primary);
+  border-bottom-color: rgba(167, 176, 189, 0.28);
+}
+
+.news-panel-item-title a:hover {
+  color: var(--focus-color);
+  border-bottom-color: rgba(39, 192, 138, 0.6);
+}
+
+.core-risk-text {
+  color: var(--warning-color);
+  font-size: 12px;
+  margin-top: -4px;
+}
+
+.debug-details {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--border-secondary);
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+}
+
+.debug-details summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+@media (max-width: 768px) {
+  .smart-screen-container {
+    padding: 14px;
+  }
+
+  .plan-hero-main,
+  .ranking-card-title,
+  .section-title-row,
+  .diagnostic-head {
+    align-items: stretch;
   }
 }
