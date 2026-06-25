@@ -1,5 +1,6 @@
 import math
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -10,6 +11,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.services.advice_service import AdviceService
 from app.services.ai_decision_service import AIDecisionEngine
+from app.services.coach_service import CoachService
+from app.services.coach_store import CoachStore
 from app.services.technical_analyzer import TechnicalAnalyzer
 
 
@@ -158,6 +161,31 @@ class AIDecisionEngineTests(unittest.TestCase):
         self.assertEqual(decision["position_advice"]["position_size"], "3.0%")
         self.assertEqual(decision["expected_return"]["probability"], "66%")
         self.assertEqual(decision["coach_context"]["pick_id"], "2026-06-25-000001-S1")
+
+
+class CoachServiceObservabilityTests(unittest.TestCase):
+    def test_market_news_exception_is_logged_and_marked_unavailable(self):
+        class DataSourceStub:
+            def get_realtime_quote(self, symbol):
+                return None
+
+        class NewsServiceStub:
+            def get_market_news_summary(self):
+                raise RuntimeError("news timeout")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = CoachService(
+                data_source_manager=DataSourceStub(),
+                store=CoachStore(str(Path(tmpdir) / "coach.db")),
+                news_service=NewsServiceStub(),
+            )
+
+            with self.assertLogs("app.services.coach_service", level="WARNING") as captured:
+                market_state = service.get_market_state_today()
+
+        self.assertEqual(market_state["news_context"]["source_status"], "unavailable")
+        self.assertEqual(market_state["news_context"]["error"], "news_service_unavailable")
+        self.assertIn("market news summary unavailable", "\n".join(captured.output))
 
 
 if __name__ == "__main__":

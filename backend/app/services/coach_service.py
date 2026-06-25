@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timedelta
@@ -16,6 +17,9 @@ import pandas as pd
 
 from app.services.coach_store import CoachStore
 from app.services.technical_analyzer import TechnicalAnalyzer
+
+
+logger = logging.getLogger(__name__)
 
 
 class CoachService:
@@ -893,8 +897,13 @@ class CoachService:
         if self.news_service:
             try:
                 news_context = self.news_service.get_market_news_summary()
-            except Exception:
-                news_context = news_context
+            except Exception as exc:
+                logger.warning("market news summary unavailable: %s", exc)
+                news_context = {
+                    **news_context,
+                    "source_status": "unavailable",
+                    "error": "news_service_unavailable",
+                }
 
         if not quotes:
             return {
