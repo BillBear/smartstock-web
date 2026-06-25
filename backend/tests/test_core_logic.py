@@ -1644,6 +1644,47 @@ class MarketDataSnapshotServiceTests(unittest.TestCase):
             self.assertEqual(snapshot["snapshot_count"], 600)
             self.assertIn(True, data_source.force_flags)
 
+    def test_ensure_snapshot_marks_restored_stale_snapshot_as_unreliable(self):
+        class EmptyDataSourceStub:
+            def get_a_share_snapshot(self, force=False):
+                return []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = CoachStore(str(Path(tmpdir) / "coach.db"))
+            store.upsert_market_snapshot(
+                trade_date="2026-06-02",
+                source="unit_test",
+                quality_status="ok",
+                items=[
+                    {
+                        "symbol": f"600{i:03d}",
+                        "name": f"旧股票{i}",
+                        "price": 10,
+                        "amount": 500000000,
+                        "pct_change": 1,
+                        "update_time": "2026-06-02 15:00:00",
+                    }
+                    for i in range(600)
+                ],
+                meta={
+                    "snapshot_count": 600,
+                    "min_reliable_count": 500,
+                    "source": "unit_test",
+                    "is_reliable": True,
+                },
+                created_at="2026-06-02 15:30:00",
+            )
+            service = MarketDataSnapshotService(data_source_manager=EmptyDataSourceStub(), store=store)
+
+            snapshot = service.ensure_snapshot_for_recommendation("2026-06-03")
+
+            self.assertEqual(snapshot["trade_date"], "2026-06-02")
+            self.assertTrue(snapshot["stale_snapshot"])
+            self.assertFalse(snapshot["is_reliable"])
+            self.assertFalse(snapshot["meta"]["is_reliable"])
+            self.assertTrue(snapshot["meta"]["stale_snapshot"])
+            self.assertIn("回退", snapshot["stale_reason"])
+
 
 class SettingsTests(unittest.TestCase):
     def test_secret_defaults_are_empty_and_local_frontend_is_allowed(self):

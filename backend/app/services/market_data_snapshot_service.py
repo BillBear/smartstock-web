@@ -59,16 +59,28 @@ class MarketDataSnapshotService:
         snapshot = self.get_latest_valid_snapshot(trade_date)
         snapshot_trade_date = str((snapshot or {}).get("trade_date") or "")
         if snapshot and snapshot_trade_date >= trade_date:
-            return {**snapshot, "is_reliable": True}
+            meta = dict(snapshot.get("meta") or {})
+            snapshot_count = int(snapshot.get("snapshot_count") or meta.get("snapshot_count") or 0)
+            is_reliable = snapshot_count >= self.min_reliable_count and not bool(snapshot.get("stale_snapshot"))
+            meta["is_reliable"] = is_reliable
+            return {**snapshot, "is_reliable": is_reliable, "meta": meta}
 
         refreshed = self.refresh_today_snapshot(force=bool(snapshot))
         refreshed["is_reliable"] = int(refreshed.get("snapshot_count") or 0) >= self.min_reliable_count
         if not refreshed["is_reliable"] and snapshot:
-            restored = {**snapshot, "is_reliable": True}
-            restored["stale_snapshot"] = True
-            restored["stale_reason"] = "最新全A快照重建失败，临时回退到最近有效快照。"
-            return restored
+            return self._restore_stale_snapshot(snapshot)
         return refreshed
+
+    def _restore_stale_snapshot(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        reason = "最新全A快照重建失败，临时回退到最近有效快照。"
+        meta = dict(snapshot.get("meta") or {})
+        meta["is_reliable"] = False
+        meta["stale_snapshot"] = True
+        meta["stale_reason"] = reason
+        restored = {**snapshot, "is_reliable": False, "meta": meta}
+        restored["stale_snapshot"] = True
+        restored["stale_reason"] = reason
+        return restored
 
     @staticmethod
     def _infer_snapshot_source(items: List[Dict[str, Any]]) -> str:

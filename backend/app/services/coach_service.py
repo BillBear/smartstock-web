@@ -3696,7 +3696,7 @@ class CoachService:
             trade_date = actual_trade_date
             cache_key = f"{trade_date}:{user_id}:{level}:{strategy_code}:{int(score_threshold)}"
         snapshot_count = int(self._safe_float((universe_meta or {}).get("snapshot_count"), 0))
-        if snapshot_count < 500:
+        if bool((universe_meta or {}).get("stale_snapshot")) or snapshot_count < 500:
             result = self._build_degraded_today_result(
                 trade_date=trade_date,
                 market_state=market_state,
