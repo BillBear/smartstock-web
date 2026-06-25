@@ -427,6 +427,16 @@ class CoachStoreTests(unittest.TestCase):
 
 
 class ScoringServiceTests(unittest.TestCase):
+    def test_score_helpers_reject_nan_and_infinite_values(self):
+        self.assertEqual(ScoringService._safe_float("nan", 7.0), 7.0)
+        self.assertEqual(ScoringService._safe_float(float("inf"), 7.0), 7.0)
+        self.assertEqual(MarketLeaderScorer._safe_float(float("-inf"), 7.0), 7.0)
+        self.assertEqual(CoachService._safe_float(float("nan"), 7.0), 7.0)
+
+        self.assertEqual(ScoringService._clamp(float("nan"), 0, 100), 0)
+        self.assertEqual(MarketLeaderScorer._clamp(float("inf"), 0, 100), 0)
+        self.assertEqual(CoachService._clamp(float("-inf"), 0, 100), 0)
+
     def test_market_leader_score_prioritizes_market_strength_before_risk(self):
         scorer = MarketLeaderScorer()
         leader = {

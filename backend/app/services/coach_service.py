@@ -8,6 +8,7 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timedelta
@@ -336,7 +337,13 @@ class CoachService:
 
     @staticmethod
     def _clamp(value: float, low: float, high: float) -> float:
-        return max(low, min(high, value))
+        try:
+            result = float(value)
+        except Exception:
+            return low
+        if not math.isfinite(result):
+            return low
+        return max(low, min(high, result))
 
     def _classify_backtest_run(self, run: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """Classify stored backtests before they can influence recommendations."""
@@ -7422,7 +7429,10 @@ class CoachService:
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
         try:
-            return float(value)
+            result = float(value)
+            if not math.isfinite(result):
+                return float(default)
+            return result
         except Exception:
             return float(default)
 

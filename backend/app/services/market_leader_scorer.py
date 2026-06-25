@@ -6,6 +6,7 @@ above market leaders simply because they look quiet.
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List
 
 
@@ -105,10 +106,19 @@ class MarketLeaderScorer:
         try:
             if value is None or (isinstance(value, str) and not value.strip()):
                 return float(default)
-            return float(value)
+            result = float(value)
+            if not math.isfinite(result):
+                return float(default)
+            return result
         except Exception:
             return float(default)
 
     @staticmethod
     def _clamp(value: float, low: float, high: float) -> float:
-        return max(low, min(high, value))
+        try:
+            result = float(value)
+        except Exception:
+            return low
+        if not math.isfinite(result):
+            return low
+        return max(low, min(high, result))
