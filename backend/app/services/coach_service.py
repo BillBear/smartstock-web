@@ -7,6 +7,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timedelta
@@ -21,6 +22,9 @@ from app.services.coach_store import CoachStore
 from app.services.market_leader_scorer import MarketLeaderScorer
 from app.services.risk_gate_service import RiskGateService
 from app.services.technical_analyzer import TechnicalAnalyzer
+
+
+logger = logging.getLogger(__name__)
 
 
 class CoachService:
@@ -898,7 +902,10 @@ class CoachService:
                     base = mean(amounts[-20:]) if len(amounts) >= 20 else mean(amounts)
                     if base > 0:
                         metrics["amount_ratio_20d"] = round(amount / base, 2)
-        except Exception:
+        except Exception as exc:
+            logger.warning("theme momentum history unavailable for %s: %s", symbol, exc)
+            metrics["history_status"] = "unavailable"
+            metrics["history_error"] = "history_data_unavailable"
             return metrics
         return metrics
 
@@ -1935,8 +1942,13 @@ class CoachService:
         if self.news_service:
             try:
                 news_context = self.news_service.get_market_news_summary()
-            except Exception:
-                news_context = news_context
+            except Exception as exc:
+                logger.warning("market news summary unavailable: %s", exc)
+                news_context = {
+                    **news_context,
+                    "source_status": "unavailable",
+                    "error": "news_service_unavailable",
+                }
 
         if not quotes:
             return {

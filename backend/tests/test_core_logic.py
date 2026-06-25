@@ -176,6 +176,52 @@ class AIDecisionEngineTests(unittest.TestCase):
         self.assertEqual(decision["coach_context"]["pick_id"], "2026-06-25-000001-S1")
 
 
+class CoachServiceObservabilityTests(unittest.TestCase):
+    def test_theme_momentum_history_exception_is_logged_and_marked_unavailable(self):
+        class DataSourceStub:
+            def get_history_data(self, symbol, days=32):
+                raise RuntimeError("history unavailable")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = CoachService(
+                data_source_manager=DataSourceStub(),
+                store=CoachStore(str(Path(tmpdir) / "coach.db")),
+            )
+
+            with self.assertLogs("app.services.coach_service", level="WARNING") as captured:
+                metrics = service._theme_momentum_metrics(
+                    "000001",
+                    {"price": 10, "pct_change": 1.5, "amount": 200000000},
+                )
+
+        self.assertEqual(metrics["history_status"], "unavailable")
+        self.assertEqual(metrics["history_error"], "history_data_unavailable")
+        self.assertIn("theme momentum history unavailable", "\n".join(captured.output))
+
+    def test_market_news_exception_is_logged_and_marked_unavailable(self):
+        class DataSourceStub:
+            def get_realtime_quote(self, symbol):
+                return None
+
+        class NewsServiceStub:
+            def get_market_news_summary(self):
+                raise RuntimeError("news timeout")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = CoachService(
+                data_source_manager=DataSourceStub(),
+                store=CoachStore(str(Path(tmpdir) / "coach.db")),
+                news_service=NewsServiceStub(),
+            )
+
+            with self.assertLogs("app.services.coach_service", level="WARNING") as captured:
+                market_state = service.get_market_state_today()
+
+        self.assertEqual(market_state["news_context"]["source_status"], "unavailable")
+        self.assertEqual(market_state["news_context"]["error"], "news_service_unavailable")
+        self.assertIn("market news summary unavailable", "\n".join(captured.output))
+
+
 class DataSourceManagerTests(unittest.TestCase):
     def test_search_uses_minimal_basic_map_when_remote_sources_are_unavailable(self):
         manager = DataSourceManager()
