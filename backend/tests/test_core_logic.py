@@ -19,6 +19,7 @@ from app.services.data_quality_service import DataQualityService
 from app.services.data_source_manager import DataSourceManager
 from app.services.market_leader_scorer import MarketLeaderScorer
 from app.services.market_data_snapshot_service import MarketDataSnapshotService
+from app.services.ml_feature_builder import MLFeatureBuilder
 from app.services.ml_model_service import MLModelService
 from app.services.risk_gate_service import RiskGateService
 from app.services.scoring_service import ScoringService
@@ -436,6 +437,21 @@ class ScoringServiceTests(unittest.TestCase):
         self.assertEqual(ScoringService._clamp(float("nan"), 0, 100), 0)
         self.assertEqual(MarketLeaderScorer._clamp(float("inf"), 0, 100), 0)
         self.assertEqual(CoachService._clamp(float("-inf"), 0, 100), 0)
+
+    def test_forward_label_risk_adjusted_return_preserves_missing_future_window(self):
+        feature_df = pd.DataFrame(
+            {
+                "close": [10.0, 11.0, 12.0, 13.0],
+                "high": [10.5, 11.5, 12.5, 13.5],
+                "low": [9.5, 10.5, 11.5, 12.5],
+            }
+        )
+
+        labeled = MLFeatureBuilder.add_forward_labels(feature_df, horizon_days=2)
+
+        self.assertTrue(pd.notna(labeled.loc[0, "label_risk_adjusted_return"]))
+        self.assertTrue(pd.isna(labeled.loc[2, "label_risk_adjusted_return"]))
+        self.assertTrue(pd.isna(labeled.loc[3, "label_risk_adjusted_return"]))
 
     def test_market_leader_score_prioritizes_market_strength_before_risk(self):
         scorer = MarketLeaderScorer()
