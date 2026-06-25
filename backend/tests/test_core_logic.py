@@ -25,6 +25,7 @@ from app.services.scoring_service import ScoringService
 from app.services.tencent_service import TencentService
 from app.services.universe_service import UniverseService
 from app.services.advice_service import AdviceService
+from app.services.ai_decision_service import AIDecisionEngine
 from app.services.technical_analyzer import TechnicalAnalyzer
 
 
@@ -93,6 +94,86 @@ class AdviceServiceTests(unittest.TestCase):
         self.assertIn("take_profit", advice["advice"])
         self.assertIn("stop_loss", advice["advice"])
         self.assertGreaterEqual(len(advice["risk_warning"]), 3)
+
+
+class AIDecisionEngineTests(unittest.TestCase):
+    def test_coach_aligned_decision_blocks_legacy_buy_when_symbol_is_not_in_pool(self):
+        decision = AIDecisionEngine.make_coach_aligned_decision(
+            symbol="000960",
+            name="锡业股份",
+            price=44.42,
+            coach_context={
+                "symbol": "000960",
+                "available": False,
+                "source": "not_in_current_strategy_pool",
+                "reason": "该股不在当前智能选股输出池中，个股详情仅展示行情分析分。",
+            },
+            technical_signals={"score": 55, "trend": "上升", "signals": ["MACD金叉"]},
+            money_flow_data={"available": True, "main_net_inflow": 1000000, "control_ratio": 1.0},
+            user_profile={"risk_level": "medium", "holding_period": "short"},
+        )
+
+        self.assertEqual(decision["decision_source"], "coach_service")
+        self.assertEqual(decision["decision"], "未入选候选池")
+        self.assertEqual(decision["position_advice"]["action"], "未入选候选池")
+        self.assertIsNone(decision["scores"]["technical"])
+        self.assertIsNone(decision["scores"]["money_flow"])
+        self.assertIsNone(decision["scores"]["total"])
+        self.assertIsNone(decision["scores"]["adjusted"])
+        self.assertIsNone(decision["position_advice"]["entry_price"])
+        self.assertIsNone(decision["position_advice"]["stop_profit"])
+        self.assertIsNone(decision["position_advice"]["stop_loss"])
+        self.assertEqual(decision["legacy_scores"]["adjusted"], 29.6)
+        self.assertIn("不在当前智能选股输出池", decision["action_plan"][0])
+
+    def test_coach_aligned_decision_uses_current_smart_screen_action(self):
+        decision = AIDecisionEngine.make_coach_aligned_decision(
+            symbol="000001",
+            name="平安银行",
+            price=10.0,
+            coach_context={
+                "symbol": "000001",
+                "available": True,
+                "source": "today_smart_screen",
+                "trade_date": "2026-06-25",
+                "pick_id": "2026-06-25-000001-S1",
+                "rank_no": 4,
+                "action": "paper_validate",
+                "paper_validation": True,
+                "up_prob": 0.66,
+                "dd_prob": 0.22,
+                "expected_return_pct": 6.5,
+                "expected_edge_pct": 2.1,
+                "profit_factor_proxy": 1.4,
+                "entry_range": [9.8, 10.1],
+                "take_profit": 11.2,
+                "stop_loss": 9.1,
+                "position_pct": 3.0,
+                "horizon_days": 15,
+                "score_breakdown": {
+                    "trend": 74.0,
+                    "money_flow": 62.0,
+                    "total": 72.5,
+                    "ranking_score": 81.2,
+                },
+                "ranking_score": 81.2,
+                "confidence_level": "B",
+                "risks": ["仅限模拟验证：不作为实盘买入信号。"],
+                "reasons": ["趋势评分较强"],
+                "exclusion_reason": "模拟验证候选：未达到实盘买入证据闸门。",
+            },
+            technical_signals={"score": 10, "trend": "上升", "signals": []},
+            money_flow_data={"available": False},
+            user_profile={"risk_level": "medium", "holding_period": "medium"},
+        )
+
+        self.assertEqual(decision["decision_source"], "coach_service")
+        self.assertEqual(decision["decision"], "模拟验证")
+        self.assertEqual(decision["scores"]["total"], 72.5)
+        self.assertEqual(decision["scores"]["adjusted"], 81.2)
+        self.assertEqual(decision["position_advice"]["position_size"], "3.0%")
+        self.assertEqual(decision["expected_return"]["probability"], "66%")
+        self.assertEqual(decision["coach_context"]["pick_id"], "2026-06-25-000001-S1")
 
 
 class DataSourceManagerTests(unittest.TestCase):
