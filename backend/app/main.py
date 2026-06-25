@@ -32,7 +32,6 @@ from app.models.schemas import (
 from app.services.stock_service import StockDataService
 from app.services.technical_analyzer import TechnicalAnalyzer
 from app.services.advice_service import AdviceService
-from app.services.money_flow_service import MoneyFlowService
 from app.services.ai_decision_service import AIDecisionEngine
 from app.services.akshare_service import AKShareService
 from app.services.tencent_service import TencentService
@@ -75,7 +74,6 @@ logger = logging.getLogger(__name__)
 stock_service = StockDataService()
 technical_analyzer = TechnicalAnalyzer()
 advice_service = AdviceService()
-money_flow_service = MoneyFlowService()
 ai_decision_engine = AIDecisionEngine()
 
 # 初始化数据源（多数据源容错策略）
