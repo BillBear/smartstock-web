@@ -13,6 +13,7 @@ from app.services.advice_service import AdviceService
 from app.services.ai_decision_service import AIDecisionEngine
 from app.services.coach_service import CoachService
 from app.services.coach_store import CoachStore
+from app.services.ml_feature_builder import MLFeatureBuilder
 from app.services.technical_analyzer import TechnicalAnalyzer
 
 
@@ -194,6 +195,23 @@ class CoachServiceObservabilityTests(unittest.TestCase):
         self.assertEqual(market_state["news_context"]["source_status"], "unavailable")
         self.assertEqual(market_state["news_context"]["error"], "news_service_unavailable")
         self.assertIn("market news summary unavailable", "\n".join(captured.output))
+
+
+class MLFeatureBuilderTests(unittest.TestCase):
+    def test_forward_label_risk_adjusted_return_preserves_missing_future_window(self):
+        feature_df = pd.DataFrame(
+            {
+                "close": [10.0, 11.0, 12.0, 13.0],
+                "high": [10.5, 11.5, 12.5, 13.5],
+                "low": [9.5, 10.5, 11.5, 12.5],
+            }
+        )
+
+        labeled = MLFeatureBuilder.add_forward_labels(feature_df, horizon_days=2)
+
+        self.assertTrue(pd.notna(labeled.loc[0, "label_risk_adjusted_return"]))
+        self.assertTrue(pd.isna(labeled.loc[2, "label_risk_adjusted_return"]))
+        self.assertTrue(pd.isna(labeled.loc[3, "label_risk_adjusted_return"]))
 
 
 if __name__ == "__main__":

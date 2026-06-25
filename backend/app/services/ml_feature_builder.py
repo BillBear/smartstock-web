@@ -154,7 +154,7 @@ class MLFeatureBuilder:
         local["future_max_drawdown_pct"] = (future_low / close - 1).replace([np.inf, -np.inf], np.nan) * 100
         local["label_up"] = (local["future_return_pct"] >= float(target_return_pct)).astype(int)
         local["label_dd"] = (local["future_max_drawdown_pct"] <= -float(drawdown_pct)).astype(int)
-        local["label_risk_adjusted_return"] = local["future_return_pct"].fillna(0) + local["future_max_drawdown_pct"].fillna(0) * 0.45
+        local["label_risk_adjusted_return"] = local["future_return_pct"] + local["future_max_drawdown_pct"] * 0.45
         return local
 
     @classmethod
