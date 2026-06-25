@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
@@ -294,6 +295,41 @@ class DataSourceManagerTests(unittest.TestCase):
 
 
 class CoachStoreTests(unittest.TestCase):
+    def test_open_or_add_position_is_atomic_across_store_instances(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "coach.db")
+            stores = [CoachStore(db_path) for _ in range(12)]
+
+            def buy(index: int):
+                return stores[index % len(stores)].open_or_add_position(
+                    user_id="default",
+                    symbol="600519",
+                    name="贵州茅台",
+                    pick_id=f"pick-{index}",
+                    price=10 + (index % 3),
+                    qty=100,
+                    created_at=f"2026-06-25 10:{index:02d}:00",
+                    reason="concurrency-test",
+                )
+
+            errors = []
+            with ThreadPoolExecutor(max_workers=12) as executor:
+                futures = [executor.submit(buy, index) for index in range(60)]
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        errors.append(repr(exc))
+
+            positions = stores[0].list_open_positions("default")
+            expected_cost = sum((10 + (index % 3)) * 100 for index in range(60))
+
+            self.assertEqual(errors, [])
+            self.assertEqual(len(positions), 1)
+            self.assertEqual(positions[0]["qty"], 6000)
+            self.assertEqual(positions[0]["cost_amount"], expected_cost)
+            self.assertAlmostEqual(positions[0]["avg_price"], expected_cost / 6000, places=6)
+
     def test_latest_pick_snapshots_result_restores_cached_picks(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = CoachStore(str(Path(tmpdir) / "coach.db"))
