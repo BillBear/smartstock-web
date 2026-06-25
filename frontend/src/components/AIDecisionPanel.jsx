@@ -11,8 +11,8 @@ import {
 const AIDecisionPanel = ({ data }) => {
   if (!data) {
     return (
-      <Card title="🤖 AI智能决策" variant="borderless">
-        <div style={{ textAlign: 'center', padding: '40px', color: '#999' }}>
+      <Card title="AI智能决策" variant="borderless">
+        <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>
           暂无AI决策数据
         </div>
       </Card>
@@ -21,22 +21,38 @@ const AIDecisionPanel = ({ data }) => {
 
   // 决策颜色映射
   const getDecisionColor = (decision) => {
-    if (decision.includes('强烈买入')) return '#cf1322'
-    if (decision.includes('买入')) return '#ff4d4f'
-    if (decision.includes('谨慎买入')) return '#faad14'
-    if (decision.includes('观望')) return '#1890ff'
-    if (decision.includes('卖出')) return '#52c41a'
-    return '#666'
+    if (decision.includes('强烈买入')) return 'var(--bull-color)'
+    if (decision.includes('买入')) return 'var(--bull-color)'
+    if (decision.includes('模拟验证')) return 'var(--warning-color)'
+    if (decision.includes('未入选')) return 'var(--text-secondary)'
+    if (decision.includes('观察')) return 'var(--info-color)'
+    if (decision.includes('谨慎买入')) return 'var(--warning-color)'
+    if (decision.includes('观望')) return 'var(--info-color)'
+    if (decision.includes('卖出')) return 'var(--bear-color)'
+    return 'var(--text-secondary)'
   }
 
   const decisionColor = getDecisionColor(data.decision)
+  const isCoachAligned = data.decision_source === 'coach_service'
+  const coachContext = data.coach_context || {}
+  const scores = data.scores || {}
+  const legacyScores = data.legacy_scores || {}
+  const positionAdvice = data.position_advice || {}
+  const hasNumber = (value) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
+  const hasCoachScore = hasNumber(scores.adjusted)
+  const formatScore = (value) => hasNumber(value) ? Number(value).toFixed(1) : '未评分'
+  const formatPrice = (value) => hasNumber(value) ? `${Number(value).toFixed(2)}元` : '不适用'
+  const scoreStyle = (value) => {
+    if (!hasNumber(value)) return { color: 'var(--text-secondary)' }
+    return { color: Number(value) > 0 ? 'var(--bull-color)' : 'var(--bear-color)' }
+  }
 
   // 信心度进度条颜色
   const getConfidenceColor = (confidence) => {
-    if (confidence === '非常高') return '#cf1322'
-    if (confidence === '高') return '#ff4d4f'
-    if (confidence === '中等') return '#faad14'
-    return '#1890ff'
+    if (confidence === '非常高') return 'var(--bull-color)'
+    if (confidence === '高') return 'var(--bull-color)'
+    if (confidence === '中等') return 'var(--warning-color)'
+    return 'var(--info-color)'
   }
 
   const confidenceValue = {
@@ -48,7 +64,7 @@ const AIDecisionPanel = ({ data }) => {
 
   return (
     <Card
-      title="🤖 AI智能决策（小白版）"
+      title="AI智能决策（小白版）"
       variant="borderless"
       style={{ marginTop: 16 }}
     >
@@ -56,7 +72,7 @@ const AIDecisionPanel = ({ data }) => {
       <Alert
         message={
           <div style={{ fontSize: 18, fontWeight: 600 }}>
-            <RocketOutlined /> AI最终决策: <span style={{ color: decisionColor }}>{data.decision}</span>
+            <RocketOutlined /> {isCoachAligned ? '智能选股动作' : 'AI最终决策'}: <span style={{ color: decisionColor }}>{data.decision}</span>
           </div>
         }
         description={
@@ -67,15 +83,22 @@ const AIDecisionPanel = ({ data }) => {
                 {data.confidence}
               </Tag>
               <span style={{ marginLeft: 16, color: 'var(--text-secondary)' }}>
-                综合评分: <Tag color={data.scores.adjusted > 0 ? 'red' : 'green'}>{data.scores.adjusted.toFixed(1)}</Tag>
+                综合评分: <Tag color={hasCoachScore && scores.adjusted > 0 ? 'red' : 'default'}>{formatScore(scores.adjusted)}</Tag>
               </span>
+              {isCoachAligned && (
+                <span style={{ marginLeft: 16, color: 'var(--text-secondary)' }}>
+                  来源: <Tag color="blue">{coachContext.source || 'coach_service'}</Tag>
+                </span>
+              )}
             </div>
             <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
-              <BulbOutlined /> AI综合了技术面、资金面等多个维度后给出的建议，信心度越高越可靠
+              <BulbOutlined /> {isCoachAligned
+                ? '最终动作来自智能选股 CoachService，与候选池、观察池和模拟验证门槛保持一致。'
+                : 'AI综合了技术面、资金面等多个维度后给出的建议，信心度越高越可靠'}
             </div>
           </div>
         }
-        type="info"
+        type={isCoachAligned && data.decision.includes('未入选') ? 'warning' : 'info'}
         showIcon
         icon={<ThunderboltOutlined />}
       />
@@ -95,14 +118,23 @@ const AIDecisionPanel = ({ data }) => {
         padding: 16,
         borderRadius: 8,
         marginBottom: 24,
-        borderLeft: '3px solid #1890ff'
+        border: '1px solid var(--border-secondary)'
       }}>
         <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 8 }}>
-          💡 什么是AI决策？
+          {isCoachAligned ? '这和智能选股是什么关系？' : '什么是AI决策？'}
         </div>
         <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-          AI决策就像一个<strong style={{ color: 'var(--text-primary)' }}>专业投资顾问</strong>，帮你综合分析技术指标、资金流向、市场情绪等多个因素，最后给出一个明确的操作建议。
-          信心度代表AI对这个建议的把握程度，<strong style={{ color: '#00C076' }}>信心度越高，建议越可靠</strong>。
+          {isCoachAligned ? (
+            <>
+              个股页不再单独用旧 AI 阈值生成买入/卖出结论。这里复用<strong style={{ color: 'var(--text-primary)' }}>智能选股候选池</strong>里的评分上下文：
+              入选则显示候选池动作；未入选则不生成交易计划，只保留行情和技术分析作参考。
+            </>
+          ) : (
+            <>
+              AI决策就像一个<strong style={{ color: 'var(--text-primary)' }}>专业投资顾问</strong>，帮你综合分析技术指标、资金流向、市场情绪等多个因素，最后给出一个明确的操作建议。
+              信心度代表AI对这个建议的把握程度，<strong style={{ color: 'var(--focus-color)' }}>信心度越高，建议越可靠</strong>。
+            </>
+          )}
         </div>
       </div>
 
@@ -112,33 +144,42 @@ const AIDecisionPanel = ({ data }) => {
       <Row gutter={16}>
         <Col span={6}>
           <Statistic
-            title="技术面评分"
-            value={data.scores.technical}
-            valueStyle={{ color: data.scores.technical > 0 ? '#cf1322' : '#3f8600' }}
+            title={isCoachAligned ? '趋势评分' : '技术面评分'}
+            value={formatScore(scores.technical)}
+            valueStyle={scoreStyle(scores.technical)}
           />
         </Col>
         <Col span={6}>
           <Statistic
             title="资金面评分"
-            value={data.scores.money_flow.toFixed(1)}
-            valueStyle={{ color: data.scores.money_flow > 0 ? '#cf1322' : '#3f8600' }}
+            value={formatScore(scores.money_flow)}
+            valueStyle={scoreStyle(scores.money_flow)}
           />
         </Col>
         <Col span={6}>
           <Statistic
-            title="综合评分"
-            value={data.scores.total.toFixed(1)}
-            valueStyle={{ color: data.scores.total > 0 ? '#cf1322' : '#3f8600' }}
+            title={isCoachAligned ? '策略总分' : '综合评分'}
+            value={formatScore(scores.total)}
+            valueStyle={scoreStyle(scores.total)}
           />
         </Col>
         <Col span={6}>
           <Statistic
-            title="调整后评分"
-            value={data.scores.adjusted.toFixed(1)}
-            valueStyle={{ color: data.scores.adjusted > 0 ? '#cf1322' : '#3f8600' }}
+            title={isCoachAligned ? '排序评分' : '调整后评分'}
+            value={formatScore(scores.adjusted)}
+            valueStyle={scoreStyle(scores.adjusted)}
           />
         </Col>
       </Row>
+      {isCoachAligned && !hasCoachScore && (
+        <Alert
+          style={{ marginTop: 16 }}
+          type="warning"
+          showIcon
+          message="当前没有智能选股策略评分"
+          description={`该股未进入当前候选池，因此策略总分、排序评分显示为未评分。行情技术参考分：${formatScore(legacyScores.technical)}，资金参考分：${formatScore(legacyScores.money_flow)}，旧综合参考：${formatScore(legacyScores.total)}；这些参考分不参与最终动作。`}
+        />
+      )}
 
       <Divider />
 
@@ -147,39 +188,39 @@ const AIDecisionPanel = ({ data }) => {
         <h4><TrophyOutlined /> 仓位建议</h4>
         <Row gutter={16} style={{ marginTop: 12 }}>
           <Col span={12}>
-            <Card size="small" variant="borderless" style={{ background: 'var(--bg-elevated)' }}>
+            <Card size="small" variant="borderless" style={{ background: 'var(--bg-inset)', border: '1px solid var(--border-secondary)' }}>
               <div style={{ marginBottom: 8 }}>
-                <span style={{ color: '#666' }}>建议操作:</span>
+                <span style={{ color: 'var(--text-secondary)' }}>建议操作:</span>
                 <Tag color={decisionColor} style={{ marginLeft: 8 }}>
-                  {data.position_advice.action}
+                  {positionAdvice.action}
                 </Tag>
               </div>
               <div style={{ marginBottom: 8 }}>
-                <span style={{ color: '#666' }}>建议仓位:</span>
+                <span style={{ color: 'var(--text-secondary)' }}>建议仓位:</span>
                 <span style={{ marginLeft: 8, fontWeight: 500 }}>
-                  {data.position_advice.position_size}
+                  {positionAdvice.position_size}
                 </span>
               </div>
               <div>
-                <span style={{ color: '#666' }}>建仓价格:</span>
-                <span style={{ marginLeft: 8, fontWeight: 500, color: '#1890ff' }}>
-                  {data.position_advice.entry_price.toFixed(2)}元
+                <span style={{ color: 'var(--text-secondary)' }}>建仓价格:</span>
+                <span style={{ marginLeft: 8, fontWeight: 500, color: 'var(--info-color)' }}>
+                  {formatPrice(positionAdvice.entry_price)}
                 </span>
               </div>
             </Card>
           </Col>
           <Col span={12}>
-            <Card size="small" variant="borderless" style={{ background: 'var(--bg-elevated)' }}>
+            <Card size="small" variant="borderless" style={{ background: 'var(--bg-inset)', border: '1px solid var(--border-secondary)' }}>
               <div style={{ marginBottom: 8 }}>
-                <span style={{ color: '#666' }}>目标止盈:</span>
-                <span style={{ marginLeft: 8, fontWeight: 500, color: '#cf1322' }}>
-                  {data.position_advice.stop_profit.toFixed(2)}元
+                <span style={{ color: 'var(--text-secondary)' }}>目标止盈:</span>
+                <span style={{ marginLeft: 8, fontWeight: 500, color: 'var(--bull-color)' }}>
+                  {formatPrice(positionAdvice.stop_profit)}
                 </span>
               </div>
               <div>
-                <span style={{ color: '#666' }}>设置止损:</span>
-                <span style={{ marginLeft: 8, fontWeight: 500, color: '#3f8600' }}>
-                  {data.position_advice.stop_loss.toFixed(2)}元
+                <span style={{ color: 'var(--text-secondary)' }}>设置止损:</span>
+                <span style={{ marginLeft: 8, fontWeight: 500, color: 'var(--bear-color)' }}>
+                  {formatPrice(positionAdvice.stop_loss)}
                 </span>
               </div>
             </Card>
@@ -206,7 +247,7 @@ const AIDecisionPanel = ({ data }) => {
       {/* 预期收益 */}
       <div>
         <h4><TrophyOutlined /> 预期收益</h4>
-        <Card size="small" variant="borderless" style={{ background: '#e6f7ff', marginTop: 12 }}>
+        <Card size="small" variant="borderless" style={{ background: 'var(--bg-inset)', border: '1px solid var(--border-secondary)', marginTop: 12 }}>
           <Row gutter={16}>
             <Col span={8}>
               <Statistic
@@ -219,18 +260,18 @@ const AIDecisionPanel = ({ data }) => {
               <Statistic
                 title="预期收益率"
                 value={data.expected_return.expected_return}
-                valueStyle={{ fontSize: 14, color: '#cf1322' }}
+                valueStyle={{ fontSize: 14, color: 'var(--bull-color)' }}
               />
             </Col>
             <Col span={8}>
               <Statistic
                 title="实现概率"
                 value={data.expected_return.probability}
-                valueStyle={{ fontSize: 14, color: '#1890ff' }}
+                valueStyle={{ fontSize: 14, color: 'var(--info-color)' }}
               />
             </Col>
           </Row>
-          <div style={{ marginTop: 12, color: '#666', fontSize: 13 }}>
+          <div style={{ marginTop: 12, color: 'var(--text-secondary)', fontSize: 13 }}>
             {data.expected_return.description}
           </div>
         </Card>
@@ -263,7 +304,7 @@ const AIDecisionPanel = ({ data }) => {
 
       {/* 关键要点 */}
       <div>
-        <h4>📌 关键要点</h4>
+        <h4>关键要点</h4>
         <div style={{ marginTop: 12 }}>
           {data.key_points.map((point, index) => (
             <Tag key={index} style={{ marginBottom: 8, fontSize: 13 }}>
@@ -274,7 +315,7 @@ const AIDecisionPanel = ({ data }) => {
       </div>
 
       {/* 生成时间 */}
-      <div style={{ marginTop: 16, textAlign: 'right', color: '#999', fontSize: 12 }}>
+      <div style={{ marginTop: 16, textAlign: 'right', color: 'var(--text-muted)', fontSize: 12 }}>
         生成时间: {data.generated_at}
       </div>
     </Card>

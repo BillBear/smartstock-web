@@ -113,6 +113,270 @@ class AIDecisionEngine:
             raise Exception(f"AI决策生成失败: {str(e)}")
 
     @staticmethod
+    def make_coach_aligned_decision(
+        symbol: str,
+        name: str,
+        price: float,
+        coach_context: Dict[str, Any],
+        technical_signals: Dict[str, Any],
+        money_flow_data: Dict[str, Any],
+        user_profile: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Build the stock-detail AI panel from Smart Screen strategy context.
+
+        The final action must come from CoachService so stock detail pages do not
+        produce a second, lower-threshold buy/sell decision.
+        """
+        legacy = AIDecisionEngine.make_decision(
+            symbol=symbol,
+            name=name,
+            price=price,
+            technical_signals=technical_signals,
+            money_flow_data=money_flow_data,
+            user_profile=user_profile,
+        )
+        context = coach_context or {}
+        available = bool(context.get("available"))
+        breakdown = context.get("score_breakdown") or {}
+
+        if available:
+            action = str(context.get("action") or "watch")
+            decision = AIDecisionEngine._coach_action_label(action)
+            total_score = AIDecisionEngine._safe_float(breakdown.get("total"), 0.0)
+            ranking_score = AIDecisionEngine._safe_float(
+                context.get("ranking_score"),
+                AIDecisionEngine._safe_float(breakdown.get("ranking_score"), total_score),
+            )
+            technical_score = AIDecisionEngine._first_score(
+                breakdown,
+                ("technical", "trend", "momentum"),
+                total_score,
+            )
+            money_score = AIDecisionEngine._safe_float(breakdown.get("money_flow"), 0.0)
+            position_pct = AIDecisionEngine._safe_float(context.get("position_pct"), 0.0)
+            take_profit = AIDecisionEngine._safe_float(context.get("take_profit"), price)
+            stop_loss = AIDecisionEngine._safe_float(context.get("stop_loss"), price)
+            risk_factors = AIDecisionEngine._coach_risk_factors(context)
+            expected_return_pct = context.get("expected_return_pct")
+            up_prob = context.get("up_prob")
+            horizon_days = context.get("horizon_days")
+            action_plan = AIDecisionEngine._coach_action_plan(context, decision, price)
+        else:
+            reason = str(context.get("reason") or "该股不在当前智能选股输出池中，未生成交易计划。")
+            decision = "未入选候选池"
+            total_score = None
+            ranking_score = None
+            technical_score = None
+            money_score = None
+            position_pct = 0.0
+            take_profit = None
+            stop_loss = None
+            risk_factors = [reason, "个股页不再使用旧AI低阈值直接给出买入建议。"]
+            expected_return_pct = None
+            up_prob = None
+            horizon_days = None
+            action_plan = [
+                reason,
+                "请以智能选股候选池、观察池或模拟验证结果作为交易计划来源。",
+            ]
+
+        confidence = AIDecisionEngine._coach_confidence(context, ranking_score)
+        entry_range = context.get("entry_range") or []
+        entry_price = price if available else None
+        if available and isinstance(entry_range, list) and entry_range:
+            entry_price = AIDecisionEngine._safe_float(entry_range[0], price)
+
+        return {
+            "symbol": symbol,
+            "name": name,
+            "price": price,
+            "decision": decision,
+            "decision_source": "coach_service",
+            "confidence": confidence,
+            "scores": {
+                "technical": AIDecisionEngine._optional_round(technical_score),
+                "money_flow": AIDecisionEngine._optional_round(money_score),
+                "total": AIDecisionEngine._optional_round(total_score),
+                "adjusted": AIDecisionEngine._optional_round(ranking_score),
+            },
+            "legacy_scores": legacy.get("scores") or {},
+            "position_advice": {
+                "action": decision,
+                "position_size": f"{position_pct:.1f}%" if position_pct > 0 else "0%",
+                "entry_price": AIDecisionEngine._optional_round(entry_price),
+                "stop_profit": AIDecisionEngine._optional_round(take_profit),
+                "stop_loss": AIDecisionEngine._optional_round(stop_loss),
+            },
+            "action_plan": action_plan,
+            "risk_assessment": {
+                "level": AIDecisionEngine._coach_risk_level(context, available),
+                "factors": risk_factors,
+            },
+            "expected_return": AIDecisionEngine._coach_expected_return(
+                horizon_days=horizon_days,
+                expected_return_pct=expected_return_pct,
+                up_prob=up_prob,
+                available=available,
+            ),
+            "key_points": AIDecisionEngine._coach_key_points(context, decision),
+            "coach_context": AIDecisionEngine._compact_coach_context(context),
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            if value is None:
+                return default
+            result = float(value)
+            if not np.isfinite(result):
+                return default
+            return result
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _optional_round(value: Any, digits: int = 2) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            result = float(value)
+            if not np.isfinite(result):
+                return None
+            return round(result, digits)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _first_score(values: Dict[str, Any], keys: tuple, default: float = 0.0) -> float:
+        for key in keys:
+            if key in values:
+                return AIDecisionEngine._safe_float(values.get(key), default)
+        return default
+
+    @staticmethod
+    def _coach_action_label(action: str) -> str:
+        mapping = {
+            "buy": "买入",
+            "paper_validate": "模拟验证",
+            "watch": "观察",
+            "added_watchlist": "观察",
+            "ignored": "暂不关注",
+            "closed": "持仓管理",
+        }
+        return mapping.get(action, "观察")
+
+    @staticmethod
+    def _coach_confidence(context: Dict[str, Any], ranking_score: float) -> str:
+        raw = str(context.get("confidence_level") or "").upper()
+        if raw in {"A", "S"}:
+            return "高"
+        if raw == "B":
+            return "中等"
+        if raw in {"C", "D"}:
+            return "低"
+        if ranking_score is None:
+            return "低"
+        return AIDecisionEngine._calculate_confidence(ranking_score)
+
+    @staticmethod
+    def _coach_risk_level(context: Dict[str, Any], available: bool) -> str:
+        if not available:
+            return "高"
+        action = str(context.get("action") or "")
+        dd_prob = AIDecisionEngine._safe_float(context.get("dd_prob"), 0.0)
+        if action == "buy" and dd_prob <= 0.25:
+            return "低"
+        if dd_prob >= 0.4:
+            return "偏高"
+        return "中等"
+
+    @staticmethod
+    def _coach_risk_factors(context: Dict[str, Any]) -> List[str]:
+        factors: List[str] = []
+        for key in ("exclusion_reason",):
+            value = context.get(key)
+            if value:
+                factors.append(str(value))
+        for item in (context.get("risks") or []) + (context.get("reasons") or []):
+            if item and str(item) not in factors:
+                factors.append(str(item))
+        if not factors:
+            factors.append("风险提示来自智能选股策略上下文。")
+        return factors[:6]
+
+    @staticmethod
+    def _coach_action_plan(context: Dict[str, Any], decision: str, price: float) -> List[str]:
+        action = str(context.get("action") or "watch")
+        trade_date = context.get("trade_date") or "当前"
+        plan: List[str] = [f"使用智能选股 {trade_date} 候选池动作：{decision}。"]
+        if action == "buy":
+            plan.append("按智能选股交易计划执行，需同时遵守止盈、止损和仓位限制。")
+        elif action == "paper_validate":
+            plan.append("仅允许记录模拟验证仓位，用于复盘和策略反馈，不作为实盘买入信号。")
+        else:
+            plan.append("未进入严格买入或模拟验证名单，建议加入观察并等待下一次候选池确认。")
+        entry_range = context.get("entry_range") or []
+        if isinstance(entry_range, list) and len(entry_range) >= 2:
+            low = AIDecisionEngine._safe_float(entry_range[0], price)
+            high = AIDecisionEngine._safe_float(entry_range[1], price)
+            plan.append(f"候选池参考入场区间：{low:.2f}-{high:.2f}。")
+        return plan
+
+    @staticmethod
+    def _coach_expected_return(
+        horizon_days: Any,
+        expected_return_pct: Any,
+        up_prob: Any,
+        available: bool,
+    ) -> Dict[str, Any]:
+        if not available:
+            return {
+                "period": "不适用",
+                "expected_return": "不适用",
+                "probability": "不适用",
+                "description": "未进入当前智能选股候选池，不生成收益预测。",
+            }
+        horizon = int(AIDecisionEngine._safe_float(horizon_days, 0))
+        expected = AIDecisionEngine._safe_float(expected_return_pct, 0.0)
+        probability = AIDecisionEngine._safe_float(up_prob, 0.0)
+        if 0 <= probability <= 1:
+            probability *= 100
+        period = f"{horizon}个交易日" if horizon > 0 else "策略持有期"
+        return {
+            "period": period,
+            "expected_return": f"{expected:.1f}%",
+            "probability": f"{probability:.0f}%",
+            "description": "收益与概率来自智能选股候选池快照，用于复盘参考。",
+        }
+
+    @staticmethod
+    def _coach_key_points(context: Dict[str, Any], decision: str) -> List[str]:
+        points = [f"🎯 智能选股动作：{decision}"]
+        if context.get("rank_no"):
+            points.append(f"📌 候选池排名：{context.get('rank_no')}")
+        if context.get("source"):
+            points.append(f"🔗 评分来源：{context.get('source')}")
+        if not context.get("available"):
+            points.append("⚠️ 未进入当前智能选股输出池")
+        return points
+
+    @staticmethod
+    def _compact_coach_context(context: Dict[str, Any]) -> Dict[str, Any]:
+        keys = (
+            "available",
+            "source",
+            "trade_date",
+            "pick_id",
+            "rank_no",
+            "action",
+            "paper_validation",
+            "reason",
+            "exclusion_reason",
+        )
+        return {key: context.get(key) for key in keys if key in context}
+
+    @staticmethod
     def _calculate_money_flow_score(money_flow: Dict[str, Any]) -> float:
         """计算资金流向评分"""
         score = 0

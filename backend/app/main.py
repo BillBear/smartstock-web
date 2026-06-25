@@ -623,10 +623,27 @@ async def analyze_full(request: FullAnalysisRequest):
             target_return=request.target_return
         )
 
-        decision = AIDecisionEngine.make_decision(
+        try:
+            coach_context = await run_in_threadpool(
+                coach_service.get_symbol_strategy_context,
+                symbol,
+                "default",
+                request.risk_level,
+            )
+        except Exception as context_error:
+            logger.warning(f"智能选股上下文不可用，AI决策不生成买入建议: {symbol}, {context_error}")
+            coach_context = {
+                "symbol": symbol,
+                "available": False,
+                "source": "coach_context_error",
+                "reason": "智能选股策略上下文暂不可用，未生成交易计划。",
+            }
+
+        decision = AIDecisionEngine.make_coach_aligned_decision(
             symbol=symbol,
             name=realtime.get("name", resolved.get("name", symbol)),
             price=price,
+            coach_context=coach_context,
             technical_signals=signal_analysis,
             money_flow_data=money_flow_raw,
             user_profile={
@@ -870,10 +887,27 @@ async def get_ai_decision(request: AIDecisionRequest):
             "holding_period": request.holding_period
         }
 
-        decision = AIDecisionEngine.make_decision(
+        try:
+            coach_context = await run_in_threadpool(
+                coach_service.get_symbol_strategy_context,
+                symbol,
+                "default",
+                request.risk_level,
+            )
+        except Exception as context_error:
+            logger.warning(f"智能选股上下文不可用，AI决策不生成买入建议: {symbol}, {context_error}")
+            coach_context = {
+                "symbol": symbol,
+                "available": False,
+                "source": "coach_context_error",
+                "reason": "智能选股策略上下文暂不可用，未生成交易计划。",
+            }
+
+        decision = AIDecisionEngine.make_coach_aligned_decision(
             symbol=symbol,
             name=realtime.get("name", resolved.get("name", symbol)),
             price=price,
+            coach_context=coach_context,
             technical_signals=technical_signals,
             money_flow_data=money_flow,
             user_profile=user_profile

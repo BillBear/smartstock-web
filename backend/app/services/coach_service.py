@@ -2523,6 +2523,46 @@ class CoachService:
         if len(code) != 6 or not code.isdigit():
             return {"symbol": code, "available": False, "reason": "invalid_symbol"}
 
+        def _context_from_pick(item: Dict[str, Any], source: str, trade_date: Optional[str] = None) -> Dict[str, Any]:
+            return {
+                "symbol": code,
+                "available": True,
+                "source": source,
+                "trade_date": trade_date,
+                "pick_id": item.get("pick_id"),
+                "name": item.get("name"),
+                "rank_no": item.get("rank_no"),
+                "action": item.get("action"),
+                "paper_validation": item.get("paper_validation"),
+                "up_prob": item.get("up_prob"),
+                "dd_prob": item.get("dd_prob"),
+                "expected_return_pct": item.get("expected_return_pct"),
+                "expected_edge_pct": item.get("expected_edge_pct"),
+                "profit_factor_proxy": item.get("profit_factor_proxy"),
+                "confidence_level": item.get("confidence_level"),
+                "ranking_score": item.get("ranking_score"),
+                "leader_score": item.get("leader_score"),
+                "exclusion_reason": item.get("exclusion_reason"),
+                "entry_range": item.get("entry_range"),
+                "take_profit": item.get("take_profit"),
+                "stop_loss": item.get("stop_loss"),
+                "position_pct": item.get("position_pct"),
+                "horizon_days": item.get("horizon_days"),
+                "invalid_conditions": item.get("invalid_conditions") or [],
+                "teaching_points": item.get("teaching_points") or [],
+                "score_breakdown": item.get("score_breakdown") or {},
+                "reasons": item.get("reasons") or [],
+                "risks": item.get("risks") or [],
+                "strategy_code": (item.get("evidence_summary") or {}).get("strategy_code"),
+                "evidence_summary": item.get("evidence_summary") or {},
+                "decision": item.get("decision"),
+                "probability_model": item.get("probability_model"),
+                "market_metrics": item.get("market_metrics") or {},
+                "model_probability": item.get("model_probability"),
+                "factor_contributions": item.get("factor_contributions") or [],
+                "model_version_id": item.get("model_version_id"),
+            }
+
         action_ref = None
         try:
             for action in self.store.list_pick_actions(user_id=user_id, limit=500):
@@ -2534,56 +2574,22 @@ class CoachService:
             action_ref = None
 
         if action_ref and action_ref.get("pick_id"):
+            snapshot_row = self.store.get_pick_snapshot(action_ref.get("pick_id"), user_id=user_id)
+            snapshot = (snapshot_row or {}).get("snapshot") or {}
+            if snapshot.get("symbol") == code and snapshot.get("score_breakdown"):
+                return _context_from_pick(
+                    snapshot,
+                    source="latest_user_action_snapshot",
+                    trade_date=(snapshot_row or {}).get("trade_date"),
+                )
             detail = self.get_pick_detail(action_ref.get("pick_id"), user_id=user_id, risk_level=risk_level)
             if detail and detail.get("symbol") == code and detail.get("score_breakdown"):
-                return {
-                    "symbol": code,
-                    "available": True,
-                    "source": "latest_user_action",
-                    "pick_id": detail.get("pick_id"),
-                    "name": detail.get("name"),
-                    "action": detail.get("action"),
-                    "up_prob": detail.get("up_prob"),
-                    "dd_prob": detail.get("dd_prob"),
-                    "expected_return_pct": detail.get("expected_return_pct"),
-                    "score_breakdown": detail.get("score_breakdown") or {},
-                    "reasons": detail.get("reasons") or [],
-                    "risks": detail.get("risks") or [],
-                    "strategy_code": (detail.get("evidence_summary") or {}).get("strategy_code"),
-                    "evidence_summary": detail.get("evidence_summary") or {},
-                    "decision": detail.get("decision"),
-                    "probability_model": detail.get("probability_model"),
-                    "market_metrics": detail.get("market_metrics") or {},
-                    "model_probability": detail.get("model_probability"),
-                    "factor_contributions": detail.get("factor_contributions") or [],
-                    "model_version_id": detail.get("model_version_id"),
-                }
+                return _context_from_pick(detail, source="latest_user_action")
 
-        data = self.get_today_picks(max_count=40, user_id=user_id, risk_level=risk_level)
+        data = self.get_cached_today_picks(max_count=60, user_id=user_id) or {}
         for item in data.get("picks", []):
             if item.get("symbol") == code:
-                return {
-                    "symbol": code,
-                    "available": True,
-                    "source": "today_smart_screen",
-                    "pick_id": item.get("pick_id"),
-                    "name": item.get("name"),
-                    "action": item.get("action"),
-                    "up_prob": item.get("up_prob"),
-                    "dd_prob": item.get("dd_prob"),
-                    "expected_return_pct": item.get("expected_return_pct"),
-                    "score_breakdown": item.get("score_breakdown") or {},
-                    "reasons": item.get("reasons") or [],
-                    "risks": item.get("risks") or [],
-                    "strategy_code": (item.get("evidence_summary") or {}).get("strategy_code"),
-                    "evidence_summary": item.get("evidence_summary") or {},
-                    "decision": item.get("decision"),
-                    "probability_model": item.get("probability_model"),
-                    "market_metrics": item.get("market_metrics") or {},
-                    "model_probability": item.get("model_probability"),
-                    "factor_contributions": item.get("factor_contributions") or [],
-                    "model_version_id": item.get("model_version_id"),
-                }
+                return _context_from_pick(item, source="today_smart_screen")
 
         return {
             "symbol": code,
