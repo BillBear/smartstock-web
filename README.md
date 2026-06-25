@@ -133,6 +133,11 @@ curl http://localhost:8000/health
 
 ## API 概览
 
+基础：
+
+- `GET /`
+- `GET /health`
+
 股票与分析：
 
 - `GET /api/stock/realtime?symbol=000001`
@@ -143,26 +148,49 @@ curl http://localhost:8000/health
 - `POST /api/analysis/signal`
 - `POST /api/advice`
 - `POST /api/money-flow`
+- `GET /api/money-flow/coverage`
 - `POST /api/ai-decision`
 
-投资教练：
+智能选股与投资教练：
 
 - `GET /api/coach/market-state/today`
 - `GET /api/coach/news/events`
 - `GET /api/coach/news/symbol/{symbol}`
 - `GET /api/coach/symbol-strategy/{symbol}`
+- `GET /api/coach/smart-screen/summary`
+- `GET /api/coach/themes/today`
+- `GET /api/coach/themes/{theme_id}/stocks`
+- `POST /api/coach/picks/refresh`
+- `GET /api/coach/picks/refresh-state`
 - `GET /api/coach/picks/today`
+- `GET /api/coach/picks/history`
+- `GET /api/coach/picks/batch-review`
 - `GET /api/coach/picks/{pick_id}`
+- `GET /api/coach/picks/{pick_id}/explain`
+- `POST /api/coach/picks/{pick_id}/actions`
 - `GET /api/coach/watchlist`
 - `GET /api/coach/paper-portfolio`
 - `GET /api/coach/paper-trades`
 - `GET /api/coach/paper-review`
-- `POST /api/coach/picks/{pick_id}/actions`
+- `GET /api/coach/paper/performance`
+- `GET /api/coach/paper/attribution`
+- `POST /api/coach/risk-profile`
+- `GET /api/coach/strategy-config/options`
+- `POST /api/coach/strategy-config/apply`
+
+监控、模型与回测：
+
+- `GET /api/coach/monitor/overview`
+- `GET /api/coach/monitor/positions`
+- `GET /api/coach/monitor/feedback/latest`
+- `POST /api/coach/monitor/run-daily-review`
 - `GET /api/coach/strategy/{strategy_code}/evidence`
-- `POST /api/coach/backtest/run`
-- `GET /api/coach/backtest/{run_id}`
 - `POST /api/coach/models/train`
 - `GET /api/coach/models/latest`
+- `GET /api/coach/models/{model_id}/metrics`
+- `POST /api/coach/backtest/run`
+- `GET /api/coach/backtest/{run_id}`
+- `GET /api/coach/lessons/weekly/latest`
 
 ## 项目结构
 
