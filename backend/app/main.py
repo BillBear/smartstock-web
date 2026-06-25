@@ -38,7 +38,6 @@ from app.evaluation.ranking_report import build_ranking_report
 from app.services.stock_service import StockDataService
 from app.services.technical_analyzer import TechnicalAnalyzer
 from app.services.advice_service import AdviceService
-from app.services.money_flow_service import MoneyFlowService
 from app.services.ai_decision_service import AIDecisionEngine
 from app.services.mock_data import MockDataService
 from app.services.akshare_service import AKShareService
@@ -74,7 +73,6 @@ logger = logging.getLogger(__name__)
 stock_service = StockDataService()
 technical_analyzer = TechnicalAnalyzer()
 advice_service = AdviceService()
-money_flow_service = MoneyFlowService()
 ai_decision_engine = AIDecisionEngine()
 mock_service = MockDataService()
 
