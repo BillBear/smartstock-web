@@ -1041,63 +1041,37 @@ class CoachStore:
 
         with self._lock:
             with self.engine.begin() as conn:
-                pos = conn.execute(
+                conn.execute(
                     text(
                         """
-                        SELECT *
-                        FROM paper_positions
-                        WHERE user_id = :user_id AND symbol = :symbol AND status = 'open'
+                        INSERT INTO paper_positions (
+                            user_id, symbol, name, pick_id, qty, avg_price, cost_amount, status, opened_at, updated_at
+                        ) VALUES (
+                            :user_id, :symbol, :name, :pick_id, :qty, :avg_price, :cost_amount, 'open', :opened_at, :updated_at
+                        )
+                        ON CONFLICT(user_id, symbol, status) DO UPDATE SET
+                            qty = paper_positions.qty + excluded.qty,
+                            cost_amount = paper_positions.cost_amount + excluded.cost_amount,
+                            avg_price = (
+                                paper_positions.cost_amount + excluded.cost_amount
+                            ) / NULLIF(paper_positions.qty + excluded.qty, 0),
+                            name = excluded.name,
+                            pick_id = COALESCE(excluded.pick_id, paper_positions.pick_id),
+                            updated_at = excluded.updated_at
                         """
                     ),
-                    {"user_id": user_id, "symbol": symbol},
-                ).first()
-
-                if pos:
-                    p = pos._mapping
-                    old_qty = float(p["qty"])
-                    old_cost = float(p["cost_amount"])
-                    new_qty = round(old_qty + qty, 6)
-                    new_cost = round(old_cost + amount, 6)
-                    avg_price = round(new_cost / new_qty, 6) if new_qty > 0 else 0.0
-                    conn.execute(
-                        text(
-                            """
-                            UPDATE paper_positions
-                            SET qty = :qty, avg_price = :avg_price, cost_amount = :cost_amount, name = :name, updated_at = :updated_at
-                            WHERE id = :id
-                            """
-                        ),
-                        {
-                            "qty": new_qty,
-                            "avg_price": avg_price,
-                            "cost_amount": new_cost,
-                            "name": name,
-                            "updated_at": created_at,
-                            "id": p["id"],
-                        },
-                    )
-                else:
-                    conn.execute(
-                        text(
-                            """
-                            INSERT INTO paper_positions (
-                                user_id, symbol, name, qty, avg_price, cost_amount, status, opened_at, updated_at
-                            ) VALUES (
-                                :user_id, :symbol, :name, :qty, :avg_price, :cost_amount, 'open', :opened_at, :updated_at
-                            )
-                            """
-                        ),
-                        {
-                            "user_id": user_id,
-                            "symbol": symbol,
-                            "name": name,
-                            "qty": qty,
-                            "avg_price": price,
-                            "cost_amount": amount,
-                            "opened_at": created_at,
-                            "updated_at": created_at,
-                        },
-                    )
+                    {
+                        "user_id": user_id,
+                        "symbol": symbol,
+                        "name": name,
+                        "pick_id": pick_id,
+                        "qty": qty,
+                        "avg_price": price,
+                        "cost_amount": amount,
+                        "opened_at": created_at,
+                        "updated_at": created_at,
+                    },
+                )
 
                 conn.execute(
                     text(
