@@ -21,6 +21,7 @@ import pandas as pd
 from app.services.backtest_engine import BacktestEngine
 from app.services.coach_store import CoachStore
 from app.services.market_leader_scorer import MarketLeaderScorer
+from app.services.money_flow_policy import MoneyFlowPolicy
 from app.services.risk_gate_service import RiskGateService
 from app.services.technical_analyzer import TechnicalAnalyzer
 
@@ -2076,8 +2077,7 @@ class CoachService:
         news_factor = feature_payload.get("news_factor") or {}
         turnover_rate = self._safe_float(feature_payload.get("turnover_rate"), 0.0)
 
-        flow_multiplier = 8 if money_flow_quality == "real" else (3 if money_flow_quality == "proxy" else 0)
-        flow_score = self._clamp(50 + main_net_inflow_yi * flow_multiplier, 0, 100)
+        flow_score = MoneyFlowPolicy.score_from_inflow_yi(main_net_inflow_yi, money_flow_quality)
         if turnover_rate <= 2:
             turnover_score = 45 + turnover_rate * 6
         elif turnover_rate <= 8:
@@ -2640,6 +2640,7 @@ class CoachService:
         metrics = pick.get("market_metrics") or {}
         turnover = self._safe_float(metrics.get("turnover_rate"), 0)
         flow_yi = self._safe_float(metrics.get("main_net_inflow_yi"), 0)
+        flow_quality = str(pick.get("money_flow_quality") or metrics.get("money_flow_quality") or "real")
         theme_score = self._safe_float(pick.get("theme_rank_score"), 0)
         theme_component = theme_score if theme_score > 0 else 35.0
         leader_score = self._safe_float(pick.get("leader_score"), 45.0)
@@ -2653,7 +2654,7 @@ class CoachService:
                 + risk_adjusted * 0.28
                 + quality * 0.16
                 + self._clamp(turnover_stability, 0, 100) * 0.10
-                + self._clamp(flow_yi * 8 + 50, 0, 100) * 0.08
+                + MoneyFlowPolicy.score_from_inflow_yi(flow_yi, flow_quality) * 0.08
                 + total_score * 0.04
                 + theme_component * 0.08
                 + leader_score * 0.18
@@ -2922,8 +2923,7 @@ class CoachService:
 
         breakdown = pick.get("score_breakdown") or {}
         old_flow_score = self._safe_float(breakdown.get("money_flow"), 50)
-        flow_multiplier = 8 if quality == "real" else 3
-        new_flow_score = self._clamp(50 + main_net_inflow_yi * flow_multiplier, 0, 100)
+        new_flow_score = MoneyFlowPolicy.score_from_inflow_yi(main_net_inflow_yi, quality)
         breakdown["money_flow"] = round(new_flow_score, 2)
         breakdown["money_flow_repriced"] = True
         breakdown["money_flow_source"] = source
@@ -7991,7 +7991,7 @@ class CoachService:
         main_net_inflow_yi = self._clamp((vol_ratio - 1.0) * 1.8 + pct_change * 0.08, -5.0, 5.0)
         turnover_rate = self._clamp(2.0 + vol_ratio * 2.5 + abs(pct_change) * 0.35, 0.3, 25.0)
 
-        flow_score = self._clamp(50 + main_net_inflow_yi * 8, 0, 100)
+        flow_score = MoneyFlowPolicy.score_from_inflow_yi(main_net_inflow_yi, "proxy")
         if turnover_rate <= 2:
             turnover_score = 45 + turnover_rate * 6
         elif turnover_rate <= 8:

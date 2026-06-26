@@ -464,6 +464,76 @@ class CoachStoreTests(unittest.TestCase):
 
 
 class ScoringServiceTests(unittest.TestCase):
+    def test_money_flow_policy_is_shared_by_leader_and_repricing_scores(self):
+        from app.services.money_flow_policy import MoneyFlowPolicy
+
+        self.assertEqual(MoneyFlowPolicy.multiplier_for_quality("real"), 8.0)
+        self.assertEqual(MoneyFlowPolicy.multiplier_for_quality("proxy"), 3.0)
+        self.assertEqual(MoneyFlowPolicy.multiplier_for_quality("unknown"), 0.0)
+        self.assertEqual(MoneyFlowPolicy.score_from_inflow_yi(2.0, "real"), 66.0)
+        self.assertEqual(MoneyFlowPolicy.score_from_inflow_yi(2.0, "proxy"), 56.0)
+        self.assertEqual(MoneyFlowPolicy.score_from_inflow_yi(float("nan"), "real"), 50.0)
+
+        leader_result = MarketLeaderScorer.score_pick(
+            {
+                "symbol": "600001",
+                "market_metrics": {
+                    "pct_change": 2.0,
+                    "amount_yi": 10,
+                    "turnover_rate": 5,
+                    "volume_ratio": 1.2,
+                    "main_net_inflow_yi": 2.0,
+                    "money_flow_quality": "proxy",
+                },
+                "feature_snapshot": {"features": {"return_5d_pct": 3, "return_20d_pct": 5}},
+                "money_flow_quality": "proxy",
+            }
+        )
+        self.assertEqual(leader_result["leader_components"]["money_flow"], 56.0)
+
+        pick = {"score_breakdown": {"money_flow": 50, "total": 70}, "market_metrics": {}}
+        ScoringService().apply_money_flow_to_pick(
+            pick,
+            {"main_net_inflow": 200000000, "quality": "proxy", "source": "unit"},
+        )
+        self.assertEqual(pick["score_breakdown"]["money_flow"], 56.0)
+
+        ranking_pick = {
+            "up_prob": 0.5,
+            "dd_prob": 0.3,
+            "expected_edge_pct": 0.0,
+            "profit_factor_proxy": 1.0,
+            "money_flow_quality": "proxy",
+            "market_metrics": {"main_net_inflow_yi": 2.0, "money_flow_quality": "proxy"},
+            "feature_snapshot": {
+                "features": {
+                    "volume_ratio_20": 1.0,
+                    "return_5d_pct": 0.0,
+                    "return_20d_pct": 0.0,
+                    "from_20d_high_pct": 5.0,
+                    "rsi": 30.0,
+                    "intraday_range_pct": 0.0,
+                    "ma20_gap_pct": 0.0,
+                }
+            },
+            "score_breakdown": {
+                "total": 60.0,
+                "risk_adjusted": 60.0,
+                "trend": 60.0,
+                "turnover_liquidity": 50.0,
+            },
+        }
+        ScoringService().apply_ranking_scores([ranking_pick], {"state_tag": "neutral"})
+        expected_continuation = (
+            60.0 * 0.18
+            + 50.0 * 0.12
+            + 45.0 * 0.20
+            + 42.0 * 0.22
+            + MoneyFlowPolicy.score_from_inflow_yi(2.0, "proxy") * 0.18
+            + 50.0 * 0.10
+        )
+        self.assertEqual(ranking_pick["continuation_score"], round(expected_continuation, 2))
+
     def test_score_helpers_reject_nan_and_infinite_values(self):
         self.assertEqual(ScoringService._safe_float("nan", 7.0), 7.0)
         self.assertEqual(ScoringService._safe_float(float("inf"), 7.0), 7.0)

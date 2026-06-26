@@ -9,6 +9,8 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List
 
+from app.services.money_flow_policy import MoneyFlowPolicy
+
 
 class MarketLeaderScorer:
     """Score relative market leadership from quote, theme and flow evidence."""
@@ -43,7 +45,7 @@ class MarketLeaderScorer:
             100,
         )
         theme_component = theme_score if theme_score > 0 else 45.0
-        flow_component = cls._clamp(50 + flow_yi * (8.0 if flow_quality == "real" else 3.5), 0, 100)
+        flow_component = MoneyFlowPolicy.score_from_inflow_yi(flow_yi, flow_quality)
 
         leader_score = cls._clamp(
             intraday_component * 0.18

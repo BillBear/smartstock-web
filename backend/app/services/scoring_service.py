@@ -4,6 +4,8 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Iterable, List
 
+from app.services.money_flow_policy import MoneyFlowPolicy
+
 
 class ScoringService:
     """Own score calibration, ranking weights and score adjustments.
@@ -146,7 +148,7 @@ class ScoringService:
 
             volume_score = self._clamp(45 + (volume_ratio_20 - 1) * 14, 0, 100)
             theme_component = theme_score if theme_score > 0 else 42.0
-            flow_score = self._clamp(50 + flow_yi * (7.0 if money_quality == "real" else 3.0), 0, 100)
+            flow_score = MoneyFlowPolicy.score_from_inflow_yi(flow_yi, money_quality)
             start_signal_bonus = 0.0
             if 2 <= return_5d <= 15 and -4 <= return_20d <= 18:
                 start_signal_bonus += 4.0
@@ -264,9 +266,10 @@ class ScoringService:
         if risk_level == "low":
             turnover = self._safe_float(metrics.get("turnover_rate"), 0)
             flow_yi = self._safe_float(metrics.get("main_net_inflow_yi"), 0)
+            flow_quality = str(pick.get("money_flow_quality") or metrics.get("money_flow_quality") or "real")
             quality = self._safe_float(breakdown.get("quality"), 0)
             stability_bonus = self._clamp(100 - abs(turnover - 4.0) * 8, 0, 100) * 0.10
-            flow_bonus = self._clamp(flow_yi * 8 + 50, 0, 100) * 0.08
+            flow_bonus = MoneyFlowPolicy.score_from_inflow_yi(flow_yi, flow_quality) * 0.08
             return base + quality * 0.08 + stability_bonus + flow_bonus - board_penalty
 
         if risk_level == "high":
@@ -401,8 +404,7 @@ class ScoringService:
 
         breakdown = pick.get("score_breakdown") or {}
         old_flow_score = self._safe_float(breakdown.get("money_flow"), 50)
-        flow_multiplier = 8 if quality == "real" else 3
-        new_flow_score = self._clamp(50 + main_net_inflow_yi * flow_multiplier, 0, 100)
+        new_flow_score = MoneyFlowPolicy.score_from_inflow_yi(main_net_inflow_yi, quality)
         breakdown["money_flow"] = round(new_flow_score, 2)
         breakdown["money_flow_repriced"] = True
         breakdown["money_flow_source"] = source
