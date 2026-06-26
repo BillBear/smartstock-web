@@ -1,10 +1,10 @@
 """Configurable scoring helpers for smart-pick recommendations."""
 from __future__ import annotations
 
-import math
 from typing import Any, Dict, Iterable, List
 
 from app.services.money_flow_policy import MoneyFlowPolicy
+from app.services.numeric_utils import clamp, safe_float
 
 
 class ScoringService:
@@ -545,22 +545,8 @@ class ScoringService:
 
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
-        try:
-            if value is None or (isinstance(value, str) and not value.strip()):
-                return float(default)
-            result = float(value)
-            if not math.isfinite(result):
-                return float(default)
-            return result
-        except Exception:
-            return float(default)
+        return safe_float(value, default)
 
     @staticmethod
     def _clamp(value: float, low: float, high: float) -> float:
-        try:
-            result = float(value)
-        except Exception:
-            return low
-        if not math.isfinite(result):
-            return low
-        return max(low, min(high, result))
+        return clamp(value, low, high)

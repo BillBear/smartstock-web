@@ -5,8 +5,9 @@ legacy CoachService paths do not silently diverge on the same money-flow input.
 """
 from __future__ import annotations
 
-import math
 from typing import Any
+
+from app.services.numeric_utils import clamp, safe_float
 
 
 class MoneyFlowPolicy:
@@ -25,16 +26,5 @@ class MoneyFlowPolicy:
     @classmethod
     def score_from_inflow_yi(cls, inflow_yi: float, quality: Any) -> float:
         multiplier = cls.multiplier_for_quality(quality)
-        try:
-            normalized_inflow = float(inflow_yi or 0.0)
-        except Exception:
-            normalized_inflow = 0.0
-        if not math.isfinite(normalized_inflow):
-            normalized_inflow = 0.0
-        return cls._clamp(50.0 + normalized_inflow * multiplier, 0.0, 100.0)
-
-    @staticmethod
-    def _clamp(value: float, low: float, high: float) -> float:
-        if not math.isfinite(float(value)):
-            return low
-        return max(low, min(high, value))
+        normalized_inflow = safe_float(inflow_yi, 0.0)
+        return clamp(50.0 + normalized_inflow * multiplier, 0.0, 100.0)

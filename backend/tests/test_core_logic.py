@@ -535,14 +535,20 @@ class ScoringServiceTests(unittest.TestCase):
         self.assertEqual(ranking_pick["continuation_score"], round(expected_continuation, 2))
 
     def test_score_helpers_reject_nan_and_infinite_values(self):
-        self.assertEqual(ScoringService._safe_float("nan", 7.0), 7.0)
-        self.assertEqual(ScoringService._safe_float(float("inf"), 7.0), 7.0)
-        self.assertEqual(MarketLeaderScorer._safe_float(float("-inf"), 7.0), 7.0)
-        self.assertEqual(CoachService._safe_float(float("nan"), 7.0), 7.0)
+        from app.services.numeric_utils import clamp, safe_float
 
-        self.assertEqual(ScoringService._clamp(float("nan"), 0, 100), 0)
-        self.assertEqual(MarketLeaderScorer._clamp(float("inf"), 0, 100), 0)
-        self.assertEqual(CoachService._clamp(float("-inf"), 0, 100), 0)
+        self.assertEqual(safe_float("nan", 7.0), 7.0)
+        self.assertEqual(safe_float(float("inf"), 7.0), 7.0)
+        self.assertEqual(safe_float(float("-inf"), 7.0), 7.0)
+        self.assertEqual(ScoringService._safe_float("nan", 7.0), safe_float("nan", 7.0))
+        self.assertEqual(MarketLeaderScorer._safe_float(float("-inf"), 7.0), safe_float(float("-inf"), 7.0))
+        self.assertEqual(CoachService._safe_float(float("nan"), 7.0), safe_float(float("nan"), 7.0))
+
+        self.assertEqual(clamp(float("nan"), 0, 100), 0)
+        self.assertEqual(clamp(float("inf"), 0, 100), 0)
+        self.assertEqual(ScoringService._clamp(float("nan"), 0, 100), clamp(float("nan"), 0, 100))
+        self.assertEqual(MarketLeaderScorer._clamp(float("inf"), 0, 100), clamp(float("inf"), 0, 100))
+        self.assertEqual(CoachService._clamp(float("-inf"), 0, 100), clamp(float("-inf"), 0, 100))
 
     def test_forward_label_risk_adjusted_return_preserves_missing_future_window(self):
         feature_df = pd.DataFrame(
