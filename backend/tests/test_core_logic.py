@@ -167,12 +167,19 @@ class AIDecisionEngineTests(unittest.TestCase):
 
 class CoachServiceObservabilityTests(unittest.TestCase):
     def test_coach_numeric_helpers_reject_nan_and_infinite_values(self):
-        self.assertEqual(CoachService._safe_float(float("nan"), 7.0), 7.0)
-        self.assertEqual(CoachService._safe_float(float("inf"), 7.0), 7.0)
-        self.assertEqual(CoachService._safe_float(float("-inf"), 7.0), 7.0)
-        self.assertEqual(CoachService._clamp(float("nan"), 0, 100), 0)
-        self.assertEqual(CoachService._clamp(float("inf"), 0, 100), 0)
-        self.assertEqual(CoachService._clamp(float("-inf"), 0, 100), 0)
+        from app.services.numeric_utils import clamp, safe_float
+
+        self.assertEqual(safe_float(float("nan"), 7.0), 7.0)
+        self.assertEqual(safe_float(float("inf"), 7.0), 7.0)
+        self.assertEqual(safe_float(float("-inf"), 7.0), 7.0)
+        self.assertEqual(CoachService._safe_float(float("nan"), 7.0), safe_float(float("nan"), 7.0))
+        self.assertEqual(CoachService._safe_float(float("inf"), 7.0), safe_float(float("inf"), 7.0))
+        self.assertEqual(CoachService._safe_float(float("-inf"), 7.0), safe_float(float("-inf"), 7.0))
+        self.assertEqual(clamp(float("nan"), 0, 100), 0)
+        self.assertEqual(clamp(float("inf"), 0, 100), 0)
+        self.assertEqual(CoachService._clamp(float("nan"), 0, 100), clamp(float("nan"), 0, 100))
+        self.assertEqual(CoachService._clamp(float("inf"), 0, 100), clamp(float("inf"), 0, 100))
+        self.assertEqual(CoachService._clamp(float("-inf"), 0, 100), clamp(float("-inf"), 0, 100))
 
     def test_market_news_exception_is_logged_and_marked_unavailable(self):
         class DataSourceStub:

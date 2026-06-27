@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import math
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timedelta
@@ -17,6 +16,7 @@ from threading import RLock
 import pandas as pd
 
 from app.services.coach_store import CoachStore
+from app.services.numeric_utils import clamp, safe_float
 from app.services.technical_analyzer import TechnicalAnalyzer
 
 
@@ -244,13 +244,7 @@ class CoachService:
 
     @staticmethod
     def _clamp(value: float, low: float, high: float) -> float:
-        try:
-            result = float(value)
-        except Exception:
-            return low
-        if not math.isfinite(result):
-            return low
-        return max(low, min(high, result))
+        return clamp(value, low, high)
 
     @staticmethod
     def _extract_symbol_from_pick_id(pick_id: str) -> str:
@@ -3277,13 +3271,7 @@ class CoachService:
 
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
-        try:
-            result = float(value)
-            if not math.isfinite(result):
-                return float(default)
-            return result
-        except Exception:
-            return float(default)
+        return safe_float(value, default)
 
     def _build_trade_diagnostics(self, trades: List[Dict[str, Any]]) -> Dict[str, Any]:
         normalized = []
