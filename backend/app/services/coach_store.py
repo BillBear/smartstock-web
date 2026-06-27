@@ -1045,9 +1045,9 @@ class CoachStore:
                     text(
                         """
                         INSERT INTO paper_positions (
-                            user_id, symbol, name, pick_id, qty, avg_price, cost_amount, status, opened_at, updated_at
+                            user_id, symbol, name, qty, avg_price, cost_amount, status, opened_at, updated_at
                         ) VALUES (
-                            :user_id, :symbol, :name, :pick_id, :qty, :avg_price, :cost_amount, 'open', :opened_at, :updated_at
+                            :user_id, :symbol, :name, :qty, :avg_price, :cost_amount, 'open', :opened_at, :updated_at
                         )
                         ON CONFLICT(user_id, symbol, status) DO UPDATE SET
                             qty = paper_positions.qty + excluded.qty,
@@ -1056,7 +1056,6 @@ class CoachStore:
                                 paper_positions.cost_amount + excluded.cost_amount
                             ) / NULLIF(paper_positions.qty + excluded.qty, 0),
                             name = excluded.name,
-                            pick_id = COALESCE(excluded.pick_id, paper_positions.pick_id),
                             updated_at = excluded.updated_at
                         """
                     ),
@@ -1064,7 +1063,6 @@ class CoachStore:
                         "user_id": user_id,
                         "symbol": symbol,
                         "name": name,
-                        "pick_id": pick_id,
                         "qty": qty,
                         "avg_price": price,
                         "cost_amount": amount,
