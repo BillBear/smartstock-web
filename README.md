@@ -148,7 +148,6 @@ curl http://localhost:8000/health
 - `POST /api/analysis/signal`
 - `POST /api/advice`
 - `POST /api/money-flow`
-- `GET /api/money-flow/coverage`
 - `POST /api/ai-decision`
 
 智能选股与投资教练：
@@ -158,13 +157,9 @@ curl http://localhost:8000/health
 - `GET /api/coach/news/symbol/{symbol}`
 - `GET /api/coach/symbol-strategy/{symbol}`
 - `GET /api/coach/smart-screen/summary`
-- `GET /api/coach/themes/today`
-- `GET /api/coach/themes/{theme_id}/stocks`
 - `POST /api/coach/picks/refresh`
-- `GET /api/coach/picks/refresh-state`
 - `GET /api/coach/picks/today`
 - `GET /api/coach/picks/history`
-- `GET /api/coach/picks/batch-review`
 - `GET /api/coach/picks/{pick_id}`
 - `GET /api/coach/picks/{pick_id}/explain`
 - `POST /api/coach/picks/{pick_id}/actions`
@@ -172,22 +167,18 @@ curl http://localhost:8000/health
 - `GET /api/coach/paper-portfolio`
 - `GET /api/coach/paper-trades`
 - `GET /api/coach/paper-review`
-- `GET /api/coach/paper/performance`
-- `GET /api/coach/paper/attribution`
 - `POST /api/coach/risk-profile`
 - `GET /api/coach/strategy-config/options`
 - `POST /api/coach/strategy-config/apply`
 
-监控、模型与回测：
+模型、排序评估与回测：
 
-- `GET /api/coach/monitor/overview`
-- `GET /api/coach/monitor/positions`
-- `GET /api/coach/monitor/feedback/latest`
-- `POST /api/coach/monitor/run-daily-review`
 - `GET /api/coach/strategy/{strategy_code}/evidence`
 - `POST /api/coach/models/train`
 - `GET /api/coach/models/latest`
 - `GET /api/coach/models/{model_id}/metrics`
+- `POST /api/coach/ranking-evaluation/run`
+- `GET /api/coach/ranking-evaluation/latest`
 - `POST /api/coach/backtest/run`
 - `GET /api/coach/backtest/{run_id}`
 - `GET /api/coach/lessons/weekly/latest`
