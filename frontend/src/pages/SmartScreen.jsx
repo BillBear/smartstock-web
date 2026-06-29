@@ -21,6 +21,7 @@ import { InfoCircleOutlined, ReloadOutlined, ThunderboltOutlined, TrophyOutlined
 import { coachApi } from '../services/api'
 import MarketFactorExplain from '../components/MarketFactorExplain'
 import { shouldRefreshCurrentTradingPicks } from './smartScreenData.mjs'
+import { getPickActionPresentation } from './smartScreenPresentation.mjs'
 import './SmartScreen.css'
 
 const { Option } = Select
@@ -420,22 +421,6 @@ const SmartScreen = () => {
       render: (v) => <span style={{ color: '#95de64' }}>{(Number(v || 0) * 100).toFixed(1)}%</span>,
     },
     {
-      title: '模型概率',
-      key: 'model_probability',
-      width: 150,
-      render: (_, row) => {
-        const model = row?.model_probability
-        if (!model) return <Tag color="orange">规则代理</Tag>
-        return (
-          <Tooltip title={`模型 ${row?.model_version_id || '-'}，最终分 ${Number(model.final_score || 0).toFixed(1)}`}>
-            <Tag color={model.status === 'live_ready' ? 'green' : 'cyan'}>
-              ML {(Number(model.model_up_prob || 0) * 100).toFixed(1)}%
-            </Tag>
-          </Tooltip>
-        )
-      },
-    },
-    {
       title: '预期收益',
       dataIndex: 'expected_return_pct',
       key: 'expected_return_pct',
@@ -450,8 +435,8 @@ const SmartScreen = () => {
       render: (v) => `${Number(v || 0).toFixed(1)}%`,
     },
     {
-      title: '综合分',
-      key: 'score',
+      title: '策略综合分',
+      key: 'strategy_score',
       width: 140,
       render: (_, row) => (
         <Progress
@@ -462,49 +447,49 @@ const SmartScreen = () => {
       ),
     },
     {
-      title: '资讯分',
-      key: 'news_score',
-      width: 110,
-      render: (_, row) => Number(row?.news_factor?.total_score || 50).toFixed(1),
-    },
-    {
       title: '操作',
       key: 'operation',
       width: 280,
       fixed: 'right',
-      render: (_, row) => (
-        <Space wrap>
-          <Button size="small" onClick={() => openDetail(row.pick_id)}>
-            详情
-          </Button>
-          <Button
-            size="small"
-            type="primary"
-            ghost
-            loading={actionLoading === `${row.pick_id}-added_watchlist`}
-            onClick={() => reportAction(row, 'added_watchlist')}
-          >
-            加观察
-          </Button>
-          <Button
-            size="small"
-            type="primary"
-            loading={actionLoading === `${row.pick_id}-paper_buy`}
-            disabled={!canPaperBuy || row?.decision?.mode === 'watch_only'}
-            onClick={() => reportAction(row, 'paper_buy')}
-          >
-            模拟买入
-          </Button>
-          <Button
-            size="small"
-            danger
-            loading={actionLoading === `${row.pick_id}-ignored`}
-            onClick={() => reportAction(row, 'ignored')}
-          >
-            忽略
-          </Button>
-        </Space>
-      ),
+      render: (_, row) => {
+        const actionMeta = getPickActionPresentation(row, canPaperBuy)
+        return (
+          <Space wrap>
+            <Button size="small" onClick={() => openDetail(row.pick_id)}>
+              详情
+            </Button>
+            {actionMeta.canAddWatch && (
+              <Button
+                size="small"
+                type="primary"
+                ghost
+                loading={actionLoading === `${row.pick_id}-added_watchlist`}
+                onClick={() => reportAction(row, 'added_watchlist')}
+              >
+                加观察
+              </Button>
+            )}
+            {actionMeta.canShowPaperAction && (
+              <Button
+                size="small"
+                type="primary"
+                loading={actionLoading === `${row.pick_id}-paper_buy`}
+                onClick={() => reportAction(row, 'paper_buy')}
+              >
+                {actionMeta.paperActionLabel}
+              </Button>
+            )}
+            <Button
+              size="small"
+              danger
+              loading={actionLoading === `${row.pick_id}-ignored`}
+              onClick={() => reportAction(row, 'ignored')}
+            >
+              忽略
+            </Button>
+          </Space>
+        )
+      },
     },
   ]
 
@@ -760,7 +745,7 @@ const SmartScreen = () => {
             columns={columns}
             dataSource={pickList}
             rowKey="pick_id"
-            scroll={{ x: 1850, y: 480 }}
+            scroll={{ x: 1500, y: 480 }}
             pagination={{ pageSize: 10, showSizeChanger: false }}
           />
         )}
