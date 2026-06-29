@@ -34,7 +34,7 @@ const ACTION_LABEL = {
 
 const USER_ACTION_LABEL = {
   added_watchlist: { text: '已加观察', color: 'blue' },
-  paper_buy: { text: '已模拟买入', color: 'red' },
+  paper_buy: { text: '已模拟验证', color: 'red' },
   ignored: { text: '已忽略', color: 'default' },
   closed: { text: '已关闭', color: 'green' },
 }
@@ -306,7 +306,7 @@ const SmartScreen = () => {
 
   const reportAction = async (pick, actionType) => {
     if (actionType === 'paper_buy' && !canPaperBuy) {
-      message.warning('非交易日不生成交易计划，不能模拟买入')
+      message.warning('非交易日不生成交易计划，不能模拟验证')
       return
     }
     const currentAction = pick?.user_action?.action_type
@@ -567,6 +567,7 @@ const SmartScreen = () => {
         <Row gutter={[16, 16]} className="core-plan-row">
           {corePicks.map((pick) => {
             const meta = DECISION_META[pick?.decision?.grade] || DECISION_META.C
+            const actionMeta = getPickActionPresentation(pick, canPaperBuy)
             return (
               <Col xs={24} lg={8} key={pick.pick_id}>
                 <Card className="core-pick-card" variant="borderless">
@@ -587,26 +588,27 @@ const SmartScreen = () => {
                   <p>{pick?.decision?.summary}</p>
                   <Space wrap>
                     <Button size="small" onClick={() => openDetail(pick.pick_id)}>查看计划</Button>
-                    <Button
-                      size="small"
-                      type="primary"
-                      ghost
-                      loading={actionLoading === `${pick.pick_id}-added_watchlist`}
-                      onClick={() => reportAction(pick, 'added_watchlist')}
-                    >
-                      加入观察
-                    </Button>
-                    <Tooltip title={!canPaperBuy ? '非交易日不生成交易计划，不能模拟买入' : ''}>
+                    {actionMeta.canAddWatch && (
                       <Button
                         size="small"
                         type="primary"
-                        disabled={!canPaperBuy || pick?.decision?.mode === 'watch_only'}
+                        ghost
+                        loading={actionLoading === `${pick.pick_id}-added_watchlist`}
+                        onClick={() => reportAction(pick, 'added_watchlist')}
+                      >
+                        加入观察
+                      </Button>
+                    )}
+                    {actionMeta.canShowPaperAction && (
+                      <Button
+                        size="small"
+                        type="primary"
                         loading={actionLoading === `${pick.pick_id}-paper_buy`}
                         onClick={() => reportAction(pick, 'paper_buy')}
                       >
-                        模拟买入
+                        {actionMeta.paperActionLabel}
                       </Button>
-                    </Tooltip>
+                    )}
                   </Space>
                 </Card>
               </Col>

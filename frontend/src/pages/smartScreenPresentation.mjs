@@ -20,7 +20,7 @@ export function getPickActionPresentation(pick, canPaperBuy) {
 
   let paperDisabledReason = ''
   if (!canPaperBuy) {
-    paperDisabledReason = '非交易日不生成交易计划，不能模拟买入'
+    paperDisabledReason = '非交易日不生成交易计划，不能模拟验证'
   } else if (!isTradePlanGrade) {
     paperDisabledReason = '只有 A/B 级候选允许模拟验证'
   } else if (mode === 'watch_only') {

@@ -71,6 +71,6 @@ assert.deepEqual(
     canAddWatch: true,
     canShowPaperAction: false,
     paperActionLabel: '模拟买入',
-    paperDisabledReason: '非交易日不生成交易计划，不能模拟买入',
+    paperDisabledReason: '非交易日不生成交易计划，不能模拟验证',
   },
 )
