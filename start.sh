@@ -15,6 +15,25 @@ FRONTEND_SESSION="smartstock-frontend"
 
 mkdir -p "$RUNTIME_DIR"
 
+load_local_env() {
+  local workspace_dir
+  local env_file
+
+  if [[ "$BASE_DIR" == */.worktrees/* ]]; then
+    workspace_dir="$(cd "$BASE_DIR/../.." && pwd)"
+  else
+    workspace_dir="$(cd "$BASE_DIR/.." && pwd)"
+  fi
+
+  env_file="${SMARTSTOCK_LOCAL_ENV_FILE:-$workspace_dir/.local-secrets/smartstock.env}"
+  if [[ -f "$env_file" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$env_file"
+    set +a
+  fi
+}
+
 is_listening() {
   local port="$1"
   lsof -iTCP:"$port" -sTCP:LISTEN -n -P >/dev/null 2>&1
@@ -92,6 +111,7 @@ start_frontend() {
   echo "Frontend is ready on http://localhost:$FRONTEND_PORT"
 }
 
+load_local_env
 start_postgres
 start_backend
 start_frontend
