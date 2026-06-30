@@ -106,6 +106,58 @@ class NonTradingPreparationModeTests(unittest.TestCase):
         self.assertTrue(result["calendar_context"]["actions"]["can_refresh"])
         self.assertTrue(result["calendar_context"]["actions"]["can_paper_buy"])
 
+    def test_sparse_risk_snapshot_keeps_complete_same_day_observation_pool(self):
+        trade_date = "2026-06-29"
+        medium_pick = sample_pick(trade_date=trade_date, symbol="002603", rank_no=2)
+        medium_pick["name"] = "以岭药业"
+        medium_pick["decision"] = {"grade": "B", "mode": "paper_only", "summary": "中风险小仓试错"}
+        medium_pick["score_breakdown"] = {"total": 83.79}
+
+        high_risk_picks = []
+        for rank_no, symbol, name in [
+            (1, "002049", "紫光国微"),
+            (2, "002179", "中航光电"),
+            (3, "002371", "北方华创"),
+        ]:
+            pick = sample_pick(trade_date=trade_date, symbol=symbol, rank_no=rank_no)
+            pick["name"] = name
+            pick["action"] = "watch"
+            pick["decision"] = {"grade": "C", "mode": "watch_only", "summary": "观察等待"}
+            pick["score_breakdown"] = {"total": 76 + rank_no}
+            high_risk_picks.append(pick)
+
+        self.store.upsert_pick_snapshots(
+            user_id="default",
+            trade_date=trade_date,
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            picks=[medium_pick],
+        )
+        self.store.upsert_pick_snapshots(
+            user_id="default",
+            trade_date=trade_date,
+            strategy_code="trend_breakout",
+            risk_level="high",
+            picks=high_risk_picks,
+        )
+
+        result = self.service.get_cached_today_picks(
+            max_count=10,
+            user_id="default",
+            risk_level="medium",
+            requested_date=trade_date,
+        )
+
+        symbols = [pick["symbol"] for pick in result["picks"]]
+        self.assertEqual(len(symbols), 4)
+        self.assertEqual(len(symbols), len(set(symbols)))
+        self.assertIn("002603", symbols)
+        self.assertIn("002049", symbols)
+        yiling = next(pick for pick in result["picks"] if pick["symbol"] == "002603")
+        self.assertEqual(yiling["decision"]["grade"], "B")
+        self.assertEqual(result["universe_meta"]["candidate_count"], 4)
+        self.assertEqual(result["universe_meta"]["risk_snapshot_fallback"], "same_day_complete_pool")
+
     def test_cached_only_trading_day_without_current_snapshot_allows_refresh_but_blocks_stale_paper_buy(self):
         self.service._is_recommendation_trading_day = lambda date_text: date_text == "2026-06-22"
         self.save_snapshot("2026-06-17")

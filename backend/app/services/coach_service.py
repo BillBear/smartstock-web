@@ -2070,6 +2070,54 @@ class CoachService:
             "no_trade_reason": calendar_context.get("message") or "暂无候选池快照",
         }
 
+    @staticmethod
+    def _is_sparse_cached_snapshot(snapshot_result: Optional[Dict[str, Any]], max_count: int) -> bool:
+        if not snapshot_result:
+            return True
+        picks = snapshot_result.get("picks") or []
+        min_complete_count = min(max(5, max_count // 3), max_count)
+        return len(picks) < min_complete_count
+
+    @staticmethod
+    def _merge_same_day_cached_snapshot_results(
+        primary: Dict[str, Any],
+        fallback: Dict[str, Any],
+        limit: int,
+    ) -> Dict[str, Any]:
+        primary_picks = copy.deepcopy(primary.get("picks") or [])
+        fallback_picks = copy.deepcopy(fallback.get("picks") or [])
+        merged_by_symbol: Dict[str, Dict[str, Any]] = {}
+
+        for pick in fallback_picks:
+            symbol = str(pick.get("symbol") or pick.get("pick_id") or "")
+            if symbol:
+                merged_by_symbol[symbol] = pick
+        for pick in primary_picks:
+            symbol = str(pick.get("symbol") or pick.get("pick_id") or "")
+            if symbol:
+                merged_by_symbol[symbol] = pick
+
+        def sort_key(item: Dict[str, Any]):
+            grade = str((item.get("decision") or {}).get("grade") or "D")
+            grade_weight = {"A": 0, "B": 1, "C": 2, "D": 3}.get(grade, 4)
+            total = CoachService._safe_float((item.get("score_breakdown") or {}).get("total"), 0)
+            return (
+                int(CoachService._safe_float(item.get("rank_no"), 9999)),
+                grade_weight,
+                -total,
+                str(item.get("pick_id") or ""),
+            )
+
+        merged_picks = sorted(merged_by_symbol.values(), key=sort_key)[: max(1, min(int(limit or 60), 200))]
+        for index, pick in enumerate(merged_picks, start=1):
+            pick["rank_no"] = index
+
+        merged = copy.deepcopy(primary)
+        merged["picks"] = merged_picks
+        merged["status"] = primary.get("status") or fallback.get("status") or "cached_from_store"
+        merged["risk_snapshot_fallback"] = "same_day_complete_pool"
+        return merged
+
     def get_cached_today_picks(
         self,
         max_count: int = 5,
@@ -2089,11 +2137,12 @@ class CoachService:
         if not effective_trade_date:
             return self._empty_cached_picks_result(user_id, max_count, risk_level, calendar_context, snapshot_dates)
 
+        requested_risk_level = risk_level if risk_level in {"low", "medium", "high"} else ""
         snapshot_result = self.store.get_latest_pick_snapshots_result(
             user_id=user_id,
             trade_date=effective_trade_date,
             limit=max_count,
-            risk_level=risk_level if risk_level in {"low", "medium", "high"} else "",
+            risk_level=requested_risk_level,
         )
         if not snapshot_result:
             snapshot_result = self.store.get_latest_pick_snapshots_result(
@@ -2101,6 +2150,21 @@ class CoachService:
                 trade_date=effective_trade_date,
                 limit=max_count,
             )
+        elif requested_risk_level and self._is_sparse_cached_snapshot(snapshot_result, max_count):
+            same_day_complete_result = self.store.get_latest_pick_snapshots_result(
+                user_id=user_id,
+                trade_date=effective_trade_date,
+                limit=max_count,
+            )
+            if (
+                same_day_complete_result
+                and len(same_day_complete_result.get("picks") or []) > len(snapshot_result.get("picks") or [])
+            ):
+                snapshot_result = self._merge_same_day_cached_snapshot_results(
+                    primary=snapshot_result,
+                    fallback=same_day_complete_result,
+                    limit=max_count,
+                )
         if not snapshot_result:
             return self._empty_cached_picks_result(user_id, max_count, risk_level, calendar_context, snapshot_dates)
 
@@ -2122,6 +2186,7 @@ class CoachService:
                 "source": "pick_snapshots",
                 "candidate_count": len(picks),
                 "display_limit": max_count,
+                "risk_snapshot_fallback": snapshot_result.get("risk_snapshot_fallback"),
             },
             "strategy_health": {
                 "status": "cached_snapshot",
