@@ -296,14 +296,27 @@ class CoachService:
 
     def _is_recommendation_trading_day(self, date_text: Optional[str]) -> bool:
         target_date = self._normalize_trade_date(date_text)
-        if not target_date or not self.store or not hasattr(self.store, "get_latest_valid_market_snapshot"):
+        if not target_date:
+            return False
+        if self.store and hasattr(self.store, "get_latest_valid_market_snapshot"):
+            try:
+                snapshot = self.store.get_latest_valid_market_snapshot(trade_date=target_date, min_count=1)
+                snapshot_trade_date = self._normalize_trade_date((snapshot or {}).get("trade_date"))
+                if snapshot_trade_date == target_date:
+                    return True
+            except Exception:
+                pass
+        return self._is_current_weekday_refresh_candidate(target_date)
+
+    @staticmethod
+    def _is_current_weekday_refresh_candidate(target_date: str) -> bool:
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        if target_date != current_date:
             return False
         try:
-            snapshot = self.store.get_latest_valid_market_snapshot(trade_date=target_date, min_count=1)
+            return datetime.strptime(target_date, "%Y-%m-%d").date().weekday() < 5
         except Exception:
             return False
-        snapshot_trade_date = self._normalize_trade_date((snapshot or {}).get("trade_date"))
-        return snapshot_trade_date == target_date
 
     def resolve_pick_calendar_context(
         self,

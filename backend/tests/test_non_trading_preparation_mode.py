@@ -3,7 +3,9 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -179,6 +181,28 @@ class NonTradingPreparationModeTests(unittest.TestCase):
         self.assertTrue(context["actions"]["can_refresh"])
         self.assertFalse(context["actions"]["can_paper_buy"])
         self.assertTrue(context["actions"]["can_add_watch"])
+
+    def test_current_weekday_without_market_snapshot_allows_refresh_to_fetch_new_plan(self):
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 6, 30, 10, 0, 0)
+
+        self.save_snapshot("2026-06-29")
+
+        with patch("app.services.coach_service.datetime", FixedDatetime):
+            result = self.service.get_cached_today_picks(
+                max_count=5,
+                user_id="default",
+            )
+
+        context = result["calendar_context"]
+        self.assertEqual(context["mode"], "trading")
+        self.assertEqual(context["requested_date"], "2026-06-30")
+        self.assertEqual(context["effective_trade_date"], "2026-06-30")
+        self.assertEqual(context["snapshot_trade_date"], "2026-06-29")
+        self.assertTrue(context["actions"]["can_refresh"])
+        self.assertFalse(context["actions"]["can_paper_buy"])
 
     def test_cached_only_without_snapshots_returns_empty_preparation_context(self):
         result = self.service.get_cached_today_picks(
