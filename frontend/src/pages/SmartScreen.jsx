@@ -20,7 +20,7 @@ import {
 import { InfoCircleOutlined, ReloadOutlined, ThunderboltOutlined, TrophyOutlined } from '@ant-design/icons'
 import { coachApi } from '../services/api'
 import MarketFactorExplain from '../components/MarketFactorExplain'
-import { shouldRefreshCurrentTradingPicks } from './smartScreenData.mjs'
+import { getSmartScreenDiagnostic, shouldRefreshCurrentTradingPicks } from './smartScreenData.mjs'
 import { getPickActionPresentation } from './smartScreenPresentation.mjs'
 import './SmartScreen.css'
 
@@ -231,6 +231,7 @@ const SmartScreen = () => {
   const marketNews = result?.market_state?.news_context || {}
   const tradePlan = result?.trade_plan || {}
   const planMeta = PLAN_ACTION_META[tradePlan.primary_action] || PLAN_ACTION_META.watch
+  const diagnostic = useMemo(() => getSmartScreenDiagnostic(result), [result])
   const corePicks = useMemo(
     () => pickList.filter((item) => ['A', 'B'].includes(item?.decision?.grade)).slice(0, 3),
     [pickList]
@@ -727,6 +728,20 @@ const SmartScreen = () => {
             <Tag color="lime">资讯更新：{result.market_state.news_context.updated_at}</Tag>
           )}
         </Space>
+        {(diagnostic.coverageText || diagnostic.decisionText) && (
+          <Alert
+            type={diagnostic.coverageLevel === 'success' ? 'info' : 'warning'}
+            showIcon
+            style={{ marginTop: 12 }}
+            message="数据覆盖与准入诊断"
+            description={
+              <Space direction="vertical" size={2}>
+                {diagnostic.coverageText && <span>{diagnostic.coverageText}</span>}
+                {diagnostic.decisionText && <span>{diagnostic.decisionText}</span>}
+              </Space>
+            }
+          />
+        )}
       </Card>
 
       <Card className="ranking-card" variant="borderless">
