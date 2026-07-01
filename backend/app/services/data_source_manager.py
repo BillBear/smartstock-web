@@ -372,13 +372,19 @@ class DataSourceManager:
         return None
 
     def get_a_share_snapshot(self) -> List[Dict[str, Any]]:
-        """获取全A实时快照（优先 AKShare）。"""
+        """获取全A实时快照（优先快速 TuShare+Tencent，必要时回退 AKShare）。"""
         cache_key = "market:a_share_snapshot"
         cached = self._get_cache(cache_key)
         if cached is not None:
             return cached
 
         source_map = {name: svc for name, svc in self.sources}
+        tencent_snapshot = self._build_tushare_tencent_snapshot(source_map)
+        if tencent_snapshot:
+            self._set_cache(cache_key, tencent_snapshot)
+            logger.info(f"✅ 成功从 TuShare+Tencent 构建全A快照: {len(tencent_snapshot)} 条")
+            return tencent_snapshot
+
         preferred_order = ["AKShare", "TuShare", "Mock"]
 
         for source_name in preferred_order:
@@ -409,44 +415,66 @@ class DataSourceManager:
                 logger.warning(f"❌ {source_name} 全A快照失败: {str(e)}")
                 continue
 
-        # fallback: TuShare行业清单 + Tencent批量实时行情，构建全A快照
-        tushare_service = source_map.get("TuShare")
-        tencent_service = source_map.get("Tencent")
-        if tushare_service and tencent_service and hasattr(tencent_service, "get_realtime_quotes_batch"):
-            try:
-                industry_map = self.get_stock_industry_map()
-                symbols = [s for s in industry_map.keys() if len(str(s)) == 6 and str(s).isdigit()]
-                if symbols:
-                    quotes_map = tencent_service.get_realtime_quotes_batch(symbols)
-                    items = []
-                    for symbol, quote in quotes_map.items():
-                        items.append(
-                            {
-                                "symbol": symbol,
-                                "name": quote.get("name", symbol),
-                                "industry": industry_map.get(symbol, "未知行业"),
-                                "price": quote.get("price"),
-                                "change": quote.get("change"),
-                                "pct_change": quote.get("pct_change"),
-                                "open": quote.get("open"),
-                                "high": quote.get("high"),
-                                "low": quote.get("low"),
-                                "volume": quote.get("volume"),
-                                "amount": quote.get("amount"),
-                                "turnover_rate": quote.get("turnover_rate"),
-                                "update_time": quote.get("update_time"),
-                            }
-                        )
-                    normalized = self._normalize_market_snapshot(items)
-                    if normalized:
-                        self._set_cache(cache_key, normalized)
-                        logger.info(f"✅ 成功从 TuShare+Tencent 构建全A快照: {len(normalized)} 条")
-                        return normalized
-            except Exception as e:
-                logger.warning(f"❌ TuShare+Tencent 全A快照构建失败: {str(e)}")
+        tencent_snapshot = self._build_tushare_tencent_snapshot(source_map)
+        if tencent_snapshot:
+            self._set_cache(cache_key, tencent_snapshot)
+            logger.info(f"✅ 成功从 TuShare+Tencent 构建全A快照: {len(tencent_snapshot)} 条")
+            return tencent_snapshot
 
         logger.error("所有数据源均失败: 全A快照")
         return []
+
+    def _build_tushare_tencent_snapshot(self, source_map: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Build a full A-share snapshot from TuShare basic metadata and Tencent quotes."""
+        tushare_service = source_map.get("TuShare")
+        tencent_service = source_map.get("Tencent")
+        if not (
+            tushare_service
+            and hasattr(tushare_service, "get_stock_basic_map")
+            and tencent_service
+            and hasattr(tencent_service, "get_realtime_quotes_batch")
+        ):
+            return []
+        try:
+            basic_map = tushare_service.get_stock_basic_map() or {}
+            symbols = [
+                symbol
+                for symbol in basic_map.keys()
+                if len(str(symbol)) == 6 and str(symbol).isdigit()
+            ]
+            if len(symbols) < 500:
+                return []
+            quotes_map = tencent_service.get_realtime_quotes_batch(symbols) or {}
+            if len(quotes_map) < 500:
+                return []
+            items = []
+            for symbol, quote in quotes_map.items():
+                basic = basic_map.get(symbol) or {}
+                items.append(
+                    {
+                        "symbol": symbol,
+                        "name": quote.get("name") or basic.get("name") or symbol,
+                        "industry": basic.get("industry") or "未知行业",
+                        "price": quote.get("price"),
+                        "change": quote.get("change"),
+                        "pct_change": quote.get("pct_change"),
+                        "open": quote.get("open"),
+                        "high": quote.get("high"),
+                        "low": quote.get("low"),
+                        "volume": quote.get("volume"),
+                        "amount": quote.get("amount"),
+                        "turnover_rate": quote.get("turnover_rate"),
+                        "update_time": quote.get("update_time"),
+                    }
+                )
+            normalized = self._normalize_market_snapshot(items)
+            if len(normalized) < 500:
+                return []
+            self._record_success("TuShare+Tencent", "snapshot")
+            return normalized
+        except Exception as e:
+            logger.warning(f"❌ TuShare+Tencent 全A快照构建失败: {str(e)}")
+            return []
 
     def get_stock_industry_map(self) -> Dict[str, str]:
         """获取A股行业映射（优先 TuShare）。"""

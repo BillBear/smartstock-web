@@ -11,6 +11,58 @@ from app.services.data_source_manager import DataSourceManager
 
 
 class DataSourceManagerTests(unittest.TestCase):
+    def test_a_share_snapshot_uses_tushare_basic_map_and_tencent_before_slow_akshare(self):
+        class FakeTuShare:
+            def get_stock_basic_map(self):
+                return {
+                    f"000{i:03d}": {
+                        "symbol": f"000{i:03d}",
+                        "name": f"测试{i}",
+                        "industry": "测试行业",
+                    }
+                    for i in range(1, 601)
+                }
+
+        class FakeTencent:
+            def get_realtime_quotes_batch(self, symbols):
+                return {
+                    symbol: {
+                        "name": f"测试{index}",
+                        "price": 10 + index / 100,
+                        "change": 0.1,
+                        "pct_change": 1.0,
+                        "open": 10,
+                        "high": 11,
+                        "low": 9,
+                        "volume": 100000,
+                        "amount": 300000000,
+                        "turnover_rate": 3.0,
+                        "update_time": "2026-07-01 10:00:00",
+                    }
+                    for index, symbol in enumerate(symbols, start=1)
+                }
+
+        class SlowAKShare:
+            called = False
+
+            def get_a_share_spot_snapshot(self):
+                self.called = True
+                return []
+
+        slow_akshare = SlowAKShare()
+        manager = DataSourceManager(
+            tushare_service=FakeTuShare(),
+            tencent_service=FakeTencent(),
+            akshare_service=slow_akshare,
+        )
+
+        snapshot = manager.get_a_share_snapshot()
+
+        self.assertGreaterEqual(len(snapshot), 600)
+        self.assertFalse(slow_akshare.called)
+        self.assertEqual(snapshot[0]["symbol"], "000001")
+        self.assertEqual(snapshot[0]["industry"], "测试行业")
+
     def test_search_uses_minimal_basic_map_when_remote_sources_are_unavailable(self):
         manager = DataSourceManager()
 
