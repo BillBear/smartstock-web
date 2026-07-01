@@ -41,6 +41,8 @@ class RankingEvaluationApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["coverage"]["coverage_status"], "complete")
         self.assertIn("precision_at_3", payload["metrics"])
         self.assertIn("diagnostics", payload)
+        self.assertIn("production_gate", payload)
+        self.assertFalse(payload["production_gate"]["ready"])
         self.assertIn("ranking_summary.json", payload["artifacts"])
 
     async def test_ranking_evaluation_route_does_not_call_mutating_strategy_methods(self):

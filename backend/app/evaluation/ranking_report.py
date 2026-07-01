@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 
 from app.evaluation.ranking_diagnostics import build_ranking_diagnostics, factor_correlations
 from app.evaluation.ranking_metrics import evaluate_daily_ranking, rank_percentile_return_curve
+from app.evaluation.production_gate import evaluate_ranking_production_gate
 
 
 REPORT_SCHEMA_VERSION = "1.0"
@@ -80,6 +81,7 @@ def build_ranking_report(
         "diagnostics": diagnostics,
         "artifacts": artifact_paths,
     }
+    summary["production_gate"] = evaluate_ranking_production_gate(summary)
     _write_json(out_dir / "ranking_summary.json", summary)
     return summary
 

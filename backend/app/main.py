@@ -33,6 +33,7 @@ from app.models.schemas import (
 )
 from app.evaluation.ranking_fixtures import smoke_fixture_rows
 from app.evaluation.ranking_labels import DEFAULT_STRONG_LABEL_CONFIG
+from app.evaluation.production_gate import evaluate_ranking_production_gate
 from app.evaluation.ranking_replay import RankingReplayService
 from app.evaluation.ranking_report import build_ranking_report
 from app.evaluation.universe_funnel import DEFAULT_MIN_FULL_UNIVERSE_COUNT, build_universe_funnel_report
@@ -351,6 +352,8 @@ def _load_latest_ranking_evaluation_summary() -> dict:
     if not summaries:
         return {"available": False, "message": "ranking evaluation report not found"}
     payload = json.loads(summaries[0].read_text(encoding="utf-8"))
+    if "production_gate" not in payload:
+        payload["production_gate"] = evaluate_ranking_production_gate(payload)
     payload["available"] = True
     payload["summary_path"] = str(summaries[0])
     return clean_nan_values(payload)

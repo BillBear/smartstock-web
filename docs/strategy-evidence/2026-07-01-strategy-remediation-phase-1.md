@@ -37,6 +37,12 @@
    - 展示快照日期、全市场数量、基础过滤数量、多通道召回数量和深度分析预算。
    - 诊断接口失败不阻断主推荐页面。
 
+6. 新增生产准入门禁评估：
+   - ranking evaluation 报告会输出 `production_gate`。
+   - `GET /api/coach/ranking-evaluation/latest` 会补齐旧报告缺失的 `production_gate`。
+   - 门禁覆盖 Precision@3、Precision@5、Top5 相对全市场/当前 baseline、最大回撤、市场状态验证和最近 holdout 衰减。
+   - 该门禁只用于阻止无证据生产切换，不会改变当前推荐结果。
+
 ## 未完成
 
 以下事项仍需独立分支、独立评估后再做：
