@@ -171,12 +171,24 @@ const SmartScreen = () => {
         coachApi.getTodayPicks(params),
       ])
       if (!mountedRef.current || reqId !== latestLoadReqRef.current) return
+      const diagnosticTradeDate = targetSnapshotDate
+        || data?.calendar_context?.effective_trade_date
+        || data?.trade_date
+        || summary?.trade_date
+      const universeFunnel = await coachApi.getUniverseFunnelDiagnostics({
+        trade_date: diagnosticTradeDate || undefined,
+      }).catch((diagErr) => {
+        console.warn('候选漏斗诊断加载失败', diagErr)
+        return { available: false, error_message: diagErr?.message || '诊断加载失败' }
+      })
+      if (!mountedRef.current || reqId !== latestLoadReqRef.current) return
       const combinedResult = {
         ...(summary || {}),
         ...(data || {}),
         calendar_context: data?.calendar_context || summary?.calendar_context,
         snapshot_dates: data?.snapshot_dates || summary?.snapshot_dates || [],
         trade_plan: data?.trade_plan || summary?.trade_plan || {},
+        universe_funnel: universeFunnel || null,
       }
       setResult(combinedResult)
       const calendarContext = combinedResult.calendar_context || {}
@@ -258,6 +270,11 @@ const SmartScreen = () => {
   const heroSummary = isObservationMode
     ? (calendarContext?.message || '当前只读取已保存候选池快照，不重新运行策略。')
     : (tradePlan.summary || '系统会先判断市场环境和策略证据，再决定是否输出可执行候选。')
+  const universeFunnel = result?.universe_funnel || {}
+  const hasUniverseFunnel = Boolean(result?.universe_funnel)
+  const universeFunnelCounts = universeFunnel?.counts || {}
+  const universeFunnelCoverage = universeFunnel?.coverage || {}
+  const universeFunnelBudgets = universeFunnelCounts?.deep_analysis_budgets || {}
   const heroBadge = isPreparationMode
     ? { label: '观察准备', color: '#60a5fa' }
     : (isHistoricalMode ? { label: '复盘观察', color: '#a78bfa' } : planMeta)
@@ -738,6 +755,29 @@ const SmartScreen = () => {
               <Space direction="vertical" size={2}>
                 {diagnostic.coverageText && <span>{diagnostic.coverageText}</span>}
                 {diagnostic.decisionText && <span>{diagnostic.decisionText}</span>}
+              </Space>
+            }
+          />
+        )}
+        {hasUniverseFunnel && (
+          <Alert
+            type={universeFunnelCoverage.status === 'ok' ? 'info' : 'warning'}
+            showIcon
+            style={{ marginTop: 12 }}
+            message="全市场候选漏斗诊断"
+            description={
+              <Space direction="vertical" size={4}>
+                <span>{universeFunnelCoverage.message || '暂无候选漏斗诊断。'}</span>
+                <Space wrap>
+                  <Tag color="geekblue">快照：{universeFunnel?.snapshot?.trade_date || '-'}</Tag>
+                  <Tag color="blue">全市场：{universeFunnelCounts.full_market ?? '-'}</Tag>
+                  <Tag color="cyan">基础过滤：{universeFunnelCounts.basic_filter_pass ?? '-'}</Tag>
+                  <Tag color="green">多通道召回：{universeFunnelCounts.multi_channel_recall ?? '-'}</Tag>
+                  <Tag color="purple">深度72：{universeFunnelBudgets['72'] ?? '-'}</Tag>
+                  <Tag color={universeFunnelCoverage.can_generate_trade_plan ? 'green' : 'red'}>
+                    {universeFunnelCoverage.can_generate_trade_plan ? '覆盖达标' : '不应生成交易计划'}
+                  </Tag>
+                </Space>
               </Space>
             }
           />

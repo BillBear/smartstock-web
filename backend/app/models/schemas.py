@@ -109,9 +109,13 @@ class CoachModelTrainRequest(BaseModel):
     horizon_days: int = Field(15, description="预测持有期/标签窗口", ge=5, le=60)
     target_return_pct: float = Field(8.0, description="上涨标签收益阈值(%)", ge=1, le=50)
     drawdown_pct: float = Field(6.0, description="回撤标签阈值(%)", ge=1, le=40)
-    max_symbols: int = Field(120, description="最大训练股票数", ge=5, le=300)
+    max_symbols: int = Field(1500, description="最大训练股票数，默认按全市场分层样本扩展", ge=5, le=6000)
     sample_step: int = Field(3, description="样本抽样步长，降低高度重叠标签", ge=1, le=20)
     tree_max_depth: int = Field(4, description="解释用决策树深度", ge=3, le=5)
+    final_holdout_trade_days: int = Field(63, description="最终时间留出交易日数，默认约3个月", ge=0, le=252)
+    symbol_holdout_ratio: float = Field(0.2, description="完全不参与训练的股票留出比例", ge=0, le=0.5)
+    random_state: int = Field(42, description="训练/留出切分随机种子", ge=0, le=999999)
+    enforce_minimum_training_standard: bool = Field(True, description="是否强制全市场训练最低样本标准")
     symbols: Optional[List[str]] = Field(None, description="可选指定股票池")
 
 

@@ -101,21 +101,151 @@ class MLModelService:
             model = LogisticRegression(max_iter=800, class_weight="balanced", random_state=42)
         return Pipeline([("scaler", StandardScaler()), ("model", model)])
 
-    def _walk_forward_metrics(self, df: pd.DataFrame, feature_names: List[str]) -> Dict[str, Any]:
-        from sklearn.model_selection import TimeSeriesSplit
+    @staticmethod
+    def _grouped_time_series_splits(df: pd.DataFrame, n_splits: int = 5, date_col: str = "date") -> List[Dict[str, Any]]:
+        """Create walk-forward splits on whole trade-date groups."""
+        if df is None or df.empty or date_col not in df.columns:
+            return []
+        ordered_dates = sorted(str(value) for value in df[date_col].dropna().astype(str).unique())
+        if len(ordered_dates) < 3:
+            return []
 
+        split_count = max(1, min(int(n_splits or 1), len(ordered_dates) - 1))
+        test_window = max(1, len(ordered_dates) // (split_count + 1))
+        splits: List[Dict[str, Any]] = []
+        for split_number in range(split_count):
+            test_end_pos = len(ordered_dates) - test_window * (split_count - split_number - 1)
+            test_start_pos = max(1, test_end_pos - test_window)
+            train_dates = ordered_dates[:test_start_pos]
+            test_dates = ordered_dates[test_start_pos:test_end_pos]
+            if not train_dates or not test_dates:
+                continue
+            train_mask = df[date_col].astype(str).isin(train_dates)
+            test_mask = df[date_col].astype(str).isin(test_dates)
+            train_idx = df.index[train_mask].tolist()
+            test_idx = df.index[test_mask].tolist()
+            if not train_idx or not test_idx:
+                continue
+            splits.append(
+                {
+                    "train_idx": train_idx,
+                    "test_idx": test_idx,
+                    "train_start": train_dates[0],
+                    "train_end": train_dates[-1],
+                    "test_start": test_dates[0],
+                    "test_end": test_dates[-1],
+                    "train_dates": len(train_dates),
+                    "test_dates": len(test_dates),
+                    "train_rows": len(train_idx),
+                    "test_rows": len(test_idx),
+                }
+            )
+        return splits
+
+    @staticmethod
+    def _split_final_time_holdout(
+        df: pd.DataFrame,
+        holdout_days: int = 63,
+        date_col: str = "date",
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
+        """Reserve the most recent complete trade dates as final holdout."""
+        if df is None or df.empty or date_col not in df.columns:
+            return df.copy(), df.iloc[0:0].copy(), {"holdout_days": 0, "enabled": False}
+        ordered_dates = sorted(str(value) for value in df[date_col].dropna().astype(str).unique())
+        requested_days = max(0, int(holdout_days or 0))
+        if requested_days <= 0 or len(ordered_dates) <= requested_days + 2:
+            return df.copy(), df.iloc[0:0].copy(), {"holdout_days": 0, "enabled": False}
+        holdout_dates = set(ordered_dates[-requested_days:])
+        train_df = df[~df[date_col].astype(str).isin(holdout_dates)].copy()
+        holdout_df = df[df[date_col].astype(str).isin(holdout_dates)].copy()
+        meta = {
+            "enabled": True,
+            "holdout_days": requested_days,
+            "holdout_start": holdout_df[date_col].astype(str).min() if not holdout_df.empty else None,
+            "holdout_end": holdout_df[date_col].astype(str).max() if not holdout_df.empty else None,
+            "train_end": train_df[date_col].astype(str).max() if not train_df.empty else None,
+            "train_rows": int(len(train_df)),
+            "holdout_rows": int(len(holdout_df)),
+        }
+        return train_df, holdout_df, meta
+
+    @staticmethod
+    def _split_symbol_holdout(
+        df: pd.DataFrame,
+        holdout_ratio: float = 0.2,
+        symbol_col: str = "symbol",
+        random_state: int = 42,
+    ) -> Dict[str, Any]:
+        """Select a deterministic stock holdout set for unseen-symbol validation."""
+        if df is None or df.empty or symbol_col not in df.columns:
+            return {"train_symbols": [], "holdout_symbols": [], "holdout_ratio": 0.0}
+        symbols = sorted(str(value) for value in df[symbol_col].dropna().astype(str).unique())
+        if len(symbols) < 2:
+            return {"train_symbols": symbols, "holdout_symbols": [], "holdout_ratio": 0.0}
+        rng = np.random.default_rng(int(random_state))
+        shuffled = list(rng.permutation(symbols))
+        holdout_count = max(1, min(len(symbols) - 1, int(round(len(symbols) * float(holdout_ratio or 0.0)))))
+        holdout_symbols = sorted(shuffled[:holdout_count])
+        train_symbols = sorted(symbol for symbol in symbols if symbol not in set(holdout_symbols))
+        return {
+            "train_symbols": train_symbols,
+            "holdout_symbols": holdout_symbols,
+            "holdout_ratio": round(len(holdout_symbols) / max(1, len(symbols)), 4),
+            "symbol_count": len(symbols),
+        }
+
+    @staticmethod
+    def _build_training_validation_frames(
+        df: pd.DataFrame,
+        final_holdout_days: int = 63,
+        symbol_holdout_ratio: float = 0.2,
+        random_state: int = 42,
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
+        train_time_df, final_holdout_df, time_meta = MLModelService._split_final_time_holdout(
+            df,
+            holdout_days=final_holdout_days,
+        )
+        symbol_meta = MLModelService._split_symbol_holdout(
+            train_time_df,
+            holdout_ratio=symbol_holdout_ratio,
+            random_state=random_state,
+        )
+        holdout_symbols = set(symbol_meta.get("holdout_symbols") or [])
+        if holdout_symbols:
+            fit_df = train_time_df[~train_time_df["symbol"].astype(str).isin(holdout_symbols)].copy()
+            symbol_holdout_df = train_time_df[train_time_df["symbol"].astype(str).isin(holdout_symbols)].copy()
+        else:
+            fit_df = train_time_df.copy()
+            symbol_holdout_df = train_time_df.iloc[0:0].copy()
+
+        meta = {
+            "method": "final_time_holdout_plus_symbol_holdout",
+            "fit_rows": int(len(fit_df)),
+            "fit_symbols": int(fit_df["symbol"].nunique()) if "symbol" in fit_df else 0,
+            "fit_start": fit_df["date"].astype(str).min() if not fit_df.empty and "date" in fit_df else None,
+            "fit_end": fit_df["date"].astype(str).max() if not fit_df.empty and "date" in fit_df else None,
+            "final_time_holdout": time_meta,
+            "symbol_holdout": {
+                **symbol_meta,
+                "holdout_rows": int(len(symbol_holdout_df)),
+                "train_rows_after_symbol_holdout": int(len(fit_df)),
+            },
+        }
+        return fit_df, final_holdout_df, symbol_holdout_df, meta
+
+    def _walk_forward_metrics(self, df: pd.DataFrame, feature_names: List[str]) -> Dict[str, Any]:
         ordered = df.sort_values(["date", "symbol"]).reset_index(drop=True)
-        split_count = min(5, max(2, len(ordered) // 300))
-        if len(ordered) < 120:
-            split_count = 2
-        tscv = TimeSeriesSplit(n_splits=split_count)
+        unique_dates = max(1, int(ordered["date"].nunique())) if "date" in ordered else 1
+        split_count = min(5, max(2, unique_dates // 20))
+        splits = self._grouped_time_series_splits(ordered, n_splits=split_count)
         up_true: List[int] = []
         up_prob: List[float] = []
         dd_true: List[int] = []
         dd_prob: List[float] = []
-        for train_idx, test_idx in tscv.split(ordered):
-            train = ordered.iloc[train_idx]
-            test = ordered.iloc[test_idx]
+        split_windows: List[Dict[str, Any]] = []
+        for split in splits:
+            train = ordered.iloc[split["train_idx"]]
+            test = ordered.iloc[split["test_idx"]]
             x_train = train[feature_names].astype(float)
             x_test = test[feature_names].astype(float)
             up_model = self._make_pipeline(train["label_up"].astype(int).to_numpy())
@@ -126,12 +256,30 @@ class MLModelService:
             dd_true.extend(test["label_dd"].astype(int).tolist())
             up_prob.extend(up_model.predict_proba(x_test)[:, 1].tolist())
             dd_prob.extend(dd_model.predict_proba(x_test)[:, 1].tolist())
+            split_windows.append({key: split[key] for key in ("train_start", "train_end", "test_start", "test_end", "train_rows", "test_rows")})
 
         return {
-            "method": "walk_forward_timeseries_split",
-            "split_count": split_count,
+            "method": "walk_forward_grouped_trade_date",
+            "split_count": len(splits),
+            "split_windows": split_windows,
             "up_model": self._evaluate_classifier(np.array(up_true), np.array(up_prob)),
             "dd_model": self._evaluate_classifier(np.array(dd_true), np.array(dd_prob)),
+        }
+
+    def _evaluate_holdout_frame(self, model_up, model_dd, df: pd.DataFrame, feature_names: List[str]) -> Dict[str, Any]:
+        if df is None or df.empty:
+            return {"available": False, "sample_count": 0}
+        x = df[feature_names].astype(float)
+        up_prob = model_up.predict_proba(x)[:, 1]
+        dd_prob = model_dd.predict_proba(x)[:, 1]
+        return {
+            "available": True,
+            "sample_count": int(len(df)),
+            "symbol_count": int(df["symbol"].nunique()) if "symbol" in df else 0,
+            "start_date": df["date"].astype(str).min() if "date" in df else None,
+            "end_date": df["date"].astype(str).max() if "date" in df else None,
+            "up_model": self._evaluate_classifier(df["label_up"].astype(int).to_numpy(), up_prob),
+            "dd_model": self._evaluate_classifier(df["label_dd"].astype(int).to_numpy(), dd_prob),
         }
 
     def train_model(self, payload: Dict[str, Any], user_id: str = "default") -> Dict[str, Any]:
@@ -145,11 +293,30 @@ class MLModelService:
         df = dataset.get("df")
         if df is None or df.empty or len(df) < 80:
             raise ValueError("历史样本不足，无法训练模型；请扩大股票池、区间或降低 sample_step")
+        meta = dataset.get("meta") or {}
+        minimum_standard = meta.get("minimum_training_standard") or {}
+        if payload.get("enforce_minimum_training_standard", True) and not minimum_standard.get("passed"):
+            raise ValueError(
+                "训练样本未达到全市场最低标准："
+                f"valid_symbols={meta.get('valid_symbol_count')}, "
+                f"samples={meta.get('sample_count')}, "
+                f"history_days={meta.get('history_days')}; "
+                "如需调试小样本，请显式设置 enforce_minimum_training_standard=false"
+            )
 
         feature_names = self.feature_builder.FEATURE_NAMES
-        x = df[feature_names].astype(float)
-        y_up = df["label_up"].astype(int)
-        y_dd = df["label_dd"].astype(int)
+        fit_df, final_holdout_df, symbol_holdout_df, validation_meta = self._build_training_validation_frames(
+            df,
+            final_holdout_days=int(payload.get("final_holdout_days") or payload.get("final_holdout_trade_days") or 63),
+            symbol_holdout_ratio=float(payload.get("symbol_holdout_ratio", 0.2)),
+            random_state=int(payload.get("random_state") or 42),
+        )
+        if fit_df is None or fit_df.empty or len(fit_df) < 80:
+            raise ValueError("训练样本在扣除最终时间 holdout 和股票 holdout 后不足，无法训练模型；请扩大股票池或训练区间")
+
+        x = fit_df[feature_names].astype(float)
+        y_up = fit_df["label_up"].astype(int)
+        y_dd = fit_df["label_dd"].astype(int)
 
         model_up = self._make_pipeline(y_up.to_numpy())
         model_dd = self._make_pipeline(y_dd.to_numpy())
@@ -160,7 +327,9 @@ class MLModelService:
         tree.fit(x, y_up)
         tree_rules = export_text(tree, feature_names=feature_names, max_depth=4)
 
-        metrics = self._walk_forward_metrics(df, feature_names)
+        metrics = self._walk_forward_metrics(fit_df, feature_names)
+        final_holdout_metrics = self._evaluate_holdout_frame(model_up, model_dd, final_holdout_df, feature_names)
+        symbol_holdout_metrics = self._evaluate_holdout_frame(model_up, model_dd, symbol_holdout_df, feature_names)
         up_metrics = metrics.get("up_model") or {}
         dd_metrics = metrics.get("dd_model") or {}
         live_ready = bool(
@@ -178,9 +347,11 @@ class MLModelService:
         joblib.dump(tree, artifact_dir / "tree_model.joblib")
 
         importance = self._factor_importance(model_up, model_dd, feature_names)
-        meta = dataset.get("meta") or {}
         full_metrics = {
             **metrics,
+            "validation_design": validation_meta,
+            "final_time_holdout": final_holdout_metrics,
+            "symbol_holdout": symbol_holdout_metrics,
             "live_ready": live_ready,
             "readiness_rules": {
                 "up_high_prob_beats_low": up_metrics.get("high_beats_low"),
@@ -202,6 +373,7 @@ class MLModelService:
             "train_start": meta.get("train_start"),
             "train_end": meta.get("train_end"),
             "sample_count": int(meta.get("sample_count") or len(df)),
+            "training_sample_count": int(len(fit_df)),
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         self.store.save_ml_model_version(record)

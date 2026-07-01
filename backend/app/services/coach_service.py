@@ -347,6 +347,56 @@ class CoachService:
         meta.update(self._market_snapshot_diagnostics(effective_trade_date))
         return meta
 
+    def _build_evidence_contract(
+        self,
+        universe_meta: Optional[Dict[str, Any]],
+        strategy_health: Optional[Dict[str, Any]],
+        pick_count: int,
+    ) -> Dict[str, Any]:
+        meta = universe_meta or {}
+        health = strategy_health or {}
+        total_universe = int(
+            meta.get("total_universe_count")
+            or meta.get("latest_market_snapshot_count")
+            or meta.get("snapshot_count")
+            or 0
+        )
+        min_full_universe = 5000
+        sample_coverage = {
+            "full_market_count": total_universe,
+            "min_full_market_count": min_full_universe,
+            "basic_filter_count": int(meta.get("after_prefilter_count") or meta.get("candidate_count") or 0),
+            "recall_candidate_count": int(meta.get("candidate_count") or 0),
+            "deep_analysis_count": int(meta.get("analyzed_count") or meta.get("analysis_completed_count") or 0),
+            "output_count": int(pick_count or 0),
+            "status": "ok" if total_universe >= min_full_universe else ("insufficient" if total_universe > 0 else "unknown"),
+        }
+        model_status = "validated" if health.get("live_ready") else str(health.get("status") or "not_validated")
+        model_validation_status = {
+            "status": model_status,
+            "live_ready": bool(health.get("live_ready")),
+            "message": (
+                "模型/策略证据已通过准入。"
+                if health.get("live_ready")
+                else "模型或策略证据尚未通过样本外准入，推荐仍应按模拟验证处理。"
+            ),
+        }
+        evidence_ready = sample_coverage["status"] == "ok" and bool(health.get("live_ready"))
+        evidence_status = {
+            "status": "ready" if evidence_ready else ("insufficient_sample" if sample_coverage["status"] != "ok" else "paper_only"),
+            "can_issue_live_plan": evidence_ready,
+            "summary": (
+                "样本覆盖和策略证据均通过准入。"
+                if evidence_ready
+                else "证据链未通过实盘准入，系统应优先显示模拟/观察语义。"
+            ),
+        }
+        return {
+            "evidence_status": evidence_status,
+            "sample_coverage": sample_coverage,
+            "model_validation_status": model_validation_status,
+        }
+
     def _is_recommendation_trading_day(self, date_text: Optional[str]) -> bool:
         target_date = self._normalize_trade_date(date_text)
         if not target_date:
@@ -2261,21 +2311,26 @@ class CoachService:
         active_strategy = self.get_active_strategy_config(user_id=user_id)
         strategy_code = self._normalize_strategy_code(snapshot_result.get("strategy_code") or (active_strategy or {}).get("strategy_code"))
 
+        universe_meta = self._cached_universe_meta(picks, max_count, snapshot_result, effective_trade_date)
+        strategy_health = {
+            "status": "cached_snapshot",
+            "summary": "当前候选池来自已保存快照，未重新运行策略。",
+            "live_ready": False,
+            "credibility_score": None,
+            "credibility_grade": None,
+            "last_run_id": None,
+        }
+        evidence_contract = self._build_evidence_contract(universe_meta, strategy_health, len(picks))
+
         return {
             "status": snapshot_result.get("status") or "cached_from_store",
             "trade_date": snapshot_result.get("trade_date") or effective_trade_date,
             "updated_at": snapshot_result.get("updated_at"),
             "market_state": self._market_state_from_cached_picks(picks),
             "risk_profile": risk_profile,
-            "universe_meta": self._cached_universe_meta(picks, max_count, snapshot_result, effective_trade_date),
-            "strategy_health": {
-                "status": "cached_snapshot",
-                "summary": "当前候选池来自已保存快照，未重新运行策略。",
-                "live_ready": False,
-                "credibility_score": None,
-                "credibility_grade": None,
-                "last_run_id": None,
-            },
+            "universe_meta": universe_meta,
+            "strategy_health": strategy_health,
+            **evidence_contract,
             "trade_plan": self._build_cached_trade_plan(picks, calendar_context),
             "strategy_context": {
                 "strategy_code": strategy_code,
@@ -2316,6 +2371,9 @@ class CoachService:
             "universe_meta": data.get("universe_meta") or {},
             "strategy_context": data.get("strategy_context") or {},
             "trade_plan": data.get("trade_plan") or {},
+            "evidence_status": data.get("evidence_status") or {},
+            "sample_coverage": data.get("sample_coverage") or {},
+            "model_validation_status": data.get("model_validation_status") or {},
             "top_picks": data.get("picks") or [],
             "pick_count": len(data.get("picks") or []),
             "no_trade": data.get("no_trade"),
@@ -2548,6 +2606,7 @@ class CoachService:
             market_state=market_state,
             risk_profile=risk_profile,
         )
+        evidence_contract = self._build_evidence_contract(universe_meta, strategy_health, len(all_picks))
         try:
             self.store.upsert_pick_snapshots(
                 user_id=user_id,
@@ -2566,6 +2625,7 @@ class CoachService:
             "risk_profile": risk_profile,
             "universe_meta": universe_meta,
             "strategy_health": strategy_health,
+            **evidence_contract,
             "trade_plan": trade_plan,
             "strategy_context": {
                 "strategy_code": strategy_code,

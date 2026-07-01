@@ -1173,6 +1173,51 @@ class CoachStore:
             data["meta"] = {}
         return data
 
+    def list_market_snapshot_items(
+        self,
+        trade_date: Optional[str] = None,
+        min_count: int = 1,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the latest valid market snapshot metadata and decoded items."""
+        snapshot = self.get_latest_valid_market_snapshot(trade_date=trade_date, min_count=min_count)
+        if not snapshot:
+            return None
+        snapshot_id = snapshot.get("snapshot_id")
+        if not snapshot_id:
+            return None
+
+        with self._lock:
+            with self.engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT symbol, name, industry, item_json
+                        FROM market_snapshot_items
+                        WHERE snapshot_id = :snapshot_id
+                        ORDER BY symbol ASC
+                        """
+                    ),
+                    {"snapshot_id": snapshot_id},
+                ).fetchall()
+
+        items: List[Dict[str, Any]] = []
+        for row in rows:
+            data = dict(row._mapping)
+            try:
+                item = json.loads(data.get("item_json") or "{}")
+            except Exception:
+                item = {}
+            item.setdefault("symbol", data.get("symbol"))
+            item.setdefault("name", data.get("name") or data.get("symbol"))
+            item.setdefault("industry", data.get("industry") or "")
+            items.append(item)
+
+        return {
+            **snapshot,
+            "items": items,
+            "item_count": len(items),
+        }
+
     def get_pick_snapshot(self, pick_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         clauses = ["pick_id = :pick_id"]
         params: Dict[str, Any] = {"pick_id": str(pick_id)}

@@ -205,6 +205,11 @@ export const coachApi = {
     return api.get(`/coach/strategy/${strategyCode}/evidence`, { params })
   },
 
+  // 全市场候选漏斗诊断
+  getUniverseFunnelDiagnostics: (params) => {
+    return api.get('/coach/diagnostics/universe-funnel', { params })
+  },
+
   // 提交回测
   runBacktest: (data, userId = 'default') => {
     return api.post('/coach/backtest/run', data, { params: { user_id: userId } })

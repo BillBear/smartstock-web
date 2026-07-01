@@ -35,6 +35,7 @@ from app.evaluation.ranking_fixtures import smoke_fixture_rows
 from app.evaluation.ranking_labels import DEFAULT_STRONG_LABEL_CONFIG
 from app.evaluation.ranking_replay import RankingReplayService
 from app.evaluation.ranking_report import build_ranking_report
+from app.evaluation.universe_funnel import DEFAULT_MIN_FULL_UNIVERSE_COUNT, build_universe_funnel_report
 from app.services.stock_service import StockDataService
 from app.services.technical_analyzer import TechnicalAnalyzer
 from app.services.advice_service import AdviceService
@@ -353,6 +354,59 @@ def _load_latest_ranking_evaluation_summary() -> dict:
     payload["available"] = True
     payload["summary_path"] = str(summaries[0])
     return clean_nan_values(payload)
+
+
+def _load_universe_funnel_diagnostics(trade_date: str = "", min_full_universe_count: int = DEFAULT_MIN_FULL_UNIVERSE_COUNT) -> dict:
+    requested_trade_date = coach_store._normalize_trade_date(trade_date) if trade_date else None
+    snapshot = coach_store.list_market_snapshot_items(trade_date=trade_date or None, min_count=1)
+    snapshot_trade_date = coach_store._normalize_trade_date((snapshot or {}).get("trade_date")) if snapshot else None
+    if not snapshot or (requested_trade_date and snapshot_trade_date != requested_trade_date):
+        return {
+            "schema_version": "universe_funnel_v1",
+            "read_only": True,
+            "available": False,
+            "snapshot": {
+                "trade_date": requested_trade_date,
+                "source": (snapshot or {}).get("source"),
+                "snapshot_count": int((snapshot or {}).get("snapshot_count") or 0),
+                "quality_status": "missing",
+                "latest_available_trade_date": snapshot_trade_date,
+            },
+            "coverage": {
+                "status": "missing_snapshot",
+                "min_full_universe_count": int(min_full_universe_count or DEFAULT_MIN_FULL_UNIVERSE_COUNT),
+                "can_generate_trade_plan": False,
+                "message": "未找到可用于诊断的全市场快照，不应生成交易计划。",
+            },
+            "counts": {
+                "full_market": 0,
+                "basic_filter_pass": 0,
+                "multi_channel_recall": 0,
+                "deep_analysis_budgets": {},
+            },
+            "channel_counts": {},
+            "rejection_reason_counts": {},
+            "samples": {"recalled": [], "rejected": []},
+            "diagnostics_by_symbol": {},
+            "notes": ["本接口只读取已有市场快照，不触发策略刷新。"],
+        }
+
+    report = build_universe_funnel_report(
+        snapshot.get("items") or [],
+        min_full_universe_count=min_full_universe_count,
+    )
+    report["available"] = True
+    report["snapshot"] = {
+        "snapshot_id": snapshot.get("snapshot_id"),
+        "trade_date": snapshot.get("trade_date"),
+        "source": snapshot.get("source"),
+        "snapshot_count": snapshot.get("snapshot_count"),
+        "item_count": snapshot.get("item_count"),
+        "quality_status": snapshot.get("quality_status"),
+        "created_at": snapshot.get("created_at"),
+    }
+    report["production_strategy_mutated"] = False
+    return clean_nan_values(report)
 
 # 创建FastAPI应用
 app = FastAPI(
@@ -1374,6 +1428,20 @@ async def coach_ranking_evaluation_latest():
         return ApiResponse(code=200, message="success", data=data)
     except Exception as e:
         logger.error(f"获取候选池排序质量评估摘要失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/diagnostics/universe-funnel")
+async def coach_universe_funnel_diagnostics(
+    trade_date: str = "",
+    min_full_universe_count: int = DEFAULT_MIN_FULL_UNIVERSE_COUNT,
+):
+    """获取全市场样本覆盖和候选漏斗诊断，只读取已有快照。"""
+    try:
+        data = await run_in_threadpool(_load_universe_funnel_diagnostics, trade_date, min_full_universe_count)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取候选漏斗诊断失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

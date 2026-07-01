@@ -40,7 +40,7 @@ class MLDatasetBuilder:
         text = str(name or "").upper()
         return not text or "ST" in text or "退" in text
 
-    def select_symbols(self, max_symbols: int = 120, explicit_symbols: Optional[List[str]] = None) -> List[Dict[str, str]]:
+    def select_symbols(self, max_symbols: int = 1500, explicit_symbols: Optional[List[str]] = None) -> List[Dict[str, str]]:
         if explicit_symbols:
             return [{"symbol": str(s).strip(), "name": str(s).strip()} for s in explicit_symbols if str(s).strip()]
 
@@ -73,13 +73,13 @@ class MLDatasetBuilder:
         horizon_days = max(5, min(60, int(payload.get("horizon_days") or 15)))
         target_return_pct = float(payload.get("target_return_pct") or 8.0)
         drawdown_pct = float(payload.get("drawdown_pct") or 6.0)
-        max_symbols = max(5, min(300, int(payload.get("max_symbols") or 120)))
+        max_symbols = max(5, min(6000, int(payload.get("max_symbols") or 1500)))
         sample_step = max(1, min(20, int(payload.get("sample_step") or 3)))
         end_dt = self._parse_date(payload.get("train_end")) or datetime.now()
-        start_dt = self._parse_date(payload.get("train_start")) or (end_dt - timedelta(days=540))
+        start_dt = self._parse_date(payload.get("train_start")) or (end_dt - timedelta(days=730))
         if start_dt >= end_dt:
-            start_dt = end_dt - timedelta(days=360)
-        fetch_days = max(260, min(1200, (end_dt - start_dt).days + 260))
+            start_dt = end_dt - timedelta(days=730)
+        fetch_days = max(260, min(1600, (end_dt - start_dt).days + 260))
 
         symbols = self.select_symbols(max_symbols=max_symbols, explicit_symbols=payload.get("symbols"))
         frames: List[pd.DataFrame] = []
@@ -122,6 +122,7 @@ class MLDatasetBuilder:
                 errors.append({"symbol": symbol, "error": str(exc)[:160]})
 
         if not frames:
+            history_days = (end_dt - start_dt).days
             return {
                 "df": pd.DataFrame(),
                 "samples": [],
@@ -129,6 +130,18 @@ class MLDatasetBuilder:
                     "symbol_count": len(symbols),
                     "valid_symbol_count": 0,
                     "sample_count": 0,
+                    "train_start": start_text,
+                    "train_end": end_text,
+                    "history_days": history_days,
+                    "minimum_training_standard": {
+                        "min_symbols": 1500,
+                        "min_history_days": 730,
+                        "min_samples": 100_000,
+                        "meets_symbol_count": False,
+                        "meets_history_span": history_days >= 730,
+                        "meets_sample_count": False,
+                        "passed": False,
+                    },
                     "errors": errors[:20],
                 },
             }
@@ -153,10 +166,20 @@ class MLDatasetBuilder:
                 "sample_count": len(dataset),
                 "train_start": start_text,
                 "train_end": end_text,
+                "history_days": (end_dt - start_dt).days,
                 "horizon_days": horizon_days,
                 "target_return_pct": target_return_pct,
                 "drawdown_pct": drawdown_pct,
                 "sample_step": sample_step,
+                "minimum_training_standard": {
+                    "min_symbols": 1500,
+                    "min_history_days": 730,
+                    "min_samples": 100_000,
+                    "meets_symbol_count": len(frames) >= 1500,
+                    "meets_history_span": (end_dt - start_dt).days >= 730,
+                    "meets_sample_count": len(dataset) >= 100_000,
+                    "passed": len(frames) >= 1500 and (end_dt - start_dt).days >= 730 and len(dataset) >= 100_000,
+                },
                 "errors": errors[:20],
             },
         }
