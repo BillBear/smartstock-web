@@ -167,6 +167,33 @@ class CoachStore:
             CREATE INDEX IF NOT EXISTS idx_pick_snapshots_symbol_time
                 ON pick_snapshots(symbol, trade_date DESC);
 
+            CREATE TABLE IF NOT EXISTS market_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                trade_date TEXT NOT NULL,
+                source TEXT NOT NULL,
+                snapshot_count INTEGER NOT NULL,
+                quality_status TEXT NOT NULL,
+                meta_json TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_market_snapshots_trade_date
+                ON market_snapshots(trade_date DESC, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS market_snapshot_items (
+                id BIGSERIAL PRIMARY KEY,
+                snapshot_id TEXT NOT NULL,
+                trade_date TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                name TEXT,
+                industry TEXT,
+                item_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_market_snapshot_items_snapshot
+                ON market_snapshot_items(snapshot_id, symbol);
+            CREATE INDEX IF NOT EXISTS idx_market_snapshot_items_trade_date
+                ON market_snapshot_items(trade_date DESC, symbol);
+
             CREATE TABLE IF NOT EXISTS news_events (
                 id BIGSERIAL PRIMARY KEY,
                 source TEXT NOT NULL,
@@ -359,6 +386,33 @@ class CoachStore:
                 ON pick_snapshots(user_id, trade_date DESC);
             CREATE INDEX IF NOT EXISTS idx_pick_snapshots_symbol_time
                 ON pick_snapshots(symbol, trade_date DESC);
+
+            CREATE TABLE IF NOT EXISTS market_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                trade_date TEXT NOT NULL,
+                source TEXT NOT NULL,
+                snapshot_count INTEGER NOT NULL,
+                quality_status TEXT NOT NULL,
+                meta_json TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_market_snapshots_trade_date
+                ON market_snapshots(trade_date DESC, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS market_snapshot_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_id TEXT NOT NULL,
+                trade_date TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                name TEXT,
+                industry TEXT,
+                item_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_market_snapshot_items_snapshot
+                ON market_snapshot_items(snapshot_id, symbol);
+            CREATE INDEX IF NOT EXISTS idx_market_snapshot_items_trade_date
+                ON market_snapshot_items(trade_date DESC, symbol);
 
             CREATE TABLE IF NOT EXISTS news_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -967,6 +1021,157 @@ class CoachStore:
             "risk_level": first.get("risk_level") or risk_level or "medium",
             "picks": limited,
         }
+
+    def save_market_snapshot(
+        self,
+        trade_date: str,
+        source: str,
+        items: List[Dict[str, Any]],
+        min_reliable_count: int = 500,
+        created_at: Optional[str] = None,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Persist a full-market snapshot for later diagnostics and replay."""
+        normalized_trade_date = self._normalize_trade_date(trade_date) or datetime.now().strftime("%Y-%m-%d")
+        normalized_source = str(source or "a_share_snapshot").strip() or "a_share_snapshot"
+        snapshot_id = f"{normalized_trade_date}:{normalized_source}"
+        created_at_text = str(created_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        item_rows: List[Dict[str, Any]] = []
+        for item in items or []:
+            symbol = str(item.get("symbol") or item.get("code") or "").strip()
+            if len(symbol) != 6 or not symbol.isdigit():
+                continue
+            item_rows.append(
+                {
+                    "snapshot_id": snapshot_id,
+                    "trade_date": normalized_trade_date,
+                    "symbol": symbol,
+                    "name": str(item.get("name") or symbol),
+                    "industry": str(item.get("industry") or "未知行业"),
+                    "item_json": json.dumps(item, ensure_ascii=False),
+                    "created_at": created_at_text,
+                }
+            )
+
+        snapshot_count = len(item_rows)
+        reliable_floor = max(1, int(min_reliable_count or 500))
+        quality_status = "ok" if snapshot_count >= reliable_floor else "sparse"
+        meta_payload = {
+            "snapshot_count": snapshot_count,
+            "min_reliable_count": reliable_floor,
+            "source": normalized_source,
+            "is_reliable": quality_status == "ok",
+            **(meta or {}),
+        }
+        snapshot_row = {
+            "snapshot_id": snapshot_id,
+            "trade_date": normalized_trade_date,
+            "source": normalized_source,
+            "snapshot_count": snapshot_count,
+            "quality_status": quality_status,
+            "meta_json": json.dumps(meta_payload, ensure_ascii=False),
+            "created_at": created_at_text,
+        }
+
+        with self._lock:
+            with self.engine.begin() as conn:
+                if self._is_postgres:
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO market_snapshots (
+                                snapshot_id, trade_date, source, snapshot_count, quality_status, meta_json, created_at
+                            ) VALUES (
+                                :snapshot_id, :trade_date, :source, :snapshot_count, :quality_status, :meta_json, :created_at
+                            )
+                            ON CONFLICT (snapshot_id) DO UPDATE SET
+                                trade_date=excluded.trade_date,
+                                source=excluded.source,
+                                snapshot_count=excluded.snapshot_count,
+                                quality_status=excluded.quality_status,
+                                meta_json=excluded.meta_json,
+                                created_at=excluded.created_at
+                            """
+                        ),
+                        snapshot_row,
+                    )
+                else:
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO market_snapshots (
+                                snapshot_id, trade_date, source, snapshot_count, quality_status, meta_json, created_at
+                            ) VALUES (
+                                :snapshot_id, :trade_date, :source, :snapshot_count, :quality_status, :meta_json, :created_at
+                            )
+                            ON CONFLICT(snapshot_id) DO UPDATE SET
+                                trade_date=excluded.trade_date,
+                                source=excluded.source,
+                                snapshot_count=excluded.snapshot_count,
+                                quality_status=excluded.quality_status,
+                                meta_json=excluded.meta_json,
+                                created_at=excluded.created_at
+                            """
+                        ),
+                        snapshot_row,
+                    )
+                conn.execute(text("DELETE FROM market_snapshot_items WHERE snapshot_id = :snapshot_id"), {"snapshot_id": snapshot_id})
+                if item_rows:
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO market_snapshot_items (
+                                snapshot_id, trade_date, symbol, name, industry, item_json, created_at
+                            ) VALUES (
+                                :snapshot_id, :trade_date, :symbol, :name, :industry, :item_json, :created_at
+                            )
+                            """
+                        ),
+                        item_rows,
+                    )
+        return {
+            "snapshot_id": snapshot_id,
+            "trade_date": normalized_trade_date,
+            "source": normalized_source,
+            "snapshot_count": snapshot_count,
+            "quality_status": quality_status,
+            "created_at": created_at_text,
+            "meta": meta_payload,
+        }
+
+    def get_latest_valid_market_snapshot(
+        self,
+        trade_date: Optional[str] = None,
+        min_count: int = 500,
+    ) -> Optional[Dict[str, Any]]:
+        normalized_trade_date = self._normalize_trade_date(trade_date) if trade_date else None
+        params: Dict[str, Any] = {"min_count": max(1, int(min_count or 500))}
+        clauses = ["snapshot_count >= :min_count"]
+        if normalized_trade_date:
+            clauses.append("trade_date <= :trade_date")
+            params["trade_date"] = normalized_trade_date
+        with self._lock:
+            with self.engine.connect() as conn:
+                row = conn.execute(
+                    text(
+                        f"""
+                        SELECT snapshot_id, trade_date, source, snapshot_count, quality_status, meta_json, created_at
+                        FROM market_snapshots
+                        WHERE {' AND '.join(clauses)}
+                        ORDER BY trade_date DESC, created_at DESC
+                        LIMIT 1
+                        """
+                    ),
+                    params,
+                ).first()
+        data = self._row_to_dict(row)
+        if not data:
+            return None
+        try:
+            data["meta"] = json.loads(data.get("meta_json") or "{}")
+        except Exception:
+            data["meta"] = {}
+        return data
 
     def get_pick_snapshot(self, pick_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         clauses = ["pick_id = :pick_id"]

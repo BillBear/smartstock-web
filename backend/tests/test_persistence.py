@@ -143,6 +143,31 @@ class CoachStorePersistenceTests(unittest.TestCase):
 
         self.assertEqual(dates, ["2026-06-18", "2026-06-17"])
 
+    def test_market_snapshot_round_trips_latest_valid_snapshot(self):
+        saved = self.store.save_market_snapshot(
+            trade_date="20260701",
+            source="a_share_snapshot",
+            items=[
+                {"symbol": "000001", "name": "平安银行", "industry": "银行", "price": 10.2},
+                {"symbol": "600000", "name": "浦发银行", "industry": "银行", "price": 8.4},
+            ],
+            min_reliable_count=2,
+            created_at="2026-07-01 10:30:00",
+            meta={"created_by": "unit-test"},
+        )
+
+        latest = self.store.get_latest_valid_market_snapshot(trade_date="2026-07-01", min_count=2)
+
+        self.assertEqual(saved["snapshot_id"], "2026-07-01:a_share_snapshot")
+        self.assertEqual(saved["snapshot_count"], 2)
+        self.assertEqual(saved["quality_status"], "ok")
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest["trade_date"], "2026-07-01")
+        self.assertEqual(latest["snapshot_count"], 2)
+        self.assertEqual(latest["source"], "a_share_snapshot")
+        self.assertEqual(latest["created_at"], "2026-07-01 10:30:00")
+        self.assertEqual(latest["meta"]["created_by"], "unit-test")
+
 
 if __name__ == "__main__":
     unittest.main()

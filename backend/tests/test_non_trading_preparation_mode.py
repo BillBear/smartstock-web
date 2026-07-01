@@ -231,6 +231,37 @@ class NonTradingPreparationModeTests(unittest.TestCase):
         self.assertEqual(result["snapshot_dates"], ["2026-06-18"])
         self.assertEqual(result["top_picks"][0]["symbol"], "000001")
 
+    def test_cached_only_exposes_same_day_market_snapshot_diagnostics(self):
+        self.save_snapshot("2026-07-01")
+        self.store.save_market_snapshot(
+            trade_date="2026-07-01",
+            source="a_share_snapshot",
+            items=[
+                {"symbol": "000001", "name": "平安银行", "industry": "银行", "price": 10.2},
+                {"symbol": "000333", "name": "美的集团", "industry": "家电", "price": 70.5},
+                {"symbol": "600000", "name": "浦发银行", "industry": "银行", "price": 8.4},
+            ],
+            min_reliable_count=3,
+            created_at="2026-07-01 10:30:00",
+        )
+
+        result = self.service.get_cached_today_picks(
+            max_count=5,
+            user_id="default",
+            risk_level="medium",
+            requested_date="2026-07-01",
+        )
+
+        meta = result["universe_meta"]
+        self.assertEqual(meta["source"], "pick_snapshots")
+        self.assertEqual(meta["candidate_count"], 2)
+        self.assertEqual(meta["total_universe_count"], 3)
+        self.assertEqual(meta["market_snapshot_trade_date"], "2026-07-01")
+        self.assertEqual(meta["market_snapshot_source"], "a_share_snapshot")
+        self.assertEqual(meta["market_snapshot_quality_status"], "ok")
+        self.assertEqual(meta["data_coverage_status"], "full_snapshot_available")
+        self.assertEqual(meta["full_refresh_at"], "2026-07-01 10:30:00")
+
 
 class RefreshEndpointGuardTests(unittest.TestCase):
     def test_non_trading_refresh_is_rejected_without_generating_picks(self):

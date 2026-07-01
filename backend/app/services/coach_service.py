@@ -294,6 +294,59 @@ class CoachService:
             return self.store.list_pick_snapshot_dates(user_id=user_id, limit=limit)
         return []
 
+    def _market_snapshot_diagnostics(self, trade_date: Optional[str]) -> Dict[str, Any]:
+        target_date = self._normalize_trade_date(trade_date)
+        if not target_date or not self.store or not hasattr(self.store, "get_latest_valid_market_snapshot"):
+            return {"data_coverage_status": "market_snapshot_unavailable"}
+        try:
+            snapshot = self.store.get_latest_valid_market_snapshot(trade_date=target_date, min_count=1)
+        except Exception:
+            return {"data_coverage_status": "market_snapshot_unavailable"}
+        if not snapshot:
+            return {"data_coverage_status": "market_snapshot_missing"}
+
+        snapshot_date = self._normalize_trade_date(snapshot.get("trade_date"))
+        snapshot_count = int(snapshot.get("snapshot_count") or 0)
+        diagnostic = {
+            "latest_market_snapshot_trade_date": snapshot_date,
+            "latest_market_snapshot_count": snapshot_count,
+            "latest_market_snapshot_source": snapshot.get("source"),
+            "latest_market_snapshot_created_at": snapshot.get("created_at"),
+        }
+        if snapshot_date != target_date:
+            diagnostic["data_coverage_status"] = "market_snapshot_missing"
+            return diagnostic
+
+        quality_status = str(snapshot.get("quality_status") or "")
+        diagnostic.update(
+            {
+                "data_coverage_status": "full_snapshot_available" if quality_status == "ok" else "sparse_market_snapshot",
+                "total_universe_count": snapshot_count,
+                "market_snapshot_trade_date": snapshot_date,
+                "market_snapshot_source": snapshot.get("source"),
+                "market_snapshot_quality_status": quality_status,
+                "market_snapshot_created_at": snapshot.get("created_at"),
+                "full_refresh_at": snapshot.get("created_at"),
+            }
+        )
+        return diagnostic
+
+    def _cached_universe_meta(
+        self,
+        picks: List[Dict[str, Any]],
+        max_count: int,
+        snapshot_result: Dict[str, Any],
+        effective_trade_date: Optional[str],
+    ) -> Dict[str, Any]:
+        meta = {
+            "source": "pick_snapshots",
+            "candidate_count": len(picks),
+            "display_limit": max_count,
+            "risk_snapshot_fallback": snapshot_result.get("risk_snapshot_fallback"),
+        }
+        meta.update(self._market_snapshot_diagnostics(effective_trade_date))
+        return meta
+
     def _is_recommendation_trading_day(self, date_text: Optional[str]) -> bool:
         target_date = self._normalize_trade_date(date_text)
         if not target_date:
@@ -473,6 +526,18 @@ class CoachService:
 
         entry_map = {item["symbol"]: item for item in items if item.get("symbol")}
         refresh_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if self.store and hasattr(self.store, "save_market_snapshot"):
+            try:
+                self.store.save_market_snapshot(
+                    trade_date=datetime.now().strftime("%Y-%m-%d"),
+                    source="a_share_snapshot",
+                    items=items,
+                    min_reliable_count=500,
+                    created_at=refresh_at,
+                    meta={"created_by": "CoachService._get_universe_snapshot"},
+                )
+            except Exception:
+                logger.exception("保存全A市场快照失败")
         with self._universe_lock:
             self._universe_state["entries"] = items
             self._universe_state["entry_map"] = entry_map
@@ -538,6 +603,7 @@ class CoachService:
                 "candidates": fallback,
                 "meta": {
                     "source": "fallback_curated",
+                    "data_coverage_status": "market_snapshot_unavailable",
                     "total_universe_count": 0,
                     "after_prefilter_count": len(fallback),
                     "candidate_count": len(fallback),
@@ -648,6 +714,7 @@ class CoachService:
             fallback = self._curated_fallback_candidates(target_candidate_size)
             meta = {
                 "source": "fallback_curated_after_prefilter",
+                "data_coverage_status": "market_snapshot_unavailable",
                 "total_universe_count": len(entries),
                 "after_prefilter_count": len(filtered),
                 "candidate_count": len(fallback),
@@ -663,6 +730,7 @@ class CoachService:
 
         meta = {
             "source": "a_share_snapshot",
+            "data_coverage_status": "full_snapshot_available" if len(entries) >= 500 else "sparse_market_snapshot",
             "total_universe_count": len(entries),
             "after_prefilter_count": len(filtered),
             "candidate_count": len(refreshed_candidates),
@@ -671,6 +739,10 @@ class CoachService:
             "rules": {**rules, "strategy_target_size": target_candidate_size, "industry_cap_effective": dynamic_industry_cap},
             "full_refresh_at": full_refresh_at,
             "incremental_refresh_at": incremental_refresh_at,
+            "market_snapshot_trade_date": datetime.now().strftime("%Y-%m-%d"),
+            "market_snapshot_source": "a_share_snapshot",
+            "market_snapshot_quality_status": "ok" if len(entries) >= 500 else "sparse",
+            "market_snapshot_created_at": full_refresh_at,
         }
         with self._universe_lock:
             self._universe_state["last_meta"] = meta
@@ -2195,12 +2267,7 @@ class CoachService:
             "updated_at": snapshot_result.get("updated_at"),
             "market_state": self._market_state_from_cached_picks(picks),
             "risk_profile": risk_profile,
-            "universe_meta": {
-                "source": "pick_snapshots",
-                "candidate_count": len(picks),
-                "display_limit": max_count,
-                "risk_snapshot_fallback": snapshot_result.get("risk_snapshot_fallback"),
-            },
+            "universe_meta": self._cached_universe_meta(picks, max_count, snapshot_result, effective_trade_date),
             "strategy_health": {
                 "status": "cached_snapshot",
                 "summary": "当前候选池来自已保存快照，未重新运行策略。",
@@ -2246,6 +2313,8 @@ class CoachService:
             "snapshot_dates": data.get("snapshot_dates") or [],
             "risk_profile": data.get("risk_profile") or {},
             "market_state": data.get("market_state") or {},
+            "universe_meta": data.get("universe_meta") or {},
+            "strategy_context": data.get("strategy_context") or {},
             "trade_plan": data.get("trade_plan") or {},
             "top_picks": data.get("picks") or [],
             "pick_count": len(data.get("picks") or []),
