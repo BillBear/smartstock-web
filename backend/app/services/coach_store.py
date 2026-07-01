@@ -1174,6 +1174,8 @@ class CoachStore:
         self,
         user_id: str = "default",
         trade_date: Optional[str] = None,
+        strategy_code: Optional[str] = None,
+        risk_level: Optional[str] = None,
         limit: int = 200,
     ) -> List[Dict[str, Any]]:
         """Return the latest persisted recommendation batch for a date."""
@@ -1183,12 +1185,18 @@ class CoachStore:
         if trade_date:
             date_clause = "AND trade_date = :trade_date"
             params["trade_date"] = str(trade_date)
+        strategy_clause = ""
+        if strategy_code:
+            strategy_clause = "AND strategy_code = :strategy_code"
+            params["strategy_code"] = str(strategy_code)
+        # risk_level is not persisted in pick_snapshots; kept for interface compatibility
+        _ = risk_level
 
         latest_date_sql = text(
             f"""
             SELECT trade_date
             FROM pick_snapshots
-            WHERE user_id = :user_id {date_clause}
+            WHERE user_id = :user_id {date_clause} {strategy_clause}
             GROUP BY trade_date
             ORDER BY trade_date DESC
             LIMIT 1
@@ -1202,28 +1210,30 @@ class CoachStore:
                 latest_trade_date = str(row._mapping["trade_date"])
                 batch_row = conn.execute(
                     text(
-                        """
+                        f"""
                         SELECT created_at
                         FROM pick_snapshots
                         WHERE user_id = :user_id AND trade_date = :trade_date
+                              {strategy_clause}
                         GROUP BY created_at
                         ORDER BY created_at DESC
                         LIMIT 1
                         """
                     ),
-                    {"user_id": user_id, "trade_date": latest_trade_date},
+                    {"user_id": user_id, "trade_date": latest_trade_date, "strategy_code": params.get("strategy_code")},
                 ).first()
                 if not batch_row:
                     return []
                 latest_created_at = str(batch_row._mapping["created_at"])
                 rows = conn.execute(
                     text(
-                        """
+                        f"""
                         SELECT *
                         FROM pick_snapshots
                         WHERE user_id = :user_id
                             AND trade_date = :trade_date
                             AND created_at = :created_at
+                            {strategy_clause}
                         ORDER BY symbol
                         LIMIT :limit
                         """
@@ -1232,6 +1242,7 @@ class CoachStore:
                         "user_id": user_id,
                         "trade_date": latest_trade_date,
                         "created_at": latest_created_at,
+                        "strategy_code": params.get("strategy_code"),
                         "limit": result_limit,
                     },
                 ).fetchall()
