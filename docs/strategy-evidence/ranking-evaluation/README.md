@@ -29,9 +29,11 @@ python3 scripts/run_ranking_evaluation.py \
   --fixture smoke
 ```
 
-Generated CSV/JSON files are reproducibility artifacts. Do not commit large
-generated report directories unless a reviewer explicitly requests evidence
-artifacts for a specific strategy review.
+Generated CSV/JSON files under `ranking-evaluation/runs/` are local
+reproducibility artifacts and are ignored by default. Do not commit generated
+report directories unless a reviewer explicitly requests evidence artifacts for
+a specific strategy review; prefer a concise Markdown evidence summary for
+normal PR review.
 
 ## Production Evidence Gate
 

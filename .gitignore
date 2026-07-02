@@ -25,6 +25,7 @@ postgres/data/
 backend/data/*.db
 backend/data/*.sqlite*
 backend/data/ml_models/
+docs/strategy-evidence/ranking-evaluation/runs/
 
 # Local secrets
 .env
