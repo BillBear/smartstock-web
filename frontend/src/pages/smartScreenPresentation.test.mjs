@@ -12,8 +12,6 @@ assert.deepEqual(
     'stock',
     'decision',
     'user_action',
-    'up_prob',
-    'dd_prob',
     'expected_return_pct',
     'position_pct',
     'strategy_score',
@@ -21,6 +19,8 @@ assert.deepEqual(
   ],
 )
 
+assert.equal(RANKING_TABLE_COLUMN_KEYS.includes('up_prob'), false)
+assert.equal(RANKING_TABLE_COLUMN_KEYS.includes('dd_prob'), false)
 assert.equal(RANKING_TABLE_COLUMN_KEYS.includes('model_probability'), false)
 assert.equal(RANKING_TABLE_COLUMN_KEYS.includes('news_score'), false)
 

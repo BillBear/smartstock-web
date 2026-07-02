@@ -135,6 +135,16 @@ export const coachApi = {
     return api.get(`/coach/symbol-strategy/${symbol}`, { params })
   },
 
+  // 候选池漏斗诊断
+  getUniverseFunnelDiagnostics: (params) => {
+    return api.get('/coach/diagnostics/universe-funnel', { params })
+  },
+
+  // 单票候选池漏斗诊断
+  getUniverseFunnelSymbolDiagnostic: (symbol, params) => {
+    return api.get(`/coach/diagnostics/universe-funnel/symbol/${symbol}`, { params })
+  },
+
   // 今日推荐
   getTodayPicks: (params) => {
     return api.get('/coach/picks/today', { params })

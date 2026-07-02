@@ -57,3 +57,23 @@ export function getSmartScreenDiagnostic(result = {}) {
     decisionText,
   }
 }
+
+export function getUniverseFunnelSummary(funnel = {}) {
+  const fullMarket = Number(funnel.universe_count || 0)
+  const prefilter = Number(funnel.prefilter_count || 0)
+  const recall = Number(funnel.recall_count || 0)
+  const deepAnalysis = Number(funnel.deep_analysis_count || 0)
+  const finalOutput = Number(funnel.final_pick_count || 0)
+  const summaryText = fullMarket
+    ? `候选漏斗：${fullMarket} -> ${prefilter} -> ${recall} -> ${deepAnalysis} -> ${finalOutput}`
+    : '候选漏斗暂无数据'
+
+  return {
+    fullMarket,
+    prefilter,
+    recall,
+    deepAnalysis,
+    finalOutput,
+    summaryText,
+  }
+}

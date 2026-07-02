@@ -20,7 +20,7 @@ import {
 import { InfoCircleOutlined, ReloadOutlined, ThunderboltOutlined, TrophyOutlined } from '@ant-design/icons'
 import { coachApi } from '../services/api'
 import MarketFactorExplain from '../components/MarketFactorExplain'
-import { getSmartScreenDiagnostic, shouldRefreshCurrentTradingPicks } from './smartScreenData.mjs'
+import { getSmartScreenDiagnostic, getUniverseFunnelSummary, shouldRefreshCurrentTradingPicks } from './smartScreenData.mjs'
 import { getPickActionPresentation, getRankPresentation } from './smartScreenPresentation.mjs'
 import './SmartScreen.css'
 
@@ -134,6 +134,7 @@ const SmartScreen = () => {
   const [error, setError] = useState('')
   const [riskLevel, setRiskLevel] = useState('medium')
   const [result, setResult] = useState(null)
+  const [funnelDiagnostics, setFunnelDiagnostics] = useState(null)
   const [loadedAt, setLoadedAt] = useState('')
   const [selectedSnapshotDate, setSelectedSnapshotDate] = useState(null)
   const [detailOpen, setDetailOpen] = useState(false)
@@ -166,9 +167,15 @@ const SmartScreen = () => {
         params.trade_date = targetSnapshotDate
         summaryParams.trade_date = targetSnapshotDate
       }
-      const [summary, data] = await Promise.all([
+      const [summary, data, funnel] = await Promise.all([
         coachApi.getSmartScreenSummary(summaryParams),
         coachApi.getTodayPicks(params),
+        coachApi.getUniverseFunnelDiagnostics({
+          user_id: 'default',
+          risk_level: effectiveRisk,
+          trade_date: targetSnapshotDate || undefined,
+          limit: 200,
+        }).catch(() => null),
       ])
       if (!mountedRef.current || reqId !== latestLoadReqRef.current) return
       const combinedResult = {
@@ -177,8 +184,10 @@ const SmartScreen = () => {
         calendar_context: data?.calendar_context || summary?.calendar_context,
         snapshot_dates: data?.snapshot_dates || summary?.snapshot_dates || [],
         trade_plan: data?.trade_plan || summary?.trade_plan || {},
+        funnel_diagnostics: funnel || null,
       }
       setResult(combinedResult)
+      setFunnelDiagnostics(funnel || null)
       const calendarContext = combinedResult.calendar_context || {}
       const refreshKey = calendarContext.requested_date || calendarContext.effective_trade_date || ''
       const canRefreshCurrent = (calendarContext.actions || {}).can_refresh !== false
@@ -232,6 +241,10 @@ const SmartScreen = () => {
   const tradePlan = result?.trade_plan || {}
   const planMeta = PLAN_ACTION_META[tradePlan.primary_action] || PLAN_ACTION_META.watch
   const diagnostic = useMemo(() => getSmartScreenDiagnostic(result), [result])
+  const funnelSummary = useMemo(
+    () => getUniverseFunnelSummary(funnelDiagnostics || result?.funnel_diagnostics || {}),
+    [funnelDiagnostics, result]
+  )
   const corePicks = useMemo(
     () => pickList.filter((item) => ['A', 'B'].includes(item?.decision?.grade)).slice(0, 3),
     [pickList]
@@ -406,24 +419,6 @@ const SmartScreen = () => {
         if (!meta) return <Tag>未执行</Tag>
         return <Tag color={meta.color}>{meta.text}</Tag>
       },
-    },
-    {
-      title: '上涨概率',
-      dataIndex: 'up_prob',
-      key: 'up_prob',
-      width: 130,
-      render: (v, row) => (
-        <Tooltip title={row?.probability_model?.message || '当前为规则代理概率，尚未经过历史模型校准'}>
-          <span style={{ color: '#ff7875' }}>{(Number(v || 0) * 100).toFixed(1)}%</span>
-        </Tooltip>
-      ),
-    },
-    {
-      title: '回撤概率',
-      dataIndex: 'dd_prob',
-      key: 'dd_prob',
-      width: 130,
-      render: (v) => <span style={{ color: '#95de64' }}>{(Number(v || 0) * 100).toFixed(1)}%</span>,
     },
     {
       title: '预期收益',
@@ -747,6 +742,29 @@ const SmartScreen = () => {
           />
         )}
       </Card>
+
+      {funnelDiagnostics && (
+        <Card className="info-card" variant="borderless" style={{ marginBottom: 16 }}>
+          <div className="ranking-card-title">
+            <h3>候选漏斗诊断</h3>
+            <span>只读诊断，不触发刷新，不改变选股结果。</span>
+          </div>
+          <Space wrap>
+            <Tag color="geekblue">全A {funnelSummary.fullMarket || '-'}</Tag>
+            <Tag color="cyan">基础过滤 {funnelSummary.prefilter || '-'}</Tag>
+            <Tag color="green">召回候选 {funnelSummary.recall || '-'}</Tag>
+            <Tag color="lime">深度分析 {funnelSummary.deepAnalysis || '-'}</Tag>
+            <Tag color="gold">最终输出 {funnelSummary.finalOutput || '-'}</Tag>
+          </Space>
+          <Alert
+            style={{ marginTop: 12 }}
+            type={funnelSummary.fullMarket >= 5000 ? 'info' : 'warning'}
+            showIcon
+            message={funnelSummary.summaryText}
+            description="如果强势股票未出现，应优先查看单票漏斗原因，而不是直接调整策略参数。"
+          />
+        </Card>
+      )}
 
       <Card className="ranking-card" variant="borderless">
         <div className="ranking-card-title">

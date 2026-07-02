@@ -3,8 +3,6 @@ export const RANKING_TABLE_COLUMN_KEYS = [
   'stock',
   'decision',
   'user_action',
-  'up_prob',
-  'dd_prob',
   'expected_return_pct',
   'position_pct',
   'strategy_score',

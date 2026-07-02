@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   getSmartScreenDiagnostic,
+  getUniverseFunnelSummary,
   shouldRefreshCurrentTradingPicks,
 } from '../src/pages/smartScreenData.mjs'
 
@@ -114,4 +115,21 @@ test('diagnostic warns when deep analysis times out and snapshot fallback is use
   assert.match(diagnostic.coverageText, /深度分析超时/)
   assert.match(diagnostic.coverageText, /72/)
   assert.match(diagnostic.coverageText, /30/)
+})
+
+test('funnel summary reports compression from full market to final output', () => {
+  const summary = getUniverseFunnelSummary({
+    universe_count: 5210,
+    prefilter_count: 1975,
+    recall_count: 220,
+    deep_analysis_count: 72,
+    final_pick_count: 17,
+  })
+
+  assert.equal(summary.fullMarket, 5210)
+  assert.equal(summary.prefilter, 1975)
+  assert.equal(summary.recall, 220)
+  assert.equal(summary.deepAnalysis, 72)
+  assert.equal(summary.finalOutput, 17)
+  assert.match(summary.summaryText, /5210 -> 1975 -> 220 -> 72 -> 17/)
 })
