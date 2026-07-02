@@ -215,6 +215,11 @@ export const coachApi = {
     return api.get(`/coach/strategy/${strategyCode}/evidence`, { params })
   },
 
+  // 最新候选池排序质量评估
+  getRankingEvaluationLatest: () => {
+    return api.get('/coach/ranking-evaluation/latest')
+  },
+
   // 提交回测
   runBacktest: (data, userId = 'default') => {
     return api.post('/coach/backtest/run', data, { params: { user_id: userId } })

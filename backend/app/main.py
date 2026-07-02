@@ -32,7 +32,7 @@ from app.models.schemas import (
     ErrorResponse
 )
 from app.evaluation.ranking_fixtures import smoke_fixture_rows
-from app.evaluation.ranking_latest import load_latest_ranking_summary
+from app.evaluation.ranking_latest import annotate_ranking_evidence_readiness, load_latest_ranking_summary
 from app.evaluation.ranking_labels import DEFAULT_STRONG_LABEL_CONFIG
 from app.evaluation.ranking_replay import RankingReplayService
 from app.evaluation.ranking_report import build_ranking_report
@@ -284,7 +284,7 @@ def _run_ranking_evaluation_report(request: CoachRankingEvaluationRunRequest) ->
         coverage=coverage,
         execution_config=execution_config,
     )
-    return clean_nan_values(summary)
+    return clean_nan_values(annotate_ranking_evidence_readiness(summary))
 
 
 def _positive_int_list(values: list, name: str, default: list) -> list:

@@ -77,3 +77,45 @@ export function getUniverseFunnelSummary(funnel = {}) {
     summaryText,
   }
 }
+
+export function getRankingEvidenceStatus(evidence = {}) {
+  const available = Boolean(evidence?.available)
+  const readiness = evidence?.evidence_readiness || {}
+  const productionEvidence = Boolean(evidence?.production_evidence)
+  const covered = Number(readiness.covered_date_count || 0)
+  const required = Number(readiness.required_covered_date_count || 30)
+  const blockingReasons = Array.isArray(readiness.blocking_reasons) ? readiness.blocking_reasons : []
+  const coverageText = `${covered}/${required}`
+
+  if (!available) {
+    return {
+      alertType: 'warning',
+      tagColor: 'orange',
+      title: '排序证据不足',
+      description: evidence?.message || '尚未生成真实历史 ranking evaluation 报告，当前排序只能作为研究观察。',
+      coverageText,
+      blockingReasons,
+    }
+  }
+
+  if (!productionEvidence) {
+    const reasonText = blockingReasons.length ? `阻塞原因：${blockingReasons.join('、')}` : '阻塞原因：覆盖或样本不足'
+    return {
+      alertType: 'warning',
+      tagColor: 'orange',
+      title: '排序证据不足',
+      description: `历史覆盖 ${coverageText}，${reasonText}。在证据通过前，不应把排序结果解释为高置信交易计划。`,
+      coverageText,
+      blockingReasons,
+    }
+  }
+
+  return {
+    alertType: 'success',
+    tagColor: 'green',
+    title: '排序证据已通过基础覆盖门槛',
+    description: `历史覆盖 ${coverageText}，当前报告可作为排序质量证据；仍需结合回测和样本外指标审查。`,
+    coverageText,
+    blockingReasons,
+  }
+}

@@ -20,7 +20,12 @@ import {
 import { InfoCircleOutlined, ReloadOutlined, ThunderboltOutlined, TrophyOutlined } from '@ant-design/icons'
 import { coachApi } from '../services/api'
 import MarketFactorExplain from '../components/MarketFactorExplain'
-import { getSmartScreenDiagnostic, getUniverseFunnelSummary, shouldRefreshCurrentTradingPicks } from './smartScreenData.mjs'
+import {
+  getRankingEvidenceStatus,
+  getSmartScreenDiagnostic,
+  getUniverseFunnelSummary,
+  shouldRefreshCurrentTradingPicks,
+} from './smartScreenData.mjs'
 import { getPickActionPresentation, getRankPresentation } from './smartScreenPresentation.mjs'
 import './SmartScreen.css'
 
@@ -135,6 +140,7 @@ const SmartScreen = () => {
   const [riskLevel, setRiskLevel] = useState('medium')
   const [result, setResult] = useState(null)
   const [funnelDiagnostics, setFunnelDiagnostics] = useState(null)
+  const [rankingEvidence, setRankingEvidence] = useState(null)
   const [loadedAt, setLoadedAt] = useState('')
   const [selectedSnapshotDate, setSelectedSnapshotDate] = useState(null)
   const [detailOpen, setDetailOpen] = useState(false)
@@ -167,7 +173,7 @@ const SmartScreen = () => {
         params.trade_date = targetSnapshotDate
         summaryParams.trade_date = targetSnapshotDate
       }
-      const [summary, data, funnel] = await Promise.all([
+      const [summary, data, funnel, rankingEvidenceLatest] = await Promise.all([
         coachApi.getSmartScreenSummary(summaryParams),
         coachApi.getTodayPicks(params),
         coachApi.getUniverseFunnelDiagnostics({
@@ -176,6 +182,10 @@ const SmartScreen = () => {
           trade_date: targetSnapshotDate || undefined,
           limit: 200,
         }).catch(() => null),
+        coachApi.getRankingEvaluationLatest().catch((err) => ({
+          available: false,
+          message: err?.message || '无法读取最新排序评估报告',
+        })),
       ])
       if (!mountedRef.current || reqId !== latestLoadReqRef.current) return
       const combinedResult = {
@@ -185,9 +195,11 @@ const SmartScreen = () => {
         snapshot_dates: data?.snapshot_dates || summary?.snapshot_dates || [],
         trade_plan: data?.trade_plan || summary?.trade_plan || {},
         funnel_diagnostics: funnel || null,
+        ranking_evidence: rankingEvidenceLatest || null,
       }
       setResult(combinedResult)
       setFunnelDiagnostics(funnel || null)
+      setRankingEvidence(rankingEvidenceLatest || null)
       const calendarContext = combinedResult.calendar_context || {}
       const refreshKey = calendarContext.requested_date || calendarContext.effective_trade_date || ''
       const canRefreshCurrent = (calendarContext.actions || {}).can_refresh !== false
@@ -244,6 +256,10 @@ const SmartScreen = () => {
   const funnelSummary = useMemo(
     () => getUniverseFunnelSummary(funnelDiagnostics || result?.funnel_diagnostics || {}),
     [funnelDiagnostics, result]
+  )
+  const rankingEvidenceStatus = useMemo(
+    () => getRankingEvidenceStatus(rankingEvidence || result?.ranking_evidence || {}),
+    [rankingEvidence, result]
   )
   const corePicks = useMemo(
     () => pickList.filter((item) => ['A', 'B'].includes(item?.decision?.grade)).slice(0, 3),
@@ -762,6 +778,33 @@ const SmartScreen = () => {
             showIcon
             message={funnelSummary.summaryText}
             description="如果强势股票未出现，应优先查看单票漏斗原因，而不是直接调整策略参数。"
+          />
+        </Card>
+      )}
+
+      {rankingEvidence && (
+        <Card className="info-card" variant="borderless" style={{ marginBottom: 16 }}>
+          <div className="ranking-card-title">
+            <h3>排序证据状态</h3>
+            <span>来自历史 ranking evaluation，只读展示，不改变今日候选。</span>
+          </div>
+          <Space wrap>
+            <Tag color={rankingEvidenceStatus.tagColor}>
+              {rankingEvidence?.evidence_type || 'missing'}
+            </Tag>
+            <Tag color="blue">
+              覆盖 {rankingEvidenceStatus.coverageText}
+            </Tag>
+            <Tag color={rankingEvidence?.production_evidence ? 'green' : 'orange'}>
+              {rankingEvidence?.production_evidence ? '生产证据可用' : '生产证据不足'}
+            </Tag>
+          </Space>
+          <Alert
+            style={{ marginTop: 12 }}
+            type={rankingEvidenceStatus.alertType}
+            showIcon
+            message={rankingEvidenceStatus.title}
+            description={rankingEvidenceStatus.description}
           />
         </Card>
       )}

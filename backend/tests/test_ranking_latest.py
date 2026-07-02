@@ -11,13 +11,13 @@ from app.evaluation.ranking_latest import load_latest_ranking_summary
 
 
 class RankingLatestTests(unittest.TestCase):
-    def _write_summary(self, root: Path, run_name: str, fixture):
+    def _write_summary(self, root: Path, run_name: str, fixture, coverage=None, candidate_row_count=None):
         run_dir = root / run_name
         run_dir.mkdir(parents=True)
         payload = {
             "run_id": run_name,
-            "coverage": {"fixture": fixture} if fixture else {"coverage_status": "complete"},
-            "candidate_row_count": 12 if fixture else 120,
+            "coverage": coverage or ({"fixture": fixture} if fixture else {"coverage_status": "complete", "covered_date_count": 30}),
+            "candidate_row_count": candidate_row_count if candidate_row_count is not None else (12 if fixture else 120),
         }
         path = run_dir / "ranking_summary.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
@@ -47,6 +47,53 @@ class RankingLatestTests(unittest.TestCase):
         self.assertEqual(summary["evidence_type"], "smoke_only")
         self.assertFalse(summary["production_evidence"])
         self.assertEqual(summary["latest_smoke_run_id"], "smoke-run")
+
+    def test_real_summary_with_partial_coverage_is_not_production_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_summary(
+                root,
+                "partial-real-run",
+                None,
+                coverage={
+                    "coverage_status": "partial",
+                    "covered_date_count": 8,
+                    "requested_date_count": 45,
+                },
+                candidate_row_count=88,
+            )
+
+            summary = load_latest_ranking_summary(root, include_fixture=False)
+
+        self.assertTrue(summary["available"])
+        self.assertEqual(summary["run_id"], "partial-real-run")
+        self.assertEqual(summary["evidence_type"], "real_insufficient")
+        self.assertFalse(summary["production_evidence"])
+        self.assertEqual(summary["evidence_readiness"]["status"], "insufficient")
+        self.assertIn("coverage_status_partial", summary["evidence_readiness"]["blocking_reasons"])
+        self.assertIn("covered_dates_below_30", summary["evidence_readiness"]["blocking_reasons"])
+
+    def test_real_summary_with_complete_thirty_day_coverage_is_production_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_summary(
+                root,
+                "complete-real-run",
+                None,
+                coverage={
+                    "coverage_status": "complete",
+                    "covered_date_count": 32,
+                    "requested_date_count": 32,
+                },
+                candidate_row_count=320,
+            )
+
+            summary = load_latest_ranking_summary(root, include_fixture=False)
+
+        self.assertTrue(summary["available"])
+        self.assertEqual(summary["evidence_type"], "real")
+        self.assertTrue(summary["production_evidence"])
+        self.assertEqual(summary["evidence_readiness"]["status"], "ready")
 
 
 if __name__ == "__main__":

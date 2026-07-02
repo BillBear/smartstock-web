@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  getRankingEvidenceStatus,
   getSmartScreenDiagnostic,
   getUniverseFunnelSummary,
   shouldRefreshCurrentTradingPicks,
@@ -132,4 +133,42 @@ test('funnel summary reports compression from full market to final output', () =
   assert.equal(summary.deepAnalysis, 72)
   assert.equal(summary.finalOutput, 17)
   assert.match(summary.summaryText, /5210 -> 1975 -> 220 -> 72 -> 17/)
+})
+
+test('ranking evidence status warns when latest report is insufficient', () => {
+  const status = getRankingEvidenceStatus({
+    available: true,
+    production_evidence: false,
+    evidence_type: 'real_insufficient',
+    evidence_readiness: {
+      status: 'insufficient',
+      blocking_reasons: ['coverage_status_partial', 'covered_dates_below_30'],
+      covered_date_count: 8,
+      required_covered_date_count: 30,
+    },
+  })
+
+  assert.equal(status.alertType, 'warning')
+  assert.equal(status.tagColor, 'orange')
+  assert.match(status.title, /排序证据不足/)
+  assert.match(status.description, /8\/30/)
+  assert.match(status.description, /coverage_status_partial/)
+})
+
+test('ranking evidence status marks ready reports as usable evidence', () => {
+  const status = getRankingEvidenceStatus({
+    available: true,
+    production_evidence: true,
+    evidence_type: 'real',
+    evidence_readiness: {
+      status: 'ready',
+      covered_date_count: 32,
+      required_covered_date_count: 30,
+    },
+  })
+
+  assert.equal(status.alertType, 'success')
+  assert.equal(status.tagColor, 'green')
+  assert.match(status.title, /排序证据已通过/)
+  assert.match(status.description, /32\/30/)
 })
