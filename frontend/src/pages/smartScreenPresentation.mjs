@@ -34,3 +34,12 @@ export function getPickActionPresentation(pick, canPaperBuy) {
     paperDisabledReason,
   }
 }
+
+export function getRankPresentation(rank) {
+  const numericRank = Number(rank)
+  const hasRank = Number.isFinite(numericRank) && numericRank > 0
+  return {
+    isTopRank: hasRank && numericRank <= 3,
+    rankText: hasRank ? String(numericRank) : '-',
+  }
+}

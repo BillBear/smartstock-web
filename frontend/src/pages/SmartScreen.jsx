@@ -21,7 +21,7 @@ import { InfoCircleOutlined, ReloadOutlined, ThunderboltOutlined, TrophyOutlined
 import { coachApi } from '../services/api'
 import MarketFactorExplain from '../components/MarketFactorExplain'
 import { getSmartScreenDiagnostic, shouldRefreshCurrentTradingPicks } from './smartScreenData.mjs'
-import { getPickActionPresentation } from './smartScreenPresentation.mjs'
+import { getPickActionPresentation, getRankPresentation } from './smartScreenPresentation.mjs'
 import './SmartScreen.css'
 
 const { Option } = Select
@@ -363,11 +363,15 @@ const SmartScreen = () => {
       dataIndex: 'rank_no',
       key: 'rank_no',
       width: 72,
-      render: (rank) => (
-        <div className="rank-cell">
-          {rank <= 3 ? <TrophyOutlined style={{ color: '#faad14', fontSize: 18 }} /> : <span>{rank}</span>}
-        </div>
-      ),
+      render: (rank) => {
+        const rankMeta = getRankPresentation(rank)
+        return (
+          <div className="rank-cell">
+            {rankMeta.isTopRank && <TrophyOutlined style={{ color: '#faad14', fontSize: 16 }} />}
+            <span className="rank-number">{rankMeta.rankText}</span>
+          </div>
+        )
+      },
     },
     {
       title: '股票',

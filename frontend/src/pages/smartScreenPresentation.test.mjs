@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import {
+  getRankPresentation,
   getPickActionPresentation,
   RANKING_TABLE_COLUMN_KEYS,
 } from './smartScreenPresentation.mjs'
@@ -72,5 +73,29 @@ assert.deepEqual(
     canShowPaperAction: false,
     paperActionLabel: '模拟买入',
     paperDisabledReason: '非交易日不生成交易计划，不能模拟验证',
+  },
+)
+
+assert.deepEqual(
+  getRankPresentation(1),
+  {
+    isTopRank: true,
+    rankText: '1',
+  },
+)
+
+assert.deepEqual(
+  getRankPresentation(4),
+  {
+    isTopRank: false,
+    rankText: '4',
+  },
+)
+
+assert.deepEqual(
+  getRankPresentation(null),
+  {
+    isTopRank: false,
+    rankText: '-',
   },
 )

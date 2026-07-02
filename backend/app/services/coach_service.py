@@ -1629,6 +1629,116 @@ class CoachService:
             **ml_enrichment,
         }
 
+    def _build_degraded_pick_from_snapshot_row(
+        self,
+        row: Dict[str, Any],
+        risk_profile: Dict[str, Any],
+        market_state: Dict[str, Any],
+        strategy_code: str,
+    ) -> Optional[Dict[str, Any]]:
+        symbol = str(row.get("symbol") or "").strip()
+        if len(symbol) != 6 or not symbol.isdigit():
+            return None
+
+        trade_date = datetime.now().strftime("%Y-%m-%d")
+        price = self._safe_float(row.get("price") or row.get("close") or row.get("open"), 0)
+        if price <= 0:
+            return None
+
+        pre_score = self._clamp(self._safe_float(row.get("pre_score"), 50.0), 0, 100)
+        amount_yi = self._safe_float(row.get("amount"), 0) / 100000000
+        pct_change = self._safe_float(row.get("pct_change"), 0)
+        turnover_rate = self._safe_float(row.get("turnover_rate"), 0)
+        if turnover_rate <= 0 and amount_yi > 0:
+            turnover_rate = self._clamp(amount_yi * 0.35, 0.2, 25)
+
+        money_flow_proxy_yi = self._clamp(amount_yi * pct_change / 12.0, -5.0, 5.0)
+        flow_score = self._clamp(50 + money_flow_proxy_yi * 3.0, 0, 100)
+        turnover_score = self._clamp(45 + min(turnover_rate, 10) * 4, 0, 100)
+        conservative_up_prob = self._clamp(0.46 + pre_score / 900.0 + max(pct_change, 0) / 500.0, 0.45, 0.60)
+        conservative_dd_prob = self._clamp(0.46 - min(pre_score, 100) / 1000.0 + max(abs(pct_change) - 4, 0) / 200.0, 0.30, 0.52)
+        expected_return = round((conservative_up_prob - conservative_dd_prob) * 12, 2)
+        entry_min = round(price * 0.992, 2)
+        entry_max = round(price * 1.008, 2)
+
+        return {
+            "pick_id": f"{trade_date}-{symbol}-DG",
+            "symbol": symbol,
+            "name": row.get("name") or symbol,
+            "action": "watch",
+            "up_prob": round(conservative_up_prob, 4),
+            "dd_prob": round(conservative_dd_prob, 4),
+            "confidence_level": "low",
+            "horizon_days": 15,
+            "expected_return_pct": expected_return,
+            "expected_edge_pct": 0.0,
+            "profit_factor_proxy": 1.0,
+            "entry_range": [entry_min, entry_max],
+            "take_profit": round(price * 1.10, 2),
+            "stop_loss": round(price * 0.92, 2),
+            "position_pct": 0.0,
+            "reasons": [
+                "单票深度分析超时，先按今日全市场快照列为观察候选",
+                f"快照预筛分 {pre_score:.1f}",
+                f"成交额 {amount_yi:.2f} 亿，换手率 {turnover_rate:.2f}%",
+            ],
+            "risks": [
+                "缺少完整K线与技术指标验证，不进入交易计划",
+                "仅可加入观察，等待下一次完整刷新确认",
+            ],
+            "invalid_conditions": [
+                "完整深度分析仍未完成",
+                "下一次刷新未继续入选候选池",
+            ],
+            "market_metrics": {
+                "main_net_inflow_yi": round(money_flow_proxy_yi, 3),
+                "turnover_rate": round(turnover_rate, 3),
+                "money_flow_source": "snapshot_proxy",
+            },
+            "news_factor": {
+                "macro_score": 50.0,
+                "industry_score": 50.0,
+                "stock_score": 50.0,
+                "total_score": 50.0,
+                "net_score": 0.0,
+                "sentiment": "neutral",
+                "latest_events": [],
+                "updated_at": None,
+            },
+            "evidence_summary": {
+                "strategy_code": self._normalize_strategy_code(strategy_code),
+                "strategy_version": "snapshot-degraded-watch-only",
+                "model_win_rate_proxy": round(conservative_up_prob, 4),
+                "model_drawdown_proxy": round(conservative_dd_prob, 4),
+                "proxy_only": True,
+                "state_tag": (market_state or {}).get("state_tag", "neutral"),
+                "quality_gate_passed": False,
+                "quality_notes": ["深度分析超时，不能作为 A/B 级交易计划"],
+            },
+            "score_breakdown": {
+                "trend": round(pre_score, 2),
+                "money_flow": round(flow_score, 2),
+                "turnover_liquidity": round(turnover_score, 2),
+                "quality": round(pre_score * 0.72, 2),
+                "risk_adjusted": 50.0,
+                "news": 50.0,
+                "total": round(self._clamp(pre_score * 0.82, 0, 76), 2),
+                "raw_total": round(pre_score, 2),
+            },
+            "probability_model": {
+                "type": "snapshot_degraded",
+                "label": "快照观察口径",
+                "calibrated": False,
+                "message": "今日深度分析超时，当前仅按全市场快照预筛展示，不能视为买入概率。",
+            },
+            "analysis_status": "degraded_timeout",
+            "degraded_reason": "analysis_timeout",
+            "teaching_points": [
+                "快照观察候选只用于复盘和跟踪",
+                "等待完整K线、资金流和风险闸门确认后，才可进入交易计划",
+            ],
+        }
+
     def _rank_score(self, pick: Dict[str, Any], risk_level: str) -> float:
         up_prob = float(pick.get("up_prob", 0))
         dd_prob = float(pick.get("dd_prob", 1))
@@ -1915,6 +2025,8 @@ class CoachService:
         buckets = (calibration or {}).get("buckets") or []
         overall_calibrated = bool((calibration or {}).get("calibrated"))
         for pick in picks:
+            if (pick.get("probability_model") or {}).get("type") == "snapshot_degraded":
+                continue
             score = self._safe_float((pick.get("score_breakdown") or {}).get("total"), 0)
             bucket = self._find_probability_bucket(score, buckets)
             if not bucket:
@@ -2419,10 +2531,14 @@ class CoachService:
 
         max_workers = min(6, max(1, len(candidate_rows)))
         futures = []
+        future_rows: Dict[Any, Dict[str, Any]] = {}
+        pending_rows: List[Dict[str, Any]] = []
         executor = ThreadPoolExecutor(max_workers=max_workers)
         try:
-            futures = [
-                executor.submit(
+            for row in candidate_rows:
+                if not row.get("symbol"):
+                    continue
+                future = executor.submit(
                     self._build_pick,
                     row.get("symbol"),
                     risk_profile,
@@ -2430,13 +2546,14 @@ class CoachService:
                     row,
                     strategy_code,
                 )
-                for row in candidate_rows
-                if row.get("symbol")
-            ]
+                futures.append(future)
+                future_rows[future] = row
             completed, pending = wait(futures, timeout=12)
             if isinstance(universe_meta, dict):
                 universe_meta["analysis_completed_count"] = len(completed)
                 universe_meta["analysis_timeout_count"] = len(pending)
+                if pending:
+                    universe_meta["analysis_status"] = "degraded_timeout" if not completed else "partial_timeout"
             for future in completed:
                 try:
                     pick = future.result()
@@ -2446,6 +2563,9 @@ class CoachService:
                     # 单票失败不影响整体结果（容错）
                     continue
             for future in pending:
+                row = future_rows.get(future)
+                if row:
+                    pending_rows.append(row)
                 future.cancel()
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
@@ -2499,6 +2619,30 @@ class CoachService:
         else:
             display_cap = max(12, min(30, max_positions * 6))
         all_picks = picks[:display_cap]
+        if pending_rows and len(all_picks) < display_cap:
+            existing_symbols = {str(item.get("symbol") or "") for item in all_picks}
+            degraded_picks: List[Dict[str, Any]] = []
+            pending_symbols = {str(row.get("symbol") or "") for row in pending_rows}
+            for row in candidate_rows:
+                symbol = str(row.get("symbol") or "")
+                if symbol not in pending_symbols or symbol in existing_symbols:
+                    continue
+                degraded = self._build_degraded_pick_from_snapshot_row(
+                    row=row,
+                    risk_profile=risk_profile,
+                    market_state=market_state,
+                    strategy_code=strategy_code,
+                )
+                if degraded:
+                    degraded_picks.append(degraded)
+                    existing_symbols.add(symbol)
+                if len(all_picks) + len(degraded_picks) >= display_cap:
+                    break
+            if degraded_picks:
+                if isinstance(universe_meta, dict):
+                    universe_meta["analysis_degraded_count"] = len(degraded_picks)
+                    universe_meta["analysis_degraded_reason"] = "analysis_timeout"
+                all_picks.extend(degraded_picks[: max(0, display_cap - len(all_picks))])
         for i, item in enumerate(all_picks, start=1):
             item["rank_no"] = i
 

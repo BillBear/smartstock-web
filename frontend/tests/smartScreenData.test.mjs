@@ -88,3 +88,30 @@ test('diagnostic calls out missing same-day market snapshot', () => {
   assert.match(diagnostic.coverageText, /缺少同日全量快照/)
   assert.match(diagnostic.coverageText, /2026-06-29/)
 })
+
+test('diagnostic warns when deep analysis times out and snapshot fallback is used', () => {
+  const diagnostic = getSmartScreenDiagnostic({
+    universe_meta: {
+      data_coverage_status: 'full_snapshot_available',
+      total_universe_count: 5030,
+      after_prefilter_count: 957,
+      candidate_count: 220,
+      analyzed_count: 72,
+      analysis_completed_count: 0,
+      analysis_timeout_count: 72,
+      analysis_status: 'degraded_timeout',
+      analysis_degraded_count: 30,
+    },
+    trade_plan: {
+      core_count: 0,
+      trial_count: 0,
+      watch_count: 30,
+    },
+    picks: Array.from({ length: 30 }, (_, index) => ({ symbol: String(index + 1).padStart(6, '0') })),
+  })
+
+  assert.equal(diagnostic.coverageStatus, 'warning')
+  assert.match(diagnostic.coverageText, /深度分析超时/)
+  assert.match(diagnostic.coverageText, /72/)
+  assert.match(diagnostic.coverageText, /30/)
+})

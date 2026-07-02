@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -203,6 +204,69 @@ class CoachServiceObservabilityTests(unittest.TestCase):
         self.assertEqual(market_state["news_context"]["source_status"], "unavailable")
         self.assertEqual(market_state["news_context"]["error"], "news_service_unavailable")
         self.assertIn("market news summary unavailable", "\n".join(captured.output))
+
+
+class SmartScreenRefreshDegradationTests(unittest.TestCase):
+    def test_today_pick_refresh_returns_watch_only_snapshot_candidates_when_all_analysis_tasks_timeout(self):
+        class DataSourceStub:
+            def __init__(self, entries):
+                self.entries = entries
+
+            def get_stock_industry_map(self):
+                return {item["symbol"]: item["industry"] for item in self.entries}
+
+            def get_realtime_quotes_batch(self, symbols):
+                return {}
+
+        entries = []
+        for index in range(80):
+            symbol = f"{index + 1:06d}"
+            entries.append(
+                {
+                    "symbol": symbol,
+                    "name": f"样本{index + 1}",
+                    "price": 10.0 + index * 0.05,
+                    "open": 9.9 + index * 0.05,
+                    "high": 10.3 + index * 0.05,
+                    "low": 9.7 + index * 0.05,
+                    "pct_change": 2.0 + (index % 5) * 0.1,
+                    "amount": 800_000_000 + index * 1_000_000,
+                    "volume": 20_000_000 + index,
+                    "turnover_rate": 3.0 + (index % 4) * 0.2,
+                    "industry": f"行业{index % 20}",
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = CoachService(
+                data_source_manager=DataSourceStub(entries),
+                store=CoachStore(str(Path(tmpdir) / "coach.db")),
+                news_service=None,
+            )
+            service._today_picks_cache_ttl_seconds = 0
+            service._get_universe_snapshot = lambda force=False: entries
+            service.get_market_state_today = lambda: {
+                "state_tag": "neutral",
+                "summary": "测试市场状态",
+                "reasons": [],
+                "drivers": {},
+                "news_context": {},
+            }
+
+            def mark_all_pending(futures, timeout=None):
+                return set(), set(futures)
+
+            with patch("app.services.coach_service.wait", side_effect=mark_all_pending):
+                result = service.get_today_picks(max_count=30, user_id="default", risk_level="medium")
+
+        self.assertFalse(result["no_trade"])
+        self.assertEqual(result["trade_plan"]["primary_action"], "watch")
+        self.assertGreaterEqual(len(result["picks"]), 12)
+        self.assertEqual(result["universe_meta"]["analysis_status"], "degraded_timeout")
+        self.assertGreater(result["universe_meta"]["analysis_degraded_count"], 0)
+        self.assertTrue(all(pick["action"] == "watch" for pick in result["picks"]))
+        self.assertTrue(all((pick["decision"] or {}).get("mode") == "watch_only" for pick in result["picks"]))
+        self.assertTrue(all((pick.get("probability_model") or {}).get("type") == "snapshot_degraded" for pick in result["picks"]))
 
 
 class MLFeatureBuilderTests(unittest.TestCase):

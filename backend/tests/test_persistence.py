@@ -143,6 +143,38 @@ class CoachStorePersistenceTests(unittest.TestCase):
 
         self.assertEqual(dates, ["2026-06-18", "2026-06-17"])
 
+    def test_upsert_pick_snapshots_replaces_same_day_strategy_risk_snapshot_set(self):
+        self.store.upsert_pick_snapshots(
+            user_id="default",
+            trade_date="2026-07-02",
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            picks=[
+                {"pick_id": "2026-07-02-000001-S1", "symbol": "000001", "name": "平安银行", "rank_no": 1},
+                {"pick_id": "2026-07-02-000333-S1", "symbol": "000333", "name": "美的集团", "rank_no": 2},
+            ],
+        )
+        self.store.upsert_pick_snapshots(
+            user_id="default",
+            trade_date="2026-07-02",
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            picks=[
+                {"pick_id": "2026-07-02-002517-S1", "symbol": "002517", "name": "恺英网络", "rank_no": 1},
+            ],
+        )
+
+        result = self.store.get_latest_pick_snapshots_result(
+            user_id="default",
+            trade_date="2026-07-02",
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            limit=30,
+        )
+
+        self.assertEqual([pick["symbol"] for pick in result["picks"]], ["002517"])
+        self.assertEqual([pick["rank_no"] for pick in result["picks"]], [1])
+
     def test_market_snapshot_round_trips_latest_valid_snapshot(self):
         saved = self.store.save_market_snapshot(
             trade_date="20260701",

@@ -14,15 +14,23 @@ export function getSmartScreenDiagnostic(result = {}) {
   const totalUniverse = Number(universeMeta.total_universe_count || 0)
   const prefilterCount = Number(universeMeta.after_prefilter_count || 0)
   const candidateCount = Number(universeMeta.candidate_count || 0)
-  const analyzedCount = Number(universeMeta.analyzed_count || universeMeta.analysis_completed_count || 0)
+  const analyzedCount = Number(universeMeta.analyzed_count || 0)
+  const analysisCompletedCount = Number(universeMeta.analysis_completed_count || 0)
+  const analysisTimeoutCount = Number(universeMeta.analysis_timeout_count || 0)
+  const analysisDegradedCount = Number(universeMeta.analysis_degraded_count || 0)
+  const analysisStatus = universeMeta.analysis_status || ''
   const coverageStatus = universeMeta.data_coverage_status || ''
   let coverageLevel = 'info'
   let coverageText = ''
 
-  if (coverageStatus === 'full_snapshot_available' && totalUniverse > 0) {
+  if (analysisTimeoutCount > 0 || ['degraded_timeout', 'partial_timeout'].includes(analysisStatus)) {
+    coverageLevel = 'warning'
+    coverageText = `全量池正常：全A ${totalUniverse || '-'} 只，预筛 ${prefilterCount || '-'} 只，策略目标 ${candidateCount || '-'} 只；深度分析超时 ${analysisTimeoutCount || '-'} 只，已降级展示 ${analysisDegradedCount || picks.length || '-'} 只今日快照观察候选。`
+  } else if (coverageStatus === 'full_snapshot_available' && totalUniverse > 0) {
     coverageLevel = 'success'
     const candidateLabel = universeMeta.source === 'pick_snapshots' ? '快照候选' : '策略目标'
-    coverageText = `全量池正常：全A ${totalUniverse} 只，预筛 ${prefilterCount || '-'} 只，${candidateLabel} ${candidateCount || '-'} 只，评分完成 ${analyzedCount || '-'} 只。`
+    const completedText = analysisCompletedCount || analyzedCount || '-'
+    coverageText = `全量池正常：全A ${totalUniverse} 只，预筛 ${prefilterCount || '-'} 只，${candidateLabel} ${candidateCount || '-'} 只，评分完成 ${completedText} 只。`
   } else if (coverageStatus === 'sparse_market_snapshot') {
     coverageLevel = 'warning'
     coverageText = `同日全量快照偏少：当前仅 ${totalUniverse || '-'} 只，请先刷新或检查数据源。`

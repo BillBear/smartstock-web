@@ -832,10 +832,8 @@ class CoachStore:
         picks: List[Dict[str, Any]],
         risk_level: str = "medium",
     ) -> int:
-        if not picks:
-            return 0
         rows = []
-        created_at = picks[0].get("created_at") or trade_date
+        created_at = (picks[0].get("created_at") if picks else None) or trade_date
         normalized_risk_level = str(risk_level or "medium")
         for pick in picks:
             pick_id = str(pick.get("pick_id") or "").strip()
@@ -855,11 +853,25 @@ class CoachStore:
                     "created_at": str(created_at),
                 }
             )
-        if not rows:
-            return 0
-
         with self._lock:
             with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        DELETE FROM pick_snapshots
+                        WHERE user_id = :user_id
+                          AND trade_date = :trade_date
+                          AND COALESCE(strategy_code, '') = :strategy_code
+                          AND COALESCE(risk_level, 'medium') = :risk_level
+                        """
+                    ),
+                    {
+                        "user_id": user_id,
+                        "trade_date": trade_date,
+                        "strategy_code": strategy_code,
+                        "risk_level": normalized_risk_level,
+                    },
+                )
                 for row in rows:
                     if self._is_postgres:
                         conn.execute(
