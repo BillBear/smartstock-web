@@ -48,6 +48,21 @@ class LocalDeploymentContractTests(unittest.TestCase):
             self.assertIn("StandardOutPath", text)
             self.assertIn("StandardErrorPath", text)
 
+    def test_launchd_install_scripts_are_explicit_user_adapters(self):
+        install_script = REPO_ROOT / "scripts" / "local" / "install_launchd_services.sh"
+        uninstall_script = REPO_ROOT / "scripts" / "local" / "uninstall_launchd_services.sh"
+
+        self.assertTrue(install_script.exists())
+        self.assertTrue(uninstall_script.exists())
+        self.assertTrue(install_script.stat().st_mode & 0o111)
+        self.assertTrue(uninstall_script.stat().st_mode & 0o111)
+
+        install_text = install_script.read_text(encoding="utf-8")
+        uninstall_text = uninstall_script.read_text(encoding="utf-8")
+        self.assertIn("render_launchd_plists.sh", install_text)
+        self.assertIn("launchctl bootstrap", install_text)
+        self.assertIn("launchctl bootout", uninstall_text)
+
 
 if __name__ == "__main__":
     unittest.main()
