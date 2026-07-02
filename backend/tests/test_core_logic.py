@@ -205,6 +205,145 @@ class CoachServiceObservabilityTests(unittest.TestCase):
         self.assertEqual(market_state["news_context"]["error"], "news_service_unavailable")
         self.assertIn("market news summary unavailable", "\n".join(captured.output))
 
+    def test_universe_funnel_diagnostics_explain_filter_and_final_output_layers(self):
+        class DataSourceStub:
+            def __init__(self, entries):
+                self.entries = entries
+
+            def get_stock_industry_map(self):
+                return {item["symbol"]: item.get("industry", "未知行业") for item in self.entries}
+
+            def get_realtime_quotes_batch(self, symbols):
+                return {}
+
+        entries = [
+            {
+                "symbol": "000001",
+                "name": "平安银行",
+                "price": 12.0,
+                "open": 11.8,
+                "high": 12.3,
+                "low": 11.7,
+                "pct_change": 2.1,
+                "amount": 900_000_000,
+                "turnover_rate": 4.0,
+                "industry": "银行",
+            },
+            {
+                "symbol": "000002",
+                "name": "ST样本",
+                "price": 6.0,
+                "amount": 500_000_000,
+                "turnover_rate": 3.0,
+                "pct_change": 1.0,
+                "industry": "地产",
+            },
+            {
+                "symbol": "000003",
+                "name": "低流动",
+                "price": 8.0,
+                "amount": 10_000_000,
+                "turnover_rate": 3.0,
+                "pct_change": 1.0,
+                "industry": "制造",
+            },
+            {
+                "symbol": "900001",
+                "name": "非A股样本",
+                "price": 8.0,
+                "amount": 800_000_000,
+                "turnover_rate": 3.0,
+                "pct_change": 1.0,
+                "industry": "其他",
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = CoachStore(str(Path(tmpdir) / "coach.db"))
+            store.upsert_pick_snapshots(
+                user_id="default",
+                trade_date="2026-07-02",
+                strategy_code="trend_breakout",
+                risk_level="medium",
+                picks=[
+                    {
+                        "pick_id": "pick-000001",
+                        "symbol": "000001",
+                        "name": "平安银行",
+                        "rank_no": 1,
+                        "decision": {"grade": "C"},
+                        "score_breakdown": {"total": 80.0},
+                    }
+                ],
+            )
+            service = CoachService(
+                data_source_manager=DataSourceStub(entries),
+                store=store,
+                news_service=None,
+            )
+            service._get_universe_snapshot = lambda force=False: entries
+
+            report = service.get_universe_funnel_diagnostics(
+                trade_date="2026-07-02",
+                risk_level="medium",
+                user_id="default",
+                limit=20,
+            )
+
+        self.assertEqual(report["trade_date"], "2026-07-02")
+        self.assertEqual(report["universe_count"], 4)
+        self.assertEqual(report["prefilter_count"], 1)
+        self.assertEqual(report["final_pick_count"], 1)
+        self.assertEqual(report["items_by_symbol"]["000001"]["last_layer"], "final_output")
+        self.assertTrue(report["items_by_symbol"]["000001"]["kept"])
+        self.assertIn("进入最终候选输出", report["items_by_symbol"]["000001"]["reasons"])
+        self.assertEqual(report["items_by_symbol"]["000002"]["last_layer"], "basic_filter")
+        self.assertIn("ST/退市名称过滤", report["items_by_symbol"]["000002"]["reasons"])
+        self.assertIn("成交额低于阈值", "；".join(report["items_by_symbol"]["000003"]["reasons"]))
+        self.assertEqual(report["items_by_symbol"]["900001"]["last_layer"], "full_market")
+
+    def test_universe_funnel_symbol_lookup_returns_single_item(self):
+        class DataSourceStub:
+            def get_stock_industry_map(self):
+                return {"000001": "银行"}
+
+            def get_realtime_quotes_batch(self, symbols):
+                return {}
+
+        entries = [
+            {
+                "symbol": "000001",
+                "name": "平安银行",
+                "price": 12.0,
+                "open": 11.8,
+                "high": 12.3,
+                "low": 11.7,
+                "pct_change": 2.1,
+                "amount": 900_000_000,
+                "turnover_rate": 4.0,
+                "industry": "银行",
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = CoachService(
+                data_source_manager=DataSourceStub(),
+                store=CoachStore(str(Path(tmpdir) / "coach.db")),
+                news_service=None,
+            )
+            service._get_universe_snapshot = lambda force=False: entries
+
+            item = service.get_universe_funnel_symbol_diagnostic(
+                symbol="000001",
+                trade_date="2026-07-02",
+                risk_level="medium",
+                user_id="default",
+            )
+
+        self.assertEqual(item["symbol"], "000001")
+        self.assertEqual(item["last_layer"], "recall_pool")
+        self.assertTrue(item["kept"])
+
 
 class SmartScreenRefreshDegradationTests(unittest.TestCase):
     def test_today_pick_refresh_returns_watch_only_snapshot_candidates_when_all_analysis_tasks_timeout(self):

@@ -1,7 +1,6 @@
 """
 FastAPI主应用程序
 """
-import json
 import sys
 from pathlib import Path
 
@@ -12,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
+from app.core.runtime import build_runtime_metadata
 from app.models.schemas import (
     StockQueryRequest,
     HistoryQueryRequest,
@@ -32,6 +32,7 @@ from app.models.schemas import (
     ErrorResponse
 )
 from app.evaluation.ranking_fixtures import smoke_fixture_rows
+from app.evaluation.ranking_latest import load_latest_ranking_summary
 from app.evaluation.ranking_labels import DEFAULT_STRONG_LABEL_CONFIG
 from app.evaluation.ranking_replay import RankingReplayService
 from app.evaluation.ranking_report import build_ranking_report
@@ -340,19 +341,7 @@ def _load_latest_ranking_evaluation_summary() -> dict:
         / "ranking-evaluation"
         / "runs"
     )
-    if not runs_dir.exists():
-        return {"available": False, "message": "ranking evaluation report not found"}
-    summaries = sorted(
-        runs_dir.glob("*/ranking_summary.json"),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    if not summaries:
-        return {"available": False, "message": "ranking evaluation report not found"}
-    payload = json.loads(summaries[0].read_text(encoding="utf-8"))
-    payload["available"] = True
-    payload["summary_path"] = str(summaries[0])
-    return clean_nan_values(payload)
+    return clean_nan_values(load_latest_ranking_summary(runs_dir, include_fixture=False))
 
 # 创建FastAPI应用
 app = FastAPI(
@@ -405,6 +394,12 @@ async def root():
 async def health_check():
     """健康检查"""
     return {"status": "healthy"}
+
+
+@app.get(f"{settings.API_PREFIX}/system/version")
+async def system_version():
+    """Return deploy/runtime metadata without exposing secrets."""
+    return ApiResponse(code=200, message="success", data=build_runtime_metadata(settings))
 
 
 # ========== 股票数据接口 ==========
@@ -1024,6 +1019,59 @@ async def coach_symbol_strategy(symbol: str, user_id: str = "default", risk_leve
         raise
     except Exception as e:
         logger.error(f"获取个股策略评分失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/diagnostics/universe-funnel")
+async def coach_universe_funnel_diagnostics(
+    trade_date: str = None,
+    risk_level: str = "medium",
+    user_id: str = "default",
+    limit: int = 5000,
+    strategy_code: str = "trend_breakout",
+):
+    """只读候选池漏斗诊断：解释全A到最终候选的保留/剔除原因。"""
+    try:
+        data = await run_in_threadpool(
+            coach_service.get_universe_funnel_diagnostics,
+            trade_date=trade_date,
+            risk_level=risk_level,
+            user_id=user_id,
+            limit=limit,
+            strategy_code=strategy_code,
+        )
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except Exception as e:
+        logger.error(f"获取候选池漏斗诊断失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{settings.API_PREFIX}/coach/diagnostics/universe-funnel/symbol/{{symbol}}")
+async def coach_universe_funnel_symbol_diagnostic(
+    symbol: str,
+    trade_date: str = None,
+    risk_level: str = "medium",
+    user_id: str = "default",
+    strategy_code: str = "trend_breakout",
+):
+    """只读单票候选池漏斗诊断。"""
+    try:
+        resolved = resolve_stock_or_404(symbol)
+        data = await run_in_threadpool(
+            coach_service.get_universe_funnel_symbol_diagnostic,
+            symbol=resolved["symbol"],
+            trade_date=trade_date,
+            risk_level=risk_level,
+            user_id=user_id,
+            strategy_code=strategy_code,
+        )
+        data = clean_nan_values(data)
+        return ApiResponse(code=200, message="success", data=data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取单票候选池漏斗诊断失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

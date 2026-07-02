@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     APP_NAME: str = "SmartStock AI"
     APP_VERSION: str = "1.0.0"
     APP_DESCRIPTION: str = "智能股票投资助手"
+    APP_ENV: str = "local"
+    GIT_COMMIT: str = ""
 
     # API配置
     API_HOST: str = "0.0.0.0"
@@ -61,6 +63,9 @@ class Settings(BaseSettings):
     COACH_UNIVERSE_MAX_ANALYZE_COUNT: int = 120
     COACH_UNIVERSE_INDUSTRY_CAP: int = 4
     COACH_UNIVERSE_MIN_PRICE: float = 2.0
+    MODEL_ARTIFACT_ROOT: str = str(Path(__file__).resolve().parents[2] / "data" / "ml_models")
+    STRATEGY_EVIDENCE_ROOT: str = str(Path(__file__).resolve().parents[3] / "docs" / "strategy-evidence")
+    LOG_DIR: str = str(Path(__file__).resolve().parents[3] / "runtime" / "logs")
     NEWS_REFRESH_SECONDS: int = 900
     NEWS_SYMBOL_REFRESH_SECONDS: int = 1800
 

@@ -749,6 +749,234 @@ class CoachService:
 
         return {"candidates": refreshed_candidates, "meta": meta}
 
+    def get_universe_funnel_diagnostics(
+        self,
+        trade_date: Optional[str] = None,
+        risk_level: str = "medium",
+        user_id: str = "default",
+        limit: int = 5000,
+        strategy_code: str = "trend_breakout",
+    ) -> Dict[str, Any]:
+        """Explain the read-only universe funnel without refreshing or changing picks."""
+        effective_trade_date = str(trade_date or datetime.now().strftime("%Y-%m-%d"))
+        level = str(risk_level or "medium").strip().lower()
+        if level not in {"low", "medium", "high"}:
+            level = "medium"
+        entries = self._get_universe_snapshot(force=False)
+        rules = self._get_universe_rules(level)
+        target_candidate_size = max(30, min(int(rules.get("max_analyze_count") or 120), 220))
+        industry_map = self.data_source_manager.get_stock_industry_map()
+        items_by_symbol: Dict[str, Dict[str, Any]] = {}
+        filtered: List[Dict[str, Any]] = []
+        industries = set()
+
+        def base_item(row: Dict[str, Any]) -> Dict[str, Any]:
+            symbol = str(row.get("symbol") or "")
+            name = str(row.get("name") or symbol)
+            return {
+                "symbol": symbol,
+                "name": name,
+                "kept": False,
+                "last_layer": "full_market",
+                "reasons": [],
+                "metrics": {
+                    "price": self._safe_float(row.get("price"), 0),
+                    "amount_yi": round(self._safe_float(row.get("amount"), 0) / 100000000, 4),
+                    "turnover_rate": self._safe_float(row.get("turnover_rate"), 0),
+                    "pct_change": self._safe_float(row.get("pct_change"), 0),
+                },
+            }
+
+        for row in entries:
+            symbol = str(row.get("symbol") or "")
+            item = base_item(row)
+            if symbol:
+                items_by_symbol[symbol] = item
+            if len(symbol) != 6 or not symbol.isdigit() or symbol[0] not in {"0", "3", "6"}:
+                item["reasons"].append("非A股股票代码过滤")
+                continue
+            name = str(row.get("name") or symbol)
+            item["last_layer"] = "basic_filter"
+            if self._is_excluded_name(name):
+                item["reasons"].append("ST/退市名称过滤")
+                continue
+            price = self._safe_float(row.get("price"), 0)
+            if price < rules["min_price"]:
+                item["reasons"].append(f"价格低于阈值 {rules['min_price']}")
+                continue
+            amount_yi = self._safe_float(row.get("amount"), 0) / 100000000
+            if amount_yi < rules["min_amount_yi"]:
+                item["reasons"].append(f"成交额低于阈值 {rules['min_amount_yi']} 亿")
+                continue
+            turnover_rate = self._safe_float(row.get("turnover_rate"), 0)
+            if turnover_rate <= 0:
+                circ_mv = self._safe_float(row.get("circ_mv"), 0)
+                if circ_mv > 0:
+                    turnover_rate = self._clamp((self._safe_float(row.get("amount"), 0) / circ_mv) * 100, 0, 60)
+                else:
+                    turnover_rate = self._clamp(amount_yi * 0.35, 0.2, 25)
+            item["metrics"]["turnover_rate"] = round(turnover_rate, 4)
+            if turnover_rate < rules["min_turnover_rate"] or turnover_rate > rules["max_turnover_rate"]:
+                item["reasons"].append(
+                    f"换手率不在阈值 {rules['min_turnover_rate']} - {rules['max_turnover_rate']} 内"
+                )
+                continue
+            pct_change = self._safe_float(row.get("pct_change"), 0)
+            if abs(pct_change) > rules["max_abs_pct_change"]:
+                item["reasons"].append(f"涨跌幅绝对值超过阈值 {rules['max_abs_pct_change']}%")
+                continue
+
+            if turnover_rate <= 2:
+                turnover_score = 45 + turnover_rate * 6
+            elif turnover_rate <= 10:
+                turnover_score = 57 + (turnover_rate - 2) * 3.5
+            elif turnover_rate <= 20:
+                turnover_score = 85 - (turnover_rate - 10) * 2
+            else:
+                turnover_score = 65 - (turnover_rate - 20) * 2
+            turnover_score = self._clamp(turnover_score, 0, 100)
+            liquidity_score = self._clamp(amount_yi * 6, 0, 100)
+            day_range = self._safe_float(row.get("high"), 0) - self._safe_float(row.get("low"), 0)
+            intraday_position = 0.5
+            if day_range > 0 and self._safe_float(row.get("price"), 0) > 0:
+                intraday_position = self._clamp((self._safe_float(row.get("price"), 0) - self._safe_float(row.get("low"), 0)) / day_range, 0, 1)
+            momentum_score = self._clamp(12 - abs(pct_change - 2.5), 0, 12)
+            intraday_score = self._clamp((0.25 + intraday_position) * 80, 0, 100)
+            pre_score = 0.38 * liquidity_score + 0.26 * turnover_score + 0.20 * intraday_score + 0.16 * (momentum_score * 8.2)
+            industry = (
+                str(industry_map.get(symbol) or "").strip()
+                or str(row.get("industry") or "").strip()
+                or self._infer_board_industry(symbol)
+            )
+            industries.add(industry)
+            filtered_row = copy.deepcopy(row)
+            filtered_row["industry"] = industry
+            filtered_row["turnover_rate"] = turnover_rate
+            filtered_row["pre_score"] = round(pre_score, 4)
+            filtered.append(filtered_row)
+            item["kept"] = True
+            item["reasons"].append("基础过滤通过")
+            item["metrics"]["pre_score"] = round(pre_score, 4)
+
+        by_industry: Dict[str, List[Dict[str, Any]]] = {}
+        for row in filtered:
+            by_industry.setdefault(row.get("industry", "未知行业"), []).append(row)
+        diversified: List[Dict[str, Any]] = []
+        dynamic_industry_cap = max(rules["industry_cap"], min(10, max(2, target_candidate_size // 28)))
+        for industry_rows in by_industry.values():
+            industry_rows.sort(key=lambda x: x.get("pre_score", 0), reverse=True)
+            diversified.extend(industry_rows[: dynamic_industry_cap])
+            for row in industry_rows[dynamic_industry_cap:]:
+                item = items_by_symbol.get(str(row.get("symbol") or ""))
+                if item:
+                    item["kept"] = False
+                    item["reasons"].append(f"行业分散上限 {dynamic_industry_cap} 只，未进入召回池")
+        diversified.sort(key=lambda x: x.get("pre_score", 0), reverse=True)
+        candidates = diversified[:target_candidate_size]
+        candidate_symbols = {str(row.get("symbol") or "") for row in candidates}
+        for row in diversified[target_candidate_size:]:
+            item = items_by_symbol.get(str(row.get("symbol") or ""))
+            if item:
+                item["kept"] = False
+                item["reasons"].append(f"未进入Top{target_candidate_size}召回池")
+        for symbol in candidate_symbols:
+            item = items_by_symbol.get(symbol)
+            if item:
+                item["last_layer"] = "recall_pool"
+                item["kept"] = True
+                item["reasons"].append(f"进入Top{target_candidate_size}召回池")
+
+        snapshots = self.store.list_pick_snapshots(
+            strategy_code=strategy_code,
+            risk_level=level,
+            trade_date=effective_trade_date,
+            user_id=user_id,
+        )
+        final_symbols = {str(item.get("symbol") or "") for item in snapshots}
+        for snap in snapshots:
+            symbol = str(snap.get("symbol") or "")
+            item = items_by_symbol.get(symbol)
+            if not item:
+                item = {
+                    "symbol": symbol,
+                    "name": str(snap.get("name") or symbol),
+                    "kept": True,
+                    "last_layer": "final_output",
+                    "reasons": [],
+                    "metrics": {},
+                }
+                items_by_symbol[symbol] = item
+            item["last_layer"] = "final_output"
+            item["kept"] = True
+            item["rank_no"] = snap.get("rank_no")
+            item["decision_grade"] = (snap.get("decision") or {}).get("grade")
+            item["score"] = (snap.get("score_breakdown") or {}).get("total")
+            item["reasons"].append("进入最终候选输出")
+        for symbol in candidate_symbols - final_symbols:
+            item = items_by_symbol.get(symbol)
+            if item:
+                item["reasons"].append("进入召回池但未进入当前最终输出")
+
+        items = sorted(
+            items_by_symbol.values(),
+            key=lambda item: (
+                {"final_output": 0, "recall_pool": 1, "basic_filter": 2, "full_market": 3}.get(item.get("last_layer"), 9),
+                int(self._safe_float(item.get("rank_no"), 9999)),
+                str(item.get("symbol") or ""),
+            ),
+        )
+        capped_limit = max(1, min(int(limit or 5000), 10000))
+        latest_meta = copy.deepcopy(self._universe_state.get("last_meta") or {})
+        return {
+            "trade_date": effective_trade_date,
+            "risk_level": level,
+            "strategy_code": strategy_code,
+            "universe_count": len(entries),
+            "prefilter_count": len(filtered),
+            "recall_count": len(candidates),
+            "deep_analysis_count": int(latest_meta.get("analyzed_count") or len(candidates)),
+            "final_pick_count": len(snapshots),
+            "layers": [
+                "full_market",
+                "basic_filter",
+                "recall_pool",
+                "deep_analysis",
+                "score_threshold",
+                "final_output",
+            ],
+            "rules": {**rules, "strategy_target_size": target_candidate_size, "industry_cap_effective": dynamic_industry_cap},
+            "industry_count": len(industries),
+            "items": items[:capped_limit],
+            "items_by_symbol": items_by_symbol,
+        }
+
+    def get_universe_funnel_symbol_diagnostic(
+        self,
+        symbol: str,
+        trade_date: Optional[str] = None,
+        risk_level: str = "medium",
+        user_id: str = "default",
+        strategy_code: str = "trend_breakout",
+    ) -> Dict[str, Any]:
+        code = str(symbol or "").strip()
+        report = self.get_universe_funnel_diagnostics(
+            trade_date=trade_date,
+            risk_level=risk_level,
+            user_id=user_id,
+            limit=10000,
+            strategy_code=strategy_code,
+        )
+        return report.get("items_by_symbol", {}).get(
+            code,
+            {
+                "symbol": code,
+                "kept": False,
+                "last_layer": "not_in_universe",
+                "reasons": ["当前全A快照中未找到该股票"],
+                "metrics": {},
+            },
+        )
+
     def _get_latest_action_map(self, user_id: str) -> Dict[str, Dict[str, Any]]:
         return self.store.get_latest_pick_actions(user_id=user_id)
 

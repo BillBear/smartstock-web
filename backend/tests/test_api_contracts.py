@@ -30,6 +30,15 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.USE_MOCK_DATA)
         self.assertIn("http://localhost:3601", settings.CORS_ORIGINS)
 
+    def test_cloud_ready_runtime_settings_have_safe_defaults(self):
+        settings = Settings(_env_file=None)
+
+        self.assertEqual(settings.APP_ENV, "local")
+        self.assertEqual(settings.GIT_COMMIT, "")
+        self.assertTrue(settings.MODEL_ARTIFACT_ROOT.endswith("data/ml_models"))
+        self.assertTrue(settings.STRATEGY_EVIDENCE_ROOT.endswith("docs/strategy-evidence"))
+        self.assertTrue(settings.LOG_DIR.endswith("runtime/logs"))
+
 
 class RequestSchemaContractTests(unittest.TestCase):
     def test_technical_analysis_request_bounds_days(self):
