@@ -14,6 +14,10 @@ import {
 } from '@ant-design/icons'
 import ScoreRadar from '../components/ScoreRadar'
 import { analysisApi, coachApi } from '../services/api'
+import {
+  getStockStrategyActionPresentation,
+  getStockStrategyMetricItems,
+} from './stockDetailPresentation.mjs'
 import './StockDetail.css'
 
 const clampScore = (value) => Math.max(0, Math.min(100, Math.round(Number(value || 0))))
@@ -35,12 +39,6 @@ const buildStrategyScores = (breakdown = {}) => ({
   fundamental: clampScore(breakdown.quality),
   valuation: clampScore(breakdown.risk_adjusted),
 })
-
-const actionText = {
-  buy: '可买入',
-  watch: '观察',
-  pass: '跳过',
-}
 
 const STATE_LABEL = {
   offensive: '进攻',
@@ -369,6 +367,9 @@ const StockDetail = () => {
     },
   ]
 
+  const strategyActionPresentation = getStockStrategyActionPresentation(stockData.strategyContext)
+  const strategyMetricItems = getStockStrategyMetricItems(stockData.strategyContext)
+
   const tabItems = [
     {
       key: 'overview',
@@ -386,19 +387,20 @@ const StockDetail = () => {
               {stockData.strategyContext ? (
                 <>
                   <div className="decision-score-line">
-                    <span>{actionText[stockData.strategyContext.action] || '策略观察'}</span>
+                    <span>{strategyActionPresentation.text}</span>
                     <strong>{Number(stockData.totalScore || 0).toFixed(2)}分</strong>
                   </div>
                   <Row gutter={[12, 12]} className="decision-metrics">
-                    <Col span={8}>
-                      <Statistic title="上涨概率" value={Number(stockData.strategyContext.up_prob || 0) * 100} precision={1} suffix="%" />
-                    </Col>
-                    <Col span={8}>
-                      <Statistic title="回撤概率" value={Number(stockData.strategyContext.dd_prob || 0) * 100} precision={1} suffix="%" />
-                    </Col>
-                    <Col span={8}>
-                      <Statistic title="预期收益" value={Number(stockData.strategyContext.expected_return_pct || 0)} precision={2} suffix="%" />
-                    </Col>
+                    {strategyMetricItems.map((item) => (
+                      <Col span={8} key={item.title}>
+                        <Statistic
+                          title={item.title}
+                          value={item.value}
+                          precision={typeof item.value === 'number' ? item.precision || 0 : undefined}
+                          suffix={item.suffix || ''}
+                        />
+                      </Col>
+                    ))}
                   </Row>
                   <div className="decision-list">
                     {(stockData.strategyContext.reasons || []).slice(0, 4).map((item) => (
@@ -424,7 +426,7 @@ const StockDetail = () => {
                 <strong>先看会亏多少，再看能赚多少</strong>
               </div>
               <Tag color={Number(stockData.strategyContext?.dd_prob || 0) >= 0.35 ? 'red' : 'gold'}>
-                回撤概率 {stockData.strategyContext ? formatPct(stockData.strategyContext.dd_prob, 100) : '待策略确认'}
+                回撤风险 {stockData.strategyContext ? formatPct(stockData.strategyContext.dd_prob, 100) : '待策略确认'}
               </Tag>
             </div>
             <div className="risk-chip-grid">
@@ -588,7 +590,7 @@ const StockDetail = () => {
               <Tag color={stockData.news.sentiment === 'positive' ? 'green' : stockData.news.sentiment === 'negative' ? 'red' : 'blue'}>
                 {stockData.news.sentiment === 'positive' ? '偏正面' : stockData.news.sentiment === 'negative' ? '偏负面' : '中性'}
               </Tag>
-              <span>资讯分 {Number(stockData.news.totalScore || 50).toFixed(1)}</span>
+              <span>{stockData.news.latestEvents.length} 条相关事件</span>
             </div>
             <div className="stock-news-list">
               {stockData.news.latestEvents.length > 0 ? (

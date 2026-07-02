@@ -26,16 +26,15 @@ import {
   getUniverseFunnelSummary,
   shouldRefreshCurrentTradingPicks,
 } from './smartScreenData.mjs'
-import { getPickActionPresentation, getRankPresentation } from './smartScreenPresentation.mjs'
+import {
+  getPickActionPresentation,
+  getPickDecisionActionPresentation,
+  getProbabilityModelPresentation,
+  getRankPresentation,
+} from './smartScreenPresentation.mjs'
 import './SmartScreen.css'
 
 const { Option } = Select
-
-const ACTION_LABEL = {
-  buy: { text: '可买入', color: 'red' },
-  watch: { text: '观察', color: 'blue' },
-  pass: { text: '跳过', color: 'default' },
-}
 
 const USER_ACTION_LABEL = {
   added_watchlist: { text: '已加观察', color: 'blue' },
@@ -116,7 +115,7 @@ const SCORE_META = {
   },
 }
 
-const SCORE_ORDER = ['trend', 'money_flow', 'turnover_liquidity', 'quality', 'risk_adjusted', 'news', 'total']
+const SCORE_ORDER = ['trend', 'money_flow', 'turnover_liquidity', 'quality', 'risk_adjusted', 'total']
 
 const DECISION_META = {
   A: { text: 'A 核心候选', color: 'red' },
@@ -251,6 +250,7 @@ const SmartScreen = () => {
   const pickList = useMemo(() => result?.picks || [], [result])
   const marketNews = result?.market_state?.news_context || {}
   const tradePlan = result?.trade_plan || {}
+  const probabilityPresentation = getProbabilityModelPresentation(tradePlan?.probability_model || {})
   const planMeta = PLAN_ACTION_META[tradePlan.primary_action] || PLAN_ACTION_META.watch
   const diagnostic = useMemo(() => getSmartScreenDiagnostic(result), [result])
   const funnelSummary = useMemo(
@@ -335,9 +335,12 @@ const SmartScreen = () => {
   }
 
   const reportAction = async (pick, actionType) => {
-    if (actionType === 'paper_buy' && !canPaperBuy) {
-      message.warning('非交易日不生成交易计划，不能模拟验证')
-      return
+    if (actionType === 'paper_buy') {
+      const actionMeta = getPickActionPresentation(pick, canPaperBuy)
+      if (!actionMeta.canShowPaperAction) {
+        message.warning(actionMeta.paperDisabledReason || '当前候选不允许模拟验证')
+        return
+      }
     }
     const currentAction = pick?.user_action?.action_type
     if (currentAction === actionType) {
@@ -567,14 +570,14 @@ const SmartScreen = () => {
             <Statistic title="建议实盘仓位" value={tradePlan.suggested_total_exposure_pct || 0} suffix="%" precision={1} />
           </Col>
           <Col xs={12} md={6}>
-            <Statistic title="概率口径" value={tradePlan?.probability_model?.label || '规则代理概率'} />
+            <Statistic title="概率口径" value={probabilityPresentation.label} />
           </Col>
         </Row>
         <Alert
           className="probability-warning"
-          type={tradePlan?.probability_model?.calibrated ? 'success' : 'warning'}
+          type={probabilityPresentation.alertType}
           showIcon
-          message={tradePlan?.probability_model?.calibrated ? '概率已完成历史样本校准' : '当前上涨/回撤概率仍是规则代理概率'}
+          message={probabilityPresentation.message}
           description={tradePlan?.probability_model?.next_phase || '阶段3会训练真实历史样本概率模型，校准高概率组命中率。'}
         />
       </Card>
@@ -925,9 +928,10 @@ const SmartScreen = () => {
             <Descriptions column={2} bordered size="small">
               <Descriptions.Item label="股票">{detailData.name} ({detailData.symbol})</Descriptions.Item>
               <Descriptions.Item label="动作">
-                <Tag color={(ACTION_LABEL[detailData.action] || ACTION_LABEL.pass).color}>
-                  {(ACTION_LABEL[detailData.action] || ACTION_LABEL.pass).text}
-                </Tag>
+                {(() => {
+                  const actionPresentation = getPickDecisionActionPresentation(detailData)
+                  return <Tag color={actionPresentation.color}>{actionPresentation.text}</Tag>
+                })()}
               </Descriptions.Item>
               <Descriptions.Item label="决策等级">
                 <Tooltip title={detailData?.decision?.summary || ''}>
@@ -959,12 +963,7 @@ const SmartScreen = () => {
               </Descriptions.Item>
               <Descriptions.Item label="入场区间">{detailData.entry_range?.join(' - ')}</Descriptions.Item>
               <Descriptions.Item label="止盈/止损">{detailData.take_profit} / {detailData.stop_loss}</Descriptions.Item>
-              <Descriptions.Item label="上涨概率">{(Number(detailData.up_prob || 0) * 100).toFixed(1)}%</Descriptions.Item>
-              <Descriptions.Item label="回撤概率">{(Number(detailData.dd_prob || 0) * 100).toFixed(1)}%</Descriptions.Item>
               <Descriptions.Item label="模型版本">{detailData?.model_version_id || '未接入模型'}</Descriptions.Item>
-              <Descriptions.Item label="模型最终分">
-                {detailData?.model_probability ? Number(detailData.model_probability.final_score || 0).toFixed(2) : '-'}
-              </Descriptions.Item>
               <Descriptions.Item label="仓位建议">{detailData.position_pct}%</Descriptions.Item>
               <Descriptions.Item label="持有周期">{detailData.horizon_days} 天</Descriptions.Item>
               <Descriptions.Item label="主力净流入(3日)">
@@ -972,9 +971,6 @@ const SmartScreen = () => {
               </Descriptions.Item>
               <Descriptions.Item label="换手率">
                 {Number(detailData?.market_metrics?.turnover_rate || 0).toFixed(2)}%
-              </Descriptions.Item>
-              <Descriptions.Item label="资讯总分">
-                {Number(detailData?.news_factor?.total_score || 50).toFixed(1)}
               </Descriptions.Item>
               <Descriptions.Item label="资讯倾向">
                 <Tag color={detailData?.news_factor?.sentiment === 'positive' ? 'green' : detailData?.news_factor?.sentiment === 'negative' ? 'red' : 'blue'}>
@@ -986,18 +982,20 @@ const SmartScreen = () => {
             {detailData?.model_probability && (
               <>
                 <Divider />
-                <h4>机器学习概率与解释</h4>
-                <Row gutter={12}>
-                  <Col xs={24} sm={8}>
-                    <Statistic title="模型上涨概率" value={Number(detailData.model_probability.model_up_prob || 0) * 100} precision={1} suffix="%" />
-                  </Col>
-                  <Col xs={24} sm={8}>
-                    <Statistic title="模型回撤概率" value={Number(detailData.model_probability.model_dd_prob || 0) * 100} precision={1} suffix="%" />
-                  </Col>
-                  <Col xs={24} sm={8}>
-                    <Statistic title="相似样本胜率" value={Number(detailData?.similar_sample_evidence?.win_rate || 0) * 100} precision={1} suffix="%" />
-                  </Col>
-                </Row>
+                <h4>{detailData?.model_probability?.production_ml_ready ? '机器学习概率与解释' : '弱模型解释'}</h4>
+                {detailData?.model_probability?.production_ml_ready && (
+                  <Row gutter={12}>
+                    <Col xs={24} sm={8}>
+                      <Statistic title="模型上涨概率" value={Number(detailData.model_probability.model_up_prob || 0) * 100} precision={1} suffix="%" />
+                    </Col>
+                    <Col xs={24} sm={8}>
+                      <Statistic title="模型回撤概率" value={Number(detailData.model_probability.model_dd_prob || 0) * 100} precision={1} suffix="%" />
+                    </Col>
+                    <Col xs={24} sm={8}>
+                      <Statistic title="相似样本胜率" value={Number(detailData?.similar_sample_evidence?.win_rate || 0) * 100} precision={1} suffix="%" />
+                    </Col>
+                  </Row>
+                )}
                 <Space wrap style={{ marginTop: 12 }}>
                   {(detailData.factor_contributions || []).slice(0, 8).map((item) => (
                     <Tooltip key={item.feature} title={item.description || item.feature}>
@@ -1009,9 +1007,10 @@ const SmartScreen = () => {
                 </Space>
                 <Alert
                   style={{ marginTop: 12 }}
-                  type={detailData?.model_probability?.status === 'live_ready' ? 'success' : 'warning'}
+                  type={detailData?.model_probability?.production_ml_ready ? 'success' : 'warning'}
                   showIcon
-                  message={detailData?.similar_sample_evidence?.message || '模型解释仅用于提高透明度，不构成收益承诺。'}
+                  message={detailData?.model_probability?.readiness_message || detailData?.similar_sample_evidence?.message || '模型解释仅用于提高透明度，不构成收益承诺。'}
+                  description={detailData?.model_probability?.production_ml_ready ? null : '未通过样本外验证前，隐藏模型上涨/回撤概率，避免误读为可靠胜率。'}
                 />
               </>
             )}

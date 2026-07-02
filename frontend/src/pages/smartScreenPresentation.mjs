@@ -33,6 +33,41 @@ export function getPickActionPresentation(pick, canPaperBuy) {
   }
 }
 
+export function getPickDecisionActionPresentation(pick) {
+  const grade = pick?.decision?.grade || 'C'
+  const mode = pick?.decision?.mode || 'watch_only'
+  const level = pick?.decision?.level || ''
+  if (grade === 'A' && mode === 'real_allowed') {
+    return { text: '交易计划', color: 'red' }
+  }
+  if (['A', 'B'].includes(grade) && mode !== 'watch_only') {
+    return { text: '模拟验证', color: 'orange' }
+  }
+  if (grade === 'C') {
+    return { text: level || '观察等待', color: 'blue' }
+  }
+  if (grade === 'D') {
+    return { text: '不建议', color: 'default' }
+  }
+  if (pick?.action === 'pass') {
+    return { text: '跳过', color: 'default' }
+  }
+  return { text: '观察', color: 'blue' }
+}
+
+export function getProbabilityModelPresentation(probabilityModel = {}) {
+  const label = probabilityModel?.label || '规则代理概率'
+  const calibrated = Boolean(probabilityModel?.calibrated)
+  const isWeakMl = probabilityModel?.type === 'ml_explainable_probability' && !calibrated
+  return {
+    label,
+    alertType: calibrated ? 'success' : 'warning',
+    message: calibrated
+      ? '概率已完成历史样本校准'
+      : (isWeakMl ? '当前模型概率未通过样本外校准' : '当前上涨/回撤概率仍是规则代理概率'),
+  }
+}
+
 export function getRankPresentation(rank) {
   const numericRank = Number(rank)
   const hasRank = Number.isFinite(numericRank) && numericRank > 0

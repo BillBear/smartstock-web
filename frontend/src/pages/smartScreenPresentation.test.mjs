@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import {
   getRankPresentation,
   getPickActionPresentation,
+  getPickDecisionActionPresentation,
+  getProbabilityModelPresentation,
   RANKING_TABLE_COLUMN_KEYS,
 } from './smartScreenPresentation.mjs'
 
@@ -73,6 +75,65 @@ assert.deepEqual(
     canShowPaperAction: false,
     paperActionLabel: '模拟买入',
     paperDisabledReason: '非交易日不生成交易计划，不能模拟验证',
+  },
+)
+
+assert.deepEqual(
+  getPickDecisionActionPresentation({
+    action: 'buy',
+    decision: { grade: 'C', mode: 'watch_only', level: '观察等待' },
+  }),
+  {
+    text: '观察等待',
+    color: 'blue',
+  },
+)
+
+assert.deepEqual(
+  getPickDecisionActionPresentation({
+    action: 'buy',
+    decision: { grade: 'B', mode: 'paper_only', level: '小仓试错' },
+  }),
+  {
+    text: '模拟验证',
+    color: 'orange',
+  },
+)
+
+assert.deepEqual(
+  getPickDecisionActionPresentation({
+    action: 'buy',
+    decision: { grade: 'A', mode: 'real_allowed', level: '核心候选' },
+  }),
+  {
+    text: '交易计划',
+    color: 'red',
+  },
+)
+
+assert.deepEqual(
+  getProbabilityModelPresentation({
+    type: 'ml_explainable_probability',
+    label: '弱模型参考',
+    calibrated: false,
+  }),
+  {
+    label: '弱模型参考',
+    alertType: 'warning',
+    message: '当前模型概率未通过样本外校准',
+  },
+)
+
+assert.deepEqual(
+  getProbabilityModelPresentation({
+    type: 'historical_score_bucket',
+    label: '历史校准概率',
+    calibrated: true,
+  }),
+  {
+    label: '历史校准概率',
+    alertType: 'success',
+    message: '概率已完成历史样本校准',
   },
 )
 
