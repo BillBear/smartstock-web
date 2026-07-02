@@ -2311,15 +2311,23 @@ class CoachService:
             model = pick.get("probability_model") or {}
             ml_probability = pick.get("model_probability") or {}
             if ml_probability:
+                production_ml_ready = bool(ml_probability.get("production_ml_ready"))
+                readiness_message = ml_probability.get("readiness_message")
                 model = {
                     "type": "ml_explainable_probability",
                     "label": ml_probability.get("label") or "机器学习校准概率",
-                    "calibrated": True,
+                    "calibrated": production_ml_ready,
                     "model_version_id": pick.get("model_version_id"),
                     "status": ml_probability.get("status"),
+                    "model_validation_status": ml_probability.get("model_validation_status"),
+                    "production_ml_ready": production_ml_ready,
                     "message": (
-                        f"基于模型 {pick.get('model_version_id')} 的历史样本概率层；"
-                        f"训练区间 {ml_probability.get('train_start') or '-'} 至 {ml_probability.get('train_end') or '-'}。"
+                        readiness_message
+                        if not production_ml_ready and readiness_message
+                        else (
+                            f"基于模型 {pick.get('model_version_id')} 的历史样本概率层；"
+                            f"训练区间 {ml_probability.get('train_start') or '-'} 至 {ml_probability.get('train_end') or '-'}。"
+                        )
                     ),
                 }
                 pick["probability_model"] = model
@@ -2372,6 +2380,14 @@ class CoachService:
         elif primary_action == "light_trade":
             suggested_total_exposure = min(suggested_total_exposure, 8.0)
 
+        ml_probabilities = [
+            p.get("model_probability") for p in picks
+            if p.get("model_probability")
+        ]
+        first_ml_probability = ml_probabilities[0] if ml_probabilities else {}
+        any_ml_probability = bool(ml_probabilities)
+        any_ml_ready = any(bool(item.get("production_ml_ready")) for item in ml_probabilities)
+
         return {
             "primary_action": primary_action,
             "headline": headline,
@@ -2382,13 +2398,15 @@ class CoachService:
             "recommended_count": len(recommended),
             "suggested_total_exposure_pct": round(suggested_total_exposure, 2),
             "probability_model": {
-                "type": "ml_explainable_probability" if any(p.get("model_probability") for p in picks) else (probability_calibration.get("type") or "proxy_rule"),
-                "label": "机器学习校准概率" if any(p.get("model_probability") for p in picks) else (probability_calibration.get("label") or "规则代理概率"),
-                "calibrated": bool(any(p.get("model_probability") for p in picks) or probability_calibration.get("calibrated")),
+                "type": "ml_explainable_probability" if any_ml_probability else (probability_calibration.get("type") or "proxy_rule"),
+                "label": (first_ml_probability.get("label") if any_ml_probability else None) or probability_calibration.get("label") or "规则代理概率",
+                "calibrated": bool(any_ml_ready if any_ml_probability else probability_calibration.get("calibrated")),
                 "sample_count": probability_calibration.get("sample_count") or 0,
                 "next_phase": (
                     "继续用滚动回测监控模型漂移，并只在策略准入通过时小仓实盘。"
-                    if any(p.get("model_probability") for p in picks)
+                    if any_ml_ready
+                    else "需要完成全市场训练、股票 holdout、最终时间 holdout 和分桶命中率验证后，才能把 ML 概率展示为可靠胜率。"
+                    if any_ml_probability
                     else "继续滚动回测和模拟交易，扩大每个评分分层样本。"
                     if probability_calibration.get("calibrated")
                     else "需要至少30笔闭环回测交易，才能完成历史概率校准。"

@@ -205,6 +205,45 @@ class CoachServiceObservabilityTests(unittest.TestCase):
         self.assertEqual(market_state["news_context"]["error"], "news_service_unavailable")
         self.assertIn("market news summary unavailable", "\n".join(captured.output))
 
+    def test_weak_ml_probability_is_not_displayed_as_calibrated(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = CoachService(
+                data_source_manager=None,
+                store=CoachStore(str(Path(tmpdir) / "coach.db")),
+                news_service=None,
+            )
+            pick = {
+                "symbol": "000001",
+                "name": "平安银行",
+                "action": "buy",
+                "up_prob": 0.7,
+                "dd_prob": 0.2,
+                "expected_edge_pct": 3.0,
+                "profit_factor_proxy": 1.6,
+                "position_pct": 5,
+                "score_breakdown": {"total": 90.0},
+                "model_version_id": "ml_small",
+                "model_probability": {
+                    "label": "弱模型参考",
+                    "production_ml_ready": False,
+                    "model_validation_status": "insufficient",
+                    "readiness_message": "模型训练证据不足，仅能作为弱参考。",
+                },
+            }
+
+            trade_plan = service._attach_trade_plan(
+                [pick],
+                strategy_health={"live_ready": False, "status": "paper_only"},
+                market_state={"state_tag": "neutral"},
+                risk_profile={"risk_level": "medium", "max_position_pct": 10},
+            )
+
+        self.assertEqual(pick["probability_model"]["label"], "弱模型参考")
+        self.assertFalse(pick["probability_model"]["calibrated"])
+        self.assertEqual(pick["decision"]["probability_reliability"], "待历史模型校准")
+        self.assertEqual(trade_plan["probability_model"]["label"], "弱模型参考")
+        self.assertFalse(trade_plan["probability_model"]["calibrated"])
+
     def test_universe_funnel_diagnostics_explain_filter_and_final_output_layers(self):
         class DataSourceStub:
             def __init__(self, entries):

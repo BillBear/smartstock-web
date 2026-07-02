@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from app.evaluation.ml_readiness import assess_ml_readiness
 from app.services.ml_dataset_builder import MLDatasetBuilder
 from app.services.ml_feature_builder import MLFeatureBuilder
 
@@ -190,6 +191,15 @@ class MLModelService:
             },
             "tree_rules": tree_rules[:6000],
         }
+        full_metrics["ml_readiness"] = assess_ml_readiness(
+            {
+                "train_start": meta.get("train_start"),
+                "train_end": meta.get("train_end"),
+                "sample_count": int(meta.get("sample_count") or len(df)),
+                "train_config": payload,
+                "metrics": full_metrics,
+            }
+        )
         record = {
             "model_id": model_id,
             "model_code": "explainable_lr_v1",
@@ -214,6 +224,8 @@ class MLModelService:
             "status": record["status"],
             "sample_meta": meta,
             "metrics": full_metrics,
+            "ml_readiness": full_metrics["ml_readiness"],
+            "model_validation_status": full_metrics["ml_readiness"]["status"],
             "factor_importance": importance[:12],
             "feature_schema": self.feature_builder.describe_features(),
         }
@@ -267,6 +279,7 @@ class MLModelService:
         latest = self.store.get_latest_ml_model()
         if not latest:
             return {"available": False, "message": "暂无已训练模型"}
+        latest = self._attach_readiness(latest)
         return {
             "available": True,
             **latest,
@@ -278,12 +291,25 @@ class MLModelService:
         record = self.store.get_ml_model(model_id)
         if not record:
             return {"available": False, "message": "模型不存在"}
+        record = self._attach_readiness(record)
         return {
             "available": True,
             **record,
             "factor_importance": self.store.list_ml_factor_importance(model_id, limit=50),
             "feature_schema": self.feature_builder.describe_features(),
         }
+
+    def _attach_readiness(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        enriched = dict(record or {})
+        metrics = dict(enriched.get("metrics") or {})
+        readiness = assess_ml_readiness({**enriched, "metrics": metrics})
+        metrics["ml_readiness"] = readiness
+        enriched["metrics"] = metrics
+        enriched["ml_readiness"] = readiness
+        enriched["model_validation_status"] = readiness.get("status")
+        enriched["production_ml_ready"] = bool(readiness.get("production_ml_ready"))
+        enriched["model_role"] = readiness.get("role")
+        return enriched
 
     @staticmethod
     def _predict_class1(model, x: pd.DataFrame) -> float:
@@ -365,7 +391,7 @@ class MLModelService:
         if not loaded:
             return None
 
-        record = loaded["record"]
+        record = self._attach_readiness(loaded["record"])
         feature_names = record.get("feature_names") or self.feature_builder.FEATURE_NAMES
         features = feature_payload.get("features") or {}
         x = pd.DataFrame([[features.get(name, 0.0) for name in feature_names]], columns=feature_names)
@@ -383,16 +409,23 @@ class MLModelService:
 
         contributions = self._factor_contributions(loaded, features)
         similar = self._similar_evidence(record.get("model_id"), features, feature_names)
+        readiness = record.get("ml_readiness") or {}
+        production_ml_ready = bool(readiness.get("production_ml_ready"))
         result = {
             "model_version_id": record.get("model_id"),
+            "model_readiness": readiness,
             "model_probability": {
                 "model_up_prob": round(model_up_prob, 4),
                 "model_dd_prob": round(model_dd_prob, 4),
                 "probability_edge_pct": round(probability_edge, 4),
                 "final_score": round(final_score, 2),
-                "label": "机器学习校准概率",
+                "label": "机器学习校准概率" if production_ml_ready else readiness.get("label") or "弱模型参考",
                 "model_code": record.get("model_code"),
                 "status": record.get("status"),
+                "model_validation_status": readiness.get("status"),
+                "production_ml_ready": production_ml_ready,
+                "role": readiness.get("role"),
+                "readiness_message": readiness.get("message"),
                 "train_start": record.get("train_start"),
                 "train_end": record.get("train_end"),
             },
