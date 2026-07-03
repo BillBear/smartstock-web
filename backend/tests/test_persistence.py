@@ -76,6 +76,23 @@ class CoachStorePersistenceTests(unittest.TestCase):
         self.assertTrue(callable(module.migrate))
         self.assertTrue(callable(module.fetch_all))
 
+    def test_postgres_schema_init_acquires_advisory_lock_before_ddl(self):
+        class FakeConnection:
+            def __init__(self):
+                self.executed = []
+
+            def execute(self, statement, params=None):
+                self.executed.append((str(statement), params or {}))
+
+        store = object.__new__(CoachStore)
+        store._is_postgres = True
+        conn = FakeConnection()
+
+        store._execute_schema_statements(conn, ["CREATE TABLE example (id INTEGER)"])
+
+        self.assertIn("pg_advisory_xact_lock", conn.executed[0][0])
+        self.assertIn("CREATE TABLE example", conn.executed[1][0])
+
     def test_existing_sqlite_pick_snapshots_schema_gets_risk_level_column(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "coach.sqlite3"

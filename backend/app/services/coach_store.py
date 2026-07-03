@@ -13,6 +13,9 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 
+SCHEMA_INIT_LOCK_ID = 2026070301
+
+
 class CoachStore:
     """轻量化持久化存储层（推荐 PostgreSQL）"""
 
@@ -509,9 +512,14 @@ class CoachStore:
         statements = [part.strip() for part in sql.split(";") if part.strip()]
         with self._lock:
             with self.engine.begin() as conn:
-                for stmt in statements:
-                    conn.execute(text(stmt))
+                self._execute_schema_statements(conn, statements)
                 self._ensure_pick_snapshots_schema(conn)
+
+    def _execute_schema_statements(self, conn, statements: List[str]) -> None:
+        if self._is_postgres:
+            conn.execute(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": SCHEMA_INIT_LOCK_ID})
+        for stmt in statements:
+            conn.execute(text(stmt))
 
     def _ensure_pick_snapshots_schema(self, conn) -> None:
         if self._is_postgres:
