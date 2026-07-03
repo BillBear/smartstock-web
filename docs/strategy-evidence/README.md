@@ -38,6 +38,10 @@ strategy evidence and the artifact includes the required sample split, data
 source, execution assumptions, costs, slippage, metrics, and reproducibility
 metadata.
 
+Current readiness summary:
+
+- [Backtest baseline readiness](backtest-baseline/current-readiness.md)
+
 ## Fixture Smoke Baseline
 
 The harness also supports deterministic smoke mode:
