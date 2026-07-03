@@ -56,7 +56,7 @@ def write_markdown_report(report: dict, output_path: Path) -> Path:
                 p3=float(metrics.get("precision_at_3") or 0.0),
                 p5=float(metrics.get("precision_at_5") or 0.0),
                 ndcg=float(metrics.get("ndcg_at_10") or 0.0),
-                ret=float(metrics.get("top_5_avg_return_10d") or 0.0),
+                ret=float(metrics.get("top_5_avg_return_pct") or 0.0),
                 dd=float(metrics.get("max_drawdown") or 0.0),
             )
         )
