@@ -60,9 +60,13 @@ METRIC_FIELDS = [
     "precision_at_3",
     "precision_at_5",
     "ndcg_at_10",
-    "top_5_avg_return_10d",
+    "top_5_avg_return_pct",
     "max_drawdown",
 ]
+
+METRIC_ALIASES = {
+    "top_5_avg_return_pct": ["top_5_avg_return_10d"],
+}
 
 
 def build_recall_experiment_report(
@@ -145,7 +149,7 @@ def _build_row(experiment: Dict[str, Any], summary: Optional[Dict[str, Any]]) ->
     row["candidate_row_count"] = int(summary.get("candidate_row_count") or 0)
     row["coverage"] = summary.get("coverage") or {}
     metrics = summary.get("metrics") or {}
-    row["metrics"] = {field: _safe_float(metrics.get(field)) for field in METRIC_FIELDS}
+    row["metrics"] = {field: _metric_value(metrics, field) for field in METRIC_FIELDS}
     return row
 
 
@@ -168,7 +172,7 @@ def _select_winner(rows: List[Dict[str, Any]], baseline: Dict[str, Any]) -> Opti
         key=lambda row: (
             row["deltas"].get("precision_at_3", 0.0),
             row["deltas"].get("ndcg_at_10", 0.0),
-            row["deltas"].get("top_5_avg_return_10d", 0.0),
+            row["deltas"].get("top_5_avg_return_pct", 0.0),
         ),
         reverse=True,
     )[0]
@@ -189,10 +193,18 @@ def _passes_switch_gates(row: Dict[str, Any], baseline: Dict[str, Any], deltas: 
             _safe_float(metrics.get("precision_at_5")) >= 0.60,
             deltas.get("precision_at_3", 0.0) > 0.0,
             deltas.get("ndcg_at_10", 0.0) > 0.0,
-            deltas.get("top_5_avg_return_10d", 0.0) > 0.0,
+            deltas.get("top_5_avg_return_pct", 0.0) > 0.0,
             _safe_float(metrics.get("max_drawdown")) <= _safe_float(baseline_metrics.get("max_drawdown")),
         ]
     )
+
+
+def _metric_value(metrics: Dict[str, Any], field: str) -> float:
+    candidates = [field] + METRIC_ALIASES.get(field, [])
+    for key in candidates:
+        if key in metrics:
+            return _safe_float(metrics.get(key))
+    return 0.0
 
 
 def _safe_float(value: Any) -> float:

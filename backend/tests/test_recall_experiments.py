@@ -105,6 +105,27 @@ class RecallExperimentReportTests(unittest.TestCase):
         self.assertGreater(report["winner"]["deltas"]["precision_at_3"], 0)
         self.assertGreater(report["winner"]["deltas"]["ndcg_at_10"], 0)
 
+    def test_reads_current_ranking_summary_topk_return_metric_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_summary(
+                root,
+                "baseline",
+                metrics={
+                    "precision_at_3": 0.10,
+                    "precision_at_5": 0.12,
+                    "ndcg_at_10": 0.20,
+                    "top_5_avg_return_pct": -0.55,
+                    "max_drawdown": 0.08,
+                },
+            )
+
+            report = build_recall_experiment_report(root)
+
+        baseline = report["experiments"][0]
+        self.assertEqual(baseline["key"], "baseline")
+        self.assertEqual(baseline["metrics"]["top_5_avg_return_pct"], -0.55)
+
 
 if __name__ == "__main__":
     unittest.main()
