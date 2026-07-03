@@ -1,8 +1,10 @@
+import json
 import unittest
 import tempfile
 from pathlib import Path
 
 import pandas as pd
+from sqlalchemy import text
 
 from app.evaluation.ranking_replay import (
     RankingReplayService,
@@ -253,6 +255,59 @@ class RankingReplayTests(unittest.TestCase):
             )
 
             self.assertEqual([row["symbol"] for row in result["rows"]], ["000002"])
+
+    def test_replay_service_treats_blank_legacy_risk_snapshots_as_medium_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = CoachStore(str(Path(temp_dir) / "coach.sqlite3"))
+            with store.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO pick_snapshots (
+                            pick_id, user_id, trade_date, symbol, name, strategy_code, risk_level, snapshot_json, created_at
+                        ) VALUES (
+                            :pick_id, :user_id, :trade_date, :symbol, :name, :strategy_code, :risk_level, :snapshot_json, :created_at
+                        )
+                        """
+                    ),
+                    {
+                        "pick_id": "legacy-blank-risk-000001",
+                        "user_id": "default",
+                        "trade_date": "2026-01-02",
+                        "symbol": "000001",
+                        "name": "legacy",
+                        "strategy_code": "trend_breakout",
+                        "risk_level": "",
+                        "snapshot_json": json.dumps(
+                            {"pick_id": "legacy-blank-risk-000001", "symbol": "000001", "rank_no": 1}
+                        ),
+                        "created_at": "2026-01-02",
+                    },
+                )
+            store.upsert_pick_snapshots(
+                user_id="default",
+                trade_date="2026-01-02",
+                strategy_code="trend_breakout",
+                risk_level="medium",
+                picks=[{"pick_id": "medium-000002", "symbol": "000002", "rank_no": 2}],
+            )
+            service = RankingReplayService(store=store, data_source_manager=FakeHistoryManager(), user_id="default")
+
+            medium_result = service.replay(
+                strategy_code="trend_breakout",
+                risk_level="medium",
+                start_date="2026-01-02",
+                end_date="2026-01-02",
+            )
+            low_result = service.replay(
+                strategy_code="trend_breakout",
+                risk_level="low",
+                start_date="2026-01-02",
+                end_date="2026-01-02",
+            )
+
+        self.assertEqual([row["symbol"] for row in medium_result["rows"]], ["000001", "000002"])
+        self.assertEqual(low_result["rows"], [])
 
     def test_replay_service_preserves_prior_buy_when_latest_action_is_closed(self):
         with tempfile.TemporaryDirectory() as temp_dir:

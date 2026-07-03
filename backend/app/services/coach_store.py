@@ -936,7 +936,11 @@ class CoachStore:
                         WHERE user_id = :user_id
                           AND trade_date = :trade_date
                           AND (:strategy_code = '' OR strategy_code = :strategy_code)
-                          AND (:risk_level = '' OR risk_level = :risk_level)
+                          AND (
+                              :risk_level = ''
+                              OR risk_level = :risk_level
+                              OR (:risk_level = 'medium' AND COALESCE(risk_level, '') = '')
+                          )
                         ORDER BY created_at ASC, pick_id ASC
                         """
                     ),
