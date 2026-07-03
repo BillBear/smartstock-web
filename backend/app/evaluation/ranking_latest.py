@@ -7,6 +7,19 @@ from typing import Any, Dict
 
 
 MIN_PRODUCTION_COVERED_DATES = 30
+MIN_EVALUATED_METRIC_ROWS = 1
+REQUIRED_METRIC_FIELDS = [
+    "evaluated_metric_row_count",
+    "precision_at_3",
+    "precision_at_5",
+    "precision_at_10",
+    "recall_at_10",
+    "ndcg_at_10",
+    "mrr",
+    "top_3_avg_return_pct",
+    "top_5_avg_return_pct",
+    "top_10_avg_return_pct",
+]
 
 
 def _is_smoke_summary(payload: Dict[str, Any]) -> bool:
@@ -24,6 +37,8 @@ def annotate_ranking_evidence_readiness(payload: Dict[str, Any]) -> Dict[str, An
     candidate_row_count = _safe_int(output.get("candidate_row_count"), 0)
     fixture = _is_smoke_summary(output)
     summary_metrics = output.get("summary_metrics") or output.get("metrics") or {}
+    missing_metric_fields = [field for field in REQUIRED_METRIC_FIELDS if field not in summary_metrics]
+    evaluated_metric_row_count = _safe_int(summary_metrics.get("evaluated_metric_row_count"), 0)
 
     if fixture:
         blocking_reasons.append("fixture_smoke")
@@ -33,6 +48,10 @@ def annotate_ranking_evidence_readiness(payload: Dict[str, Any]) -> Dict[str, An
         blocking_reasons.append(f"covered_dates_below_{MIN_PRODUCTION_COVERED_DATES}")
     if candidate_row_count <= 0:
         blocking_reasons.append("candidate_rows_empty")
+    if missing_metric_fields:
+        blocking_reasons.append("ranking_metrics_missing")
+    elif evaluated_metric_row_count < MIN_EVALUATED_METRIC_ROWS:
+        blocking_reasons.append("evaluated_metric_rows_empty")
 
     ready = not blocking_reasons
     output["summary_metrics"] = summary_metrics
@@ -41,6 +60,8 @@ def annotate_ranking_evidence_readiness(payload: Dict[str, Any]) -> Dict[str, An
     output["requested_date_count"] = _safe_int(coverage.get("requested_date_count"), 0)
     output["report_path"] = output.get("report_path") or output.get("summary_path")
     output["readiness_blockers"] = blocking_reasons
+    output["required_metric_fields"] = REQUIRED_METRIC_FIELDS
+    output["missing_metric_fields"] = missing_metric_fields
     output["production_evidence"] = ready
     output["evidence_type"] = "real" if ready else ("smoke" if fixture else "real_insufficient")
     output["evidence_readiness"] = {
@@ -51,6 +72,9 @@ def annotate_ranking_evidence_readiness(payload: Dict[str, Any]) -> Dict[str, An
         "required_covered_date_count": MIN_PRODUCTION_COVERED_DATES,
         "coverage_status": coverage_status or None,
         "candidate_row_count": candidate_row_count,
+        "evaluated_metric_row_count": evaluated_metric_row_count,
+        "required_metric_fields": REQUIRED_METRIC_FIELDS,
+        "missing_metric_fields": missing_metric_fields,
     }
     return output
 
