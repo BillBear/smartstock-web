@@ -5,6 +5,8 @@ import math
 from statistics import mean
 from typing import Any, Dict, List, Optional
 
+from app.evaluation.ranking_metrics import filter_complete_horizon_rows
+
 
 DEFAULT_FACTOR_FIELDS = [
     "factor_ranking_score",
@@ -32,7 +34,7 @@ def build_ranking_diagnostics(rows: List[Dict[str, Any]], horizon: int) -> Dict[
     h = int(horizon)
     return_key = f"return_{h}d_pct"
     strong_key = f"strong_{h}d"
-    normalized = [dict(row) for row in rows or []]
+    normalized = [dict(row) for row in filter_complete_horizon_rows(rows, h, include_untradable=True)]
     sorted_by_return = sorted(normalized, key=lambda row: _safe_float(row.get(return_key), 0.0), reverse=True)
     top_decile_cutoff = _quantile([_safe_float(row.get(return_key), 0.0) for row in normalized], 0.9)
     bottom_decile_cutoff = _quantile([_safe_float(row.get(return_key), 0.0) for row in normalized], 0.1)
@@ -77,11 +79,12 @@ def factor_correlations(
     h = int(horizon)
     return_key = f"return_{h}d_pct"
     fields = factor_fields or DEFAULT_FACTOR_FIELDS
+    eligible_rows = filter_complete_horizon_rows(rows, h, include_untradable=True)
     results = []
     for field in fields:
         pairs = [
             (_safe_float(row.get(field), None), _safe_float(row.get(return_key), None))
-            for row in rows or []
+            for row in eligible_rows
         ]
         pairs = [(x, y) for x, y in pairs if x is not None and y is not None]
         if len(pairs) < 2:

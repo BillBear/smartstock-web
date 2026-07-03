@@ -11,29 +11,32 @@ def evaluate_daily_ranking(rows: List[Dict[str, Any]], horizon: int, include_unt
     h = int(horizon)
     all_rows = _sort_rows(rows)
     tradable_rows = all_rows if include_untradable else [row for row in all_rows if _is_tradable(row)]
+    eligible_rows = [row for row in tradable_rows if _has_complete_horizon(row, h)]
     strong_key = f"strong_{h}d"
     return_key = f"return_{h}d_pct"
-    strong_rows = [row for row in tradable_rows if bool(row.get(strong_key))]
-    top10 = [row for row in tradable_rows if _rank_no(row) <= 10]
-    first_strong = next((row for row in tradable_rows if bool(row.get(strong_key))), None)
+    strong_rows = [row for row in eligible_rows if bool(row.get(strong_key))]
+    top10 = [row for row in eligible_rows if _rank_no(row) <= 10]
+    first_strong = next((row for row in eligible_rows if bool(row.get(strong_key))), None)
 
     metrics = {
         "horizon": h,
         "candidate_count": len(all_rows),
         "tradable_candidate_count": len(tradable_rows),
+        "labeled_candidate_count": len(eligible_rows),
+        "incomplete_label_count": len(tradable_rows) - len(eligible_rows),
         "strong_candidate_count": len(strong_rows),
-        "precision_at_3": _precision_at_k(tradable_rows, strong_key, 3),
-        "precision_at_5": _precision_at_k(tradable_rows, strong_key, 5),
-        "precision_at_10": _precision_at_k(tradable_rows, strong_key, 10),
+        "precision_at_3": _precision_at_k(eligible_rows, strong_key, 3),
+        "precision_at_5": _precision_at_k(eligible_rows, strong_key, 5),
+        "precision_at_10": _precision_at_k(eligible_rows, strong_key, 10),
         "recall_at_10": _round_ratio(
             sum(1 for row in top10 if bool(row.get(strong_key))),
             len(strong_rows),
         ),
-        "ndcg_at_10": _ndcg_at_k(tradable_rows, return_key, 10),
+        "ndcg_at_10": _ndcg_at_k(eligible_rows, return_key, 10),
         "mrr": round(1.0 / _rank_no(first_strong), 6) if first_strong else 0.0,
-        "top_3_avg_return_pct": _top_k_avg_return(tradable_rows, return_key, 3),
-        "top_5_avg_return_pct": _top_k_avg_return(tradable_rows, return_key, 5),
-        "top_10_avg_return_pct": _top_k_avg_return(tradable_rows, return_key, 10),
+        "top_3_avg_return_pct": _top_k_avg_return(eligible_rows, return_key, 3),
+        "top_5_avg_return_pct": _top_k_avg_return(eligible_rows, return_key, 5),
+        "top_10_avg_return_pct": _top_k_avg_return(eligible_rows, return_key, 10),
     }
     return metrics
 
@@ -43,7 +46,7 @@ def rank_percentile_return_curve(rows: List[Dict[str, Any]], horizon: int, bucke
     h = int(horizon)
     bucket_count = max(1, int(buckets or 10))
     return_key = f"return_{h}d_pct"
-    tradable_rows = [row for row in _sort_rows(rows) if _is_tradable(row)]
+    tradable_rows = [row for row in _sort_rows(rows) if _is_tradable(row) and _has_complete_horizon(row, h)]
     total = len(tradable_rows)
     if total == 0:
         return []
@@ -121,6 +124,22 @@ def _rank_no(row: Dict[str, Any] | None) -> int:
 
 def _is_tradable(row: Dict[str, Any]) -> bool:
     return str(row.get("tradability_status") or "tradable") == "tradable"
+
+
+def _has_complete_horizon(row: Dict[str, Any], horizon: int) -> bool:
+    incomplete = row.get("incomplete_horizons") or []
+    try:
+        incomplete_set = {int(item) for item in incomplete}
+    except TypeError:
+        incomplete_set = set()
+    return int(horizon) not in incomplete_set
+
+
+def filter_complete_horizon_rows(rows: List[Dict[str, Any]], horizon: int, include_untradable: bool = False) -> List[Dict[str, Any]]:
+    """Return sorted rows whose label window is complete for the requested horizon."""
+    sorted_rows = _sort_rows(rows)
+    filtered = sorted_rows if include_untradable else [row for row in sorted_rows if _is_tradable(row)]
+    return [row for row in filtered if _has_complete_horizon(row, int(horizon))]
 
 
 def _round_ratio(numerator: float, denominator: float) -> float:

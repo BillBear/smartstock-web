@@ -52,6 +52,34 @@ class RankingDiagnosticTests(unittest.TestCase):
         self.assertAlmostEqual(correlations[0]["pearson"], 1.0)
         self.assertAlmostEqual(correlations[0]["spearman"], 1.0)
 
+    def test_diagnostics_exclude_incomplete_horizon_rows(self):
+        rows = [
+            {
+                "symbol": "000001",
+                "rank_no": 1,
+                "return_10d_pct": 0.0,
+                "strong_10d": False,
+                "tp_sl_path": "no_trigger",
+                "market_state_tag": "neutral",
+                "incomplete_horizons": [10],
+            },
+            {
+                "symbol": "000002",
+                "rank_no": 12,
+                "return_10d_pct": 18.0,
+                "strong_10d": True,
+                "tp_sl_path": "tp_before_sl",
+                "market_state_tag": "neutral",
+                "incomplete_horizons": [],
+            },
+        ]
+
+        report = build_ranking_diagnostics(rows, horizon=10)
+
+        self.assertEqual(report["early_loser_samples"], [])
+        self.assertEqual(report["late_winner_samples"][0]["symbol"], "000002")
+        self.assertEqual(report["market_state_breakdown"]["neutral"]["row_count"], 1)
+
     def test_buy_trigger_conservatism_counts_unbought_strong_top_candidates(self):
         rows = [
             {"symbol": "000001", "rank_no": 3, "return_5d_pct": 12.0, "strong_5d": True, "was_bought": False, "market_state_tag": "offensive"},

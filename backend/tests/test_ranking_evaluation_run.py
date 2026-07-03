@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.models.schemas import CoachRankingEvaluationRunRequest
+from app.evaluation.ranking_report import build_ranking_report
 
 
 class RankingEvaluationRunTests(unittest.TestCase):
@@ -34,6 +36,84 @@ class RankingEvaluationRunTests(unittest.TestCase):
         self.assertEqual(summary["evidence_type"], "smoke")
         self.assertEqual(summary["evidence_readiness"]["status"], "insufficient")
         self.assertIn("fixture_smoke", summary["evidence_readiness"]["blocking_reasons"])
+
+    def test_report_summary_excludes_incomplete_horizons_from_dynamic_top_k_metrics(self):
+        rows = [
+            {
+                "trade_date": "2026-07-03",
+                "symbol": "000001",
+                "rank_no": 1,
+                "tradability_status": "tradable",
+                "strong_5d": False,
+                "return_5d_pct": 0.0,
+                "incomplete_horizons": [5, 10, 20],
+            },
+            {
+                "trade_date": "2026-07-03",
+                "symbol": "000002",
+                "rank_no": 2,
+                "tradability_status": "tradable",
+                "strong_5d": True,
+                "return_5d_pct": 9.0,
+                "incomplete_horizons": [],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = build_ranking_report(
+                candidate_rows=rows,
+                strategy_code="trend_breakout",
+                risk_level="medium",
+                start_date="2026-07-03",
+                end_date="2026-07-03",
+                horizons=[5],
+                top_k_values=[3],
+                output_dir=tmp,
+                label_config={"horizons": [5]},
+                coverage={"coverage_status": "complete", "covered_date_count": 1},
+            )
+            written_summary = json.loads((Path(tmp) / "ranking_summary.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(summary["metrics"]["precision_at_3"], 1.0)
+        self.assertEqual(summary["metrics"]["top_3_avg_return_pct"], 9.0)
+        self.assertEqual(written_summary["metrics"]["precision_at_3"], 1.0)
+
+    def test_report_summary_ignores_days_without_complete_labels_for_horizon(self):
+        rows = [
+            {
+                "trade_date": "2026-07-02",
+                "symbol": "000001",
+                "rank_no": 1,
+                "tradability_status": "tradable",
+                "strong_5d": False,
+                "return_5d_pct": 0.0,
+                "incomplete_horizons": [5],
+            },
+            {
+                "trade_date": "2026-07-03",
+                "symbol": "000002",
+                "rank_no": 1,
+                "tradability_status": "tradable",
+                "strong_5d": True,
+                "return_5d_pct": 9.0,
+                "incomplete_horizons": [],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = build_ranking_report(
+                candidate_rows=rows,
+                strategy_code="trend_breakout",
+                risk_level="medium",
+                start_date="2026-07-02",
+                end_date="2026-07-03",
+                horizons=[5],
+                top_k_values=[3],
+                output_dir=tmp,
+                label_config={"horizons": [5]},
+                coverage={"coverage_status": "complete", "covered_date_count": 2},
+            )
+
+        self.assertEqual(summary["metrics"]["precision_at_3"], 1.0)
+        self.assertEqual(summary["metrics"]["top_3_avg_return_pct"], 9.0)
 
 
 if __name__ == "__main__":

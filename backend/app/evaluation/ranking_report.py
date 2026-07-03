@@ -10,7 +10,7 @@ from statistics import mean
 from typing import Any, Dict, List
 
 from app.evaluation.ranking_diagnostics import build_ranking_diagnostics, factor_correlations
-from app.evaluation.ranking_metrics import evaluate_daily_ranking, rank_percentile_return_curve
+from app.evaluation.ranking_metrics import evaluate_daily_ranking, filter_complete_horizon_rows, rank_percentile_return_curve
 
 
 REPORT_SCHEMA_VERSION = "1.0"
@@ -136,13 +136,17 @@ def _flatten_samples(diagnostics: Dict[str, Dict[str, Any]], key: str, sample_ty
 def _aggregate_metrics(rows: List[Dict[str, Any]], k_values: List[int]) -> Dict[str, Any]:
     if not rows:
         return {}
+    eligible_rows = [row for row in rows if int(row.get("labeled_candidate_count") or 0) > 0]
     metric_keys = ["recall_at_10", "ndcg_at_10", "mrr"]
     for k in k_values:
         metric_keys.append(f"precision_at_{k}")
         metric_keys.append(f"top_{k}_avg_return_pct")
-    aggregate = {}
+    aggregate = {
+        "evaluated_metric_row_count": len(eligible_rows),
+        "skipped_incomplete_metric_row_count": len(rows) - len(eligible_rows),
+    }
     for key in metric_keys:
-        values = [float(row.get(key) or 0.0) for row in rows]
+        values = [float(row.get(key) or 0.0) for row in eligible_rows]
         aggregate[key] = round(mean(values), 6) if values else 0.0
     return aggregate
 
@@ -156,11 +160,7 @@ def _metric_k_values(top_k_values: List[int]) -> List[int]:
 def _attach_dynamic_top_k_metrics(item: Dict[str, Any], rows: List[Dict[str, Any]], horizon: int, k_values: List[int]) -> None:
     return_key = f"return_{int(horizon)}d_pct"
     strong_key = f"strong_{int(horizon)}d"
-    tradable = [
-        row
-        for row in sorted(rows or [], key=lambda row: (_rank_no(row), str(row.get("symbol") or "")))
-        if str(row.get("tradability_status") or "tradable") == "tradable"
-    ]
+    tradable = filter_complete_horizon_rows(rows, horizon)
     for k in k_values:
         denominator = min(k, len(tradable))
         top_rows = [row for row in tradable if _rank_no(row) <= k]

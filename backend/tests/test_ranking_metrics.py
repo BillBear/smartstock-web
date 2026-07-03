@@ -48,6 +48,35 @@ class RankingMetricTests(unittest.TestCase):
         self.assertEqual(metrics["precision_at_3"], 1.0)
         self.assertEqual(metrics["mrr"], 1 / 2)
 
+    def test_incomplete_horizon_rows_are_excluded_from_quality_metrics(self):
+        rows = [
+            {
+                "symbol": "000001",
+                "rank_no": 1,
+                "strong_5d": False,
+                "return_5d_pct": 0.0,
+                "tradability_status": "tradable",
+                "incomplete_horizons": [5, 10, 20],
+            },
+            {
+                "symbol": "000002",
+                "rank_no": 2,
+                "strong_5d": True,
+                "return_5d_pct": 9.0,
+                "tradability_status": "tradable",
+                "incomplete_horizons": [],
+            },
+        ]
+
+        metrics = evaluate_daily_ranking(rows, horizon=5)
+
+        self.assertEqual(metrics["candidate_count"], 2)
+        self.assertEqual(metrics["tradable_candidate_count"], 2)
+        self.assertEqual(metrics["labeled_candidate_count"], 1)
+        self.assertEqual(metrics["incomplete_label_count"], 1)
+        self.assertEqual(metrics["precision_at_3"], 1.0)
+        self.assertEqual(metrics["top_3_avg_return_pct"], 9.0)
+
     def test_rank_percentile_return_curve_uses_decile_buckets(self):
         rows = [
             {"symbol": f"{idx:06d}", "rank_no": idx, "return_20d_pct": float(idx), "tradability_status": "tradable"}
@@ -62,6 +91,29 @@ class RankingMetricTests(unittest.TestCase):
         self.assertAlmostEqual(curve[0]["avg_return_20d_pct"], 1.5)
         self.assertEqual(curve[-1]["row_count"], 2)
         self.assertAlmostEqual(curve[-1]["avg_return_20d_pct"], 9.5)
+
+    def test_rank_percentile_return_curve_excludes_incomplete_horizon_rows(self):
+        rows = [
+            {
+                "symbol": "000001",
+                "rank_no": 1,
+                "return_20d_pct": 0.0,
+                "tradability_status": "tradable",
+                "incomplete_horizons": [20],
+            },
+            {
+                "symbol": "000002",
+                "rank_no": 2,
+                "return_20d_pct": 12.0,
+                "tradability_status": "tradable",
+                "incomplete_horizons": [],
+            },
+        ]
+
+        curve = rank_percentile_return_curve(rows, horizon=20, buckets=1)
+
+        self.assertEqual(curve[0]["row_count"], 1)
+        self.assertEqual(curve[0]["avg_return_20d_pct"], 12.0)
 
     def test_ndcg_at_10_does_not_credit_rank_outside_top_10(self):
         rows = [
