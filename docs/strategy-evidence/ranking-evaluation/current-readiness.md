@@ -8,22 +8,22 @@
 
 - 证据类型：`real_insufficient`
 - 生产证据：`false`
-- 覆盖日期：`25 / 30`
+- 覆盖日期：`25 / 30`（最低门槛视角）
 - 覆盖状态：`partial`
 - 候选行数：`700`
 - 阻塞原因：`coverage_status_partial`、`covered_dates_below_30`
 
-因此，在补齐更长历史快照、样本外和 walk-forward 证据前，仍禁止声称“策略已经通过验证”，也禁止据此调整生产选股、排序、买入、卖出、止盈止损或仓位参数。
+因此，在补齐更长历史快照、样本外、walk-forward 和同区间 baseline 回测证据前，仍禁止声称“策略已经通过验证”，也禁止据此调整生产选股、排序、买入、卖出、止盈止损或仓位参数。
 
 ## 最新真实评估
 
 报告路径：
 
 ```text
-docs/strategy-evidence/ranking-evaluation/runs/trend_breakout-medium-2026-04-28-2026-07-03-20260703213633/ranking_summary.json
+docs/strategy-evidence/ranking-evaluation/runs/trend_breakout-medium-2026-04-28-2026-07-03-20260703215305/ranking_summary.json
 ```
 
-该目录属于本地运行产物，默认不提交。本文档只记录关键摘要和复现命令。
+该目录属于本地运行产物，默认不提交。本文档只记录关键摘要和复现命令。当前口径已排除未来行情窗口不完整的右截断样本；这些样本仍保留在候选行数中，但不参与 Precision@K、Recall@K、NDCG@K、MRR 和 Top-K 平均收益计算。
 
 复现命令：
 
@@ -39,7 +39,7 @@ python scripts/run_ranking_evaluation.py \
   --top-k 3,5,10 \
   --commission 0.0003 \
   --slippage 0.001 \
-  --output-dir /Users/xiong/Documents/SmartStock/smartstock-web/docs/strategy-evidence/ranking-evaluation/runs/trend_breakout-medium-2026-04-28-2026-07-03-20260703213633
+  --output-dir /Users/xiong/Documents/SmartStock/smartstock-web/docs/strategy-evidence/ranking-evaluation/runs/trend_breakout-medium-2026-04-28-2026-07-03-20260703215305
 ```
 
 关键输出：
@@ -47,20 +47,22 @@ python scripts/run_ranking_evaluation.py \
 ```text
 coverage_status: partial
 candidate_rows: 700
-Precision@3=0.08
-Precision@5=0.096
-Precision@10=0.08525
-Recall@10=0.221355
-NDCG@10=0.203369
-MRR=0.183411
+evaluated_metric_row_count: 70
+skipped_incomplete_metric_row_count: 30
+Precision@3=0.114286
+Precision@5=0.137143
+Precision@10=0.121786
+Recall@10=0.316222
+NDCG@10=0.290528
+MRR=0.262016
 ```
 
 Top-K 平均收益：
 
 ```text
-top_3_avg_return_pct: -0.811650
-top_5_avg_return_pct: -0.390855
-top_10_avg_return_pct: -0.844099
+top_3_avg_return_pct: -1.159500
+top_5_avg_return_pct: -0.558365
+top_10_avg_return_pct: -1.205856
 ```
 
 ## 本轮修复对证据覆盖的影响
@@ -81,12 +83,35 @@ candidate_row_count: 700
 
 这只影响历史评估回放和只读快照查询，不改变当前生产选股生成、排序、买卖、止盈止损或仓位逻辑。
 
+## 本轮评估口径修复
+
+历史快照越接近当前日期，未来 `3/5/10/20` 个交易日行情越可能尚未发生。修复前，这些右截断样本会被当作 0 收益参与指标计算，导致排序质量指标被系统性污染。
+
+修复后，ranking evaluation 在计算以下指标时排除指定 horizon 尚未完整标注的样本：
+
+- `Precision@K`
+- `Recall@K`
+- `NDCG@K`
+- `MRR`
+- `Top-K 平均收益`
+- 排名分位收益曲线
+- 诊断样本和因子相关性
+
+本次真实评估中，候选行数仍为 `700`，但指标只基于完整 horizon 标签计算：
+
+```text
+evaluated_metric_row_count: 70
+skipped_incomplete_metric_row_count: 30
+```
+
+这属于评估证据口径修复，不改变生产候选池生成、排序、交易动作或仓位逻辑。
+
 ## 当前问题
 
 1. 覆盖不足：按当前自然日区间统计为 `25 / 67`，且生产门槛要求至少 30 个覆盖交易日。
-2. 指标较弱：`Precision@3=8.0%`、`Precision@5=9.6%`，不能支持高置信交易计划。
+2. 指标较弱：完整标签口径下 `Precision@3=11.43%`、`Precision@5=13.71%`，不能支持高置信交易计划。
 3. Top-K 平均收益为负，说明当前排序仍未证明优于基线。
-4. 近期日期标签不完整：2026-07-01 至 2026-07-03 的未来行情窗口尚未完全发生，指标会受右截断影响。
+4. 近期日期标签不完整：2026-07-01 至 2026-07-03 的未来行情窗口尚未完全发生；当前指标已排除这些不完整 horizon，但覆盖不足的问题仍然存在。
 5. 仍缺少同区间 baseline 回测闭环对比和 walk-forward 分段结论。
 
 ## 下一步准入要求
