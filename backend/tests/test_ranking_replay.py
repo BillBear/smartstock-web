@@ -179,10 +179,35 @@ class RankingReplayTests(unittest.TestCase):
             end_date="2026-01-03",
         )
 
-        self.assertEqual(result["coverage"]["coverage_status"], "partial")
+        self.assertEqual(result["coverage"]["coverage_status"], "complete")
+        self.assertEqual(result["coverage"]["missing_dates"], [])
         self.assertEqual(len(result["rows"]), 1)
         self.assertTrue(result["rows"][0]["was_bought"])
         self.assertEqual(result["rows"][0]["source"], "pick_snapshot")
+
+    def test_replay_service_coverage_excludes_weekend_dates(self):
+        store = FakeStore(
+            {
+                "2026-01-02": [
+                    {
+                        "symbol": "000001",
+                        "rank_no": 1,
+                    }
+                ]
+            }
+        )
+        service = RankingReplayService(store=store, data_source_manager=FakeHistoryManager())
+
+        result = service.replay(
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            start_date="2026-01-02",
+            end_date="2026-01-05",
+        )
+
+        self.assertEqual(result["coverage"]["requested_dates"], ["2026-01-02", "2026-01-05"])
+        self.assertEqual(result["coverage"]["requested_date_count"], 2)
+        self.assertEqual(result["coverage"]["missing_dates"], ["2026-01-05"])
 
     def test_replay_service_reads_real_coach_store_snapshots_and_actions(self):
         with tempfile.TemporaryDirectory() as temp_dir:

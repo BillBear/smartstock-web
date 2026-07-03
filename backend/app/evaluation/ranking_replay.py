@@ -329,7 +329,8 @@ def _date_range(start_date: str, end_date: str) -> List[str]:
     dates = []
     cursor = start
     while cursor <= end:
-        dates.append(cursor.isoformat())
+        if cursor.weekday() < 5:
+            dates.append(cursor.isoformat())
         cursor += timedelta(days=1)
     return dates
 
