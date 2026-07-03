@@ -95,6 +95,38 @@ class RankingLatestTests(unittest.TestCase):
         self.assertTrue(summary["production_evidence"])
         self.assertEqual(summary["evidence_readiness"]["status"], "ready")
 
+    def test_latest_summary_exposes_api_ready_metrics_and_coverage_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = self._write_summary(
+                root,
+                "api-contract-real-run",
+                None,
+                coverage={
+                    "coverage_status": "partial",
+                    "covered_date_count": 6,
+                    "requested_date_count": 67,
+                },
+                candidate_row_count=103,
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["metrics"] = {
+                "precision_at_3": 0.027778,
+                "precision_at_5": 0.016667,
+                "ndcg_at_10": 0.061999,
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            summary = load_latest_ranking_summary(root, include_fixture=False)
+
+        self.assertTrue(summary["available"])
+        self.assertEqual(summary["summary_metrics"]["precision_at_3"], 0.027778)
+        self.assertEqual(summary["coverage_status"], "partial")
+        self.assertEqual(summary["covered_date_count"], 6)
+        self.assertEqual(summary["requested_date_count"], 67)
+        self.assertEqual(summary["report_path"], str(path))
+        self.assertIn("coverage_status_partial", summary["readiness_blockers"])
+
 
 if __name__ == "__main__":
     unittest.main()

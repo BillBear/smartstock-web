@@ -23,6 +23,7 @@ def annotate_ranking_evidence_readiness(payload: Dict[str, Any]) -> Dict[str, An
     covered_date_count = _safe_int(coverage.get("covered_date_count"), 0)
     candidate_row_count = _safe_int(output.get("candidate_row_count"), 0)
     fixture = _is_smoke_summary(output)
+    summary_metrics = output.get("summary_metrics") or output.get("metrics") or {}
 
     if fixture:
         blocking_reasons.append("fixture_smoke")
@@ -34,6 +35,12 @@ def annotate_ranking_evidence_readiness(payload: Dict[str, Any]) -> Dict[str, An
         blocking_reasons.append("candidate_rows_empty")
 
     ready = not blocking_reasons
+    output["summary_metrics"] = summary_metrics
+    output["coverage_status"] = coverage_status or None
+    output["covered_date_count"] = covered_date_count
+    output["requested_date_count"] = _safe_int(coverage.get("requested_date_count"), 0)
+    output["report_path"] = output.get("report_path") or output.get("summary_path")
+    output["readiness_blockers"] = blocking_reasons
     output["production_evidence"] = ready
     output["evidence_type"] = "real" if ready else ("smoke" if fixture else "real_insufficient")
     output["evidence_readiness"] = {
