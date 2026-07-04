@@ -215,7 +215,6 @@ def run_experiment(cfg: Dict[str, Any], run_dir: Path) -> Dict[str, Any]:
     return_col = f"future_return_{int(cfg['primary_horizon'])}d_pct"
     feature_audit = audit_features(frame, feature_names, label_col=label_col, return_col=return_col)
     _write_json(run_dir / "feature_audit.json", feature_audit)
-    frame.to_csv(run_dir / "holdout_predictions.csv", index=False)
 
     model_comparison = train_local_models(
         frame,
@@ -224,6 +223,7 @@ def run_experiment(cfg: Dict[str, Any], run_dir: Path) -> Dict[str, Any]:
         return_col=return_col,
         split_plan=dataset_meta.get("split_plan"),
         artifact_dir=Path(cfg.get("artifact_root") or run_dir / "artifact") / cfg["run_id"],
+        prediction_output_path=run_dir / "holdout_predictions.csv",
         model_metadata={
             "run_id": cfg["run_id"],
             "model_family": cfg["model_family"],

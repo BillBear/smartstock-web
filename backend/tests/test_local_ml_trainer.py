@@ -77,6 +77,7 @@ class LocalMLTrainerTests(unittest.TestCase):
         df = make_training_frame()
         with tempfile.TemporaryDirectory() as tmp:
             artifact_dir = Path(tmp) / "local_core_v1_test"
+            prediction_path = Path(tmp) / "holdout_predictions.csv"
 
             result = train_local_models(
                 df,
@@ -85,15 +86,23 @@ class LocalMLTrainerTests(unittest.TestCase):
                 return_col="future_return_10d_pct",
                 split_plan=build_ml_split_plan(df, final_holdout_months=1, stock_holdout_ratio=0.25, walk_forward_splits=3),
                 artifact_dir=artifact_dir,
+                prediction_output_path=prediction_path,
                 model_metadata={"run_id": "unit_test_run", "model_family": "local_core_v1"},
             )
 
             self.assertTrue((artifact_dir / "model.joblib").exists())
             self.assertTrue((artifact_dir / "metadata.json").exists())
+            self.assertTrue(prediction_path.exists())
             self.assertEqual(result["artifact"]["artifact_dir"], str(artifact_dir))
             metadata = (artifact_dir / "metadata.json").read_text(encoding="utf-8")
             self.assertIn("unit_test_run", metadata)
             self.assertIn(result["best_model"], metadata)
+            predictions = pd.read_csv(prediction_path)
+            self.assertIn("probability", predictions.columns)
+            self.assertIn("is_false_positive", predictions.columns)
+            self.assertIn("is_false_negative", predictions.columns)
+            self.assertIn("final_holdout", set(predictions["split"]))
+            self.assertIn("stock_holdout", set(predictions["split"]))
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ def train_local_models(
     random_state: int = 20260704,
     artifact_dir: str | Path | None = None,
     model_metadata: Optional[Dict[str, Any]] = None,
+    prediction_output_path: str | Path | None = None,
 ) -> Dict[str, Any]:
     if df is None or df.empty:
         raise ValueError("local ML training requires a non-empty dataset")
@@ -74,6 +75,17 @@ def train_local_models(
 
     if best_model is None:
         raise ValueError("no local ML model candidate could be trained")
+
+    if prediction_output_path:
+        _write_holdout_predictions(
+            Path(prediction_output_path),
+            model=best_model_obj,
+            final_holdout_df=final_holdout_df,
+            stock_holdout_df=stock_holdout_df,
+            feature_names=feature_names,
+            label_col=label_col,
+            return_col=return_col,
+        )
 
     result = {
         "production_enabled": False,
@@ -373,6 +385,65 @@ def _split_summary(split_plan: Dict[str, Any]) -> Dict[str, Any]:
         "final_holdout_dates": list((split_plan.get("final_holdout") or {}).get("dates") or []),
         "stock_holdout_symbols": list((split_plan.get("stock_holdout") or {}).get("symbols") or []),
     }
+
+
+def _write_holdout_predictions(
+    path: Path,
+    model: Any,
+    final_holdout_df: pd.DataFrame,
+    stock_holdout_df: pd.DataFrame,
+    feature_names: List[str],
+    label_col: str,
+    return_col: str,
+) -> None:
+    if model is None:
+        raise ValueError("cannot write local ML predictions without a trained best model")
+    frames = [
+        _prediction_frame(model, final_holdout_df, feature_names, label_col, return_col, "final_holdout"),
+        _prediction_frame(model, stock_holdout_df, feature_names, label_col, return_col, "stock_holdout"),
+    ]
+    output = pd.concat([frame for frame in frames if not frame.empty], ignore_index=True) if frames else pd.DataFrame()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    output.to_csv(path, index=False)
+
+
+def _prediction_frame(
+    model: Any,
+    df: pd.DataFrame,
+    feature_names: List[str],
+    label_col: str,
+    return_col: str,
+    split_name: str,
+) -> pd.DataFrame:
+    columns = [
+        "split",
+        "date",
+        "symbol",
+        "name",
+        "label",
+        "future_return_pct",
+        "probability",
+        "is_false_positive",
+        "is_false_negative",
+    ]
+    if df is None or df.empty:
+        return pd.DataFrame(columns=columns)
+    local = df.copy()
+    probability = _predict_class1(model, _x(local, feature_names))
+    result = pd.DataFrame(
+        {
+            "split": split_name,
+            "date": local["date"].astype(str),
+            "symbol": local["symbol"].astype(str),
+            "name": local["name"].astype(str) if "name" in local.columns else local["symbol"].astype(str),
+            "label": local[label_col].astype(int),
+            "future_return_pct": local[return_col].astype(float),
+            "probability": probability,
+        }
+    )
+    result["is_false_positive"] = (result["probability"] >= 0.65) & (result["label"] == 0)
+    result["is_false_negative"] = (result["probability"] < 0.35) & (result["label"] == 1)
+    return result.sort_values(["split", "probability", "date", "symbol"], ascending=[True, False, True, True]).reset_index(drop=True)
 
 
 def _save_best_model_artifact(artifact_dir: Path, model: Any, metadata: Dict[str, Any]) -> Dict[str, Any]:
