@@ -1,0 +1,248 @@
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any, Dict, List
+
+
+def _bootstrap_paths() -> Path:
+    backend_root = Path(__file__).resolve().parents[1]
+    if str(backend_root) not in sys.path:
+        sys.path.insert(0, str(backend_root))
+    return backend_root
+
+
+def _load_local_env(backend_root: Path) -> None:
+    try:
+        from dotenv import load_dotenv
+    except Exception:
+        return
+    from app.evaluation.local_ml_environment import local_secret_candidates
+
+    repo_root = backend_root.parent
+    candidates = [str(backend_root / ".env"), *local_secret_candidates(repo_root)]
+    for item in candidates:
+        path = Path(item)
+        if path.exists():
+            load_dotenv(path, override=False)
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Run local core ML experiment.")
+    parser.add_argument("--model-family", default="local_core_v1")
+    parser.add_argument("--model-display-name", default="Local Core ML v1 - 700 symbols")
+    parser.add_argument("--train-start", default="2025-01-01")
+    parser.add_argument("--train-end", default=None)
+    parser.add_argument("--target-valid-symbols", type=int, default=700)
+    parser.add_argument("--oversample-symbols", type=int, default=760)
+    parser.add_argument("--min-formal-model-symbols", type=int, default=700)
+    parser.add_argument("--sample-step", type=int, default=2)
+    parser.add_argument("--primary-horizon", type=int, default=10)
+    parser.add_argument("--exclude-news-features", action="store_true", default=False)
+    parser.add_argument("--exclude-market-state-features", action="store_true", default=False)
+    parser.add_argument("--output-root", default=None)
+    parser.add_argument("--dry-run", action="store_true", default=False)
+    return parser.parse_args(argv)
+
+
+def build_config_from_args(args) -> Dict[str, Any]:
+    from app.evaluation.local_ml_config import build_local_ml_config
+
+    payload = {
+        "model_family": args.model_family,
+        "model_display_name": args.model_display_name,
+        "train_start": args.train_start,
+        "target_valid_symbols": args.target_valid_symbols,
+        "oversample_symbols": args.oversample_symbols,
+        "min_formal_model_symbols": args.min_formal_model_symbols,
+        "sample_step": args.sample_step,
+        "primary_horizon": args.primary_horizon,
+        "exclude_news_features": True if args.exclude_news_features else True,
+        "exclude_market_state_features": True if args.exclude_market_state_features else True,
+    }
+    if args.train_end:
+        payload["train_end"] = args.train_end
+    if args.output_root:
+        payload["output_root"] = args.output_root
+    return build_local_ml_config(payload)
+
+
+def main(argv=None) -> int:
+    backend_root = _bootstrap_paths()
+    args = parse_args(argv)
+    _load_local_env(backend_root)
+    cfg = build_config_from_args(args)
+    run_dir = Path(cfg["output_root"]) / cfg["run_id"]
+    run_dir.mkdir(parents=True, exist_ok=True)
+    run_config_path = run_dir / "run_config.json"
+    run_config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    if args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "dry_run": True,
+                    "production_enabled": False,
+                    "run_config_path": str(run_config_path),
+                    "target_valid_symbols": cfg["target_valid_symbols"],
+                    "output_root": cfg["output_root"],
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    result = run_experiment(cfg, run_dir)
+    print(json.dumps({"run_dir": str(run_dir), "recommendation": result.get("recommendation")}, ensure_ascii=False))
+    return 0 if result.get("recommendation") != "blocked" else 2
+
+
+def run_experiment(cfg: Dict[str, Any], run_dir: Path) -> Dict[str, Any]:
+    from app.evaluation.local_ml_environment import evaluate_environment_report
+    from app.evaluation.ml_feature_audit import audit_features
+    from app.evaluation.ml_history_cache import MLHistoryCache
+    from app.evaluation.ml_symbol_sampler import sample_training_symbols
+    from app.evaluation.ml_training_reviewer import review_local_ml_run
+    from app.evaluation.local_ml_trainer import train_local_models
+    from app.main import data_source_manager
+    from app.services.ml_dataset_builder import MLDatasetBuilder
+
+    preflight = evaluate_environment_report(cfg, data_source_manager, ["002415", "600519", "300750"])
+    _write_json(run_dir / "preflight_report.json", preflight)
+    if not preflight.get("ready"):
+        _write_json(run_dir / "post_run_review.json", {"recommendation": "blocked", "blocking_reasons": preflight["blocking_codes"]})
+        return {"recommendation": "blocked", "blocking_reasons": preflight["blocking_codes"]}
+
+    snapshot = data_source_manager.get_a_share_snapshot() or []
+    sampled = sample_training_symbols(
+        snapshot,
+        target_count=int(cfg["target_valid_symbols"]),
+        oversample_count=int(cfg["oversample_symbols"]),
+        seed=int(cfg["seed"]),
+    )
+    _write_json(run_dir / "symbol_sample_manifest.json", {"count": len(sampled), "symbols": sampled})
+
+    history_cache = MLHistoryCache(
+        data_source_manager,
+        cache_root=run_dir / "history_cache",
+        retry_count=int(cfg["history_retry_count"]),
+        sleep_seconds=float(cfg["history_retry_sleep_seconds"]),
+    )
+    history_start = str(cfg["train_start"])
+    history_end = str(cfg["train_end"])
+    cache_result = history_cache.fetch_many(
+        [row["symbol"] for row in sampled],
+        history_start,
+        history_end,
+        workers=int(cfg["history_fetch_workers"]),
+    )
+    valid_symbols = cache_result["valid_symbols"][: int(cfg["target_valid_symbols"])]
+    _write_json(run_dir / "history_cache_manifest.json", history_cache.manifest())
+    if len(valid_symbols) < int(cfg["min_formal_model_symbols"]):
+        dataset_meta = {
+            "valid_symbol_count": len(valid_symbols),
+            "sample_count": 0,
+            "blocked": True,
+            "blocking_reason": "valid_symbols_below_required",
+        }
+        _write_json(run_dir / "dataset_meta.json", dataset_meta)
+        _write_json(run_dir / "feature_audit.json", {"leakage_violations": [], "features": {}})
+        _write_json(run_dir / "model_comparison.json", {"best_model": "", "models": {}})
+        return review_local_ml_run(run_dir)
+
+    excluded_features = _excluded_features(cfg)
+    dataset = MLDatasetBuilder(data_source_manager).build_dataset(
+        {
+            "train_start": cfg["train_start"],
+            "train_end": cfg["train_end"],
+            "symbols": valid_symbols,
+            "history_source": history_cache,
+            "horizon_days": int(cfg["primary_horizon"]),
+            "sample_step": int(cfg["sample_step"]),
+            "exclude_feature_names": excluded_features,
+            "include_samples": False,
+            "final_time_holdout_months": 3,
+            "stock_holdout_ratio": 0.20,
+            "walk_forward_splits": 5,
+        }
+    )
+    frame = _add_primary_cross_sectional_label(dataset["df"], primary_horizon=int(cfg["primary_horizon"]))
+    feature_names = list(dataset.get("feature_names") or [])
+    dataset_meta = {
+        **(dataset.get("meta") or {}),
+        "valid_symbol_count": int(frame["symbol"].nunique()) if not frame.empty else 0,
+        "sample_count": int(len(frame)),
+        "excluded_features": excluded_features,
+    }
+    _write_json(run_dir / "dataset_meta.json", dataset_meta)
+
+    label_col = f"label_top20_{int(cfg['primary_horizon'])}d"
+    return_col = f"future_return_{int(cfg['primary_horizon'])}d_pct"
+    feature_audit = audit_features(frame, feature_names, label_col=label_col, return_col=return_col)
+    _write_json(run_dir / "feature_audit.json", feature_audit)
+    frame.to_csv(run_dir / "holdout_predictions.csv", index=False)
+
+    model_comparison = train_local_models(
+        frame,
+        feature_names=feature_names,
+        label_col=label_col,
+        return_col=return_col,
+        split_plan=dataset_meta.get("split_plan"),
+    )
+    _write_json(run_dir / "model_comparison.json", model_comparison)
+    (run_dir / "training_report.md").write_text(_training_report_markdown(cfg, dataset_meta, model_comparison), encoding="utf-8")
+    return review_local_ml_run(run_dir)
+
+
+def _add_primary_cross_sectional_label(df, primary_horizon: int):
+    import math
+
+    frame = df.copy()
+    suffix = f"{primary_horizon}d"
+    frame[f"future_return_{suffix}_pct"] = frame["future_return_pct"]
+    frame[f"label_top20_{suffix}"] = 0
+    score_col = "label_risk_adjusted_return"
+    for _, index in frame.groupby("date").groups.items():
+        rows = frame.loc[index]
+        rows = rows[rows[score_col].notna()]
+        if rows.empty:
+            continue
+        cutoff = max(1, int(math.ceil(len(rows) * 0.20)))
+        top_index = rows.sort_values([score_col, "symbol"], ascending=[False, True]).head(cutoff).index
+        frame.loc[top_index, f"label_top20_{suffix}"] = 1
+    return frame
+
+
+def _excluded_features(cfg: Dict[str, Any]) -> List[str]:
+    excluded = []
+    if cfg.get("exclude_news_features"):
+        excluded.extend(["news_total_score", "news_net_score"])
+    if cfg.get("exclude_market_state_features"):
+        excluded.extend(["market_state_score", "market_offensive", "market_defensive"])
+    return excluded
+
+
+def _training_report_markdown(cfg: Dict[str, Any], dataset_meta: Dict[str, Any], model_comparison: Dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# Local Core ML V1 Training Report",
+            "",
+            f"model_family: {cfg.get('model_family')}",
+            f"target_valid_symbols: {cfg.get('target_valid_symbols')}",
+            f"valid_symbol_count: {dataset_meta.get('valid_symbol_count')}",
+            f"sample_count: {dataset_meta.get('sample_count')}",
+            f"best_model: {model_comparison.get('best_model')}",
+            "production_enabled: False",
+            "",
+        ]
+    )
+
+
+def _write_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
