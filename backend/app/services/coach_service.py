@@ -351,6 +351,8 @@ class CoachService:
         target_date = self._normalize_trade_date(date_text)
         if not target_date:
             return False
+        if not self._is_weekday_date(target_date):
+            return False
         if self.store and hasattr(self.store, "get_latest_valid_market_snapshot"):
             try:
                 snapshot = self.store.get_latest_valid_market_snapshot(trade_date=target_date, min_count=1)
@@ -371,6 +373,16 @@ class CoachService:
         except Exception:
             return False
 
+    @staticmethod
+    def _is_weekday_date(date_text: Optional[str]) -> bool:
+        normalized = CoachService._normalize_trade_date(date_text)
+        if not normalized:
+            return False
+        try:
+            return datetime.strptime(normalized, "%Y-%m-%d").date().weekday() < 5
+        except Exception:
+            return False
+
     def resolve_pick_calendar_context(
         self,
         user_id: str = "default",
@@ -381,24 +393,26 @@ class CoachService:
         explicit_trade_date = self._normalize_trade_date(trade_date)
         snapshot_dates = self.list_pick_snapshot_dates(user_id=user_id, limit=365)
         has_requested_snapshot = requested in snapshot_dates
+        valid_prior_dates = [
+            date_text for date_text in snapshot_dates
+            if date_text <= requested and self._is_weekday_date(date_text)
+        ]
         is_requested_trading_day = self._is_recommendation_trading_day(requested)
         displayed_snapshot_date = None
 
         if explicit_trade_date:
             mode = "historical"
             effective_trade_date = explicit_trade_date
-        elif has_requested_snapshot:
+        elif has_requested_snapshot and self._is_weekday_date(requested):
             mode = "trading"
             effective_trade_date = requested
         elif is_requested_trading_day:
             mode = "trading"
-            prior_dates = [date_text for date_text in snapshot_dates if date_text <= requested]
-            displayed_snapshot_date = prior_dates[0] if prior_dates else None
+            displayed_snapshot_date = valid_prior_dates[0] if valid_prior_dates else None
             effective_trade_date = requested
         else:
             mode = "preparation"
-            prior_dates = [date_text for date_text in snapshot_dates if date_text <= requested]
-            effective_trade_date = prior_dates[0] if prior_dates else None
+            effective_trade_date = valid_prior_dates[0] if valid_prior_dates else None
 
         is_trading_day = mode == "trading"
         signal_age_days = self._date_age_days(requested, effective_trade_date)
