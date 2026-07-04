@@ -2219,7 +2219,10 @@ class CoachService:
         mode = "real_allowed" if real_money_allowed else ("paper_only" if executable else "watch_only")
         reason = []
         if not live_ready:
-            reason.append("策略尚未通过实盘准入，建议只做模拟验证")
+            if executable:
+                reason.append("策略尚未通过实盘准入，建议只做模拟验证")
+            else:
+                reason.append("策略尚未通过实盘准入，当前仅适合加入观察")
         if state_tag == "defensive":
             reason.append("市场处于防守状态，需降低仓位和交易频率")
         if failed_checks:
