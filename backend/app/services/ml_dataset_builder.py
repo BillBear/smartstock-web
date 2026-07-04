@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from app.evaluation.ml_splits import build_ml_split_plan
 from app.services.ml_feature_builder import MLFeatureBuilder
 
 
@@ -146,19 +147,29 @@ class MLDatasetBuilder:
         ]
         dataset = dataset[keep_cols].replace([float("inf"), float("-inf")], 0).fillna(0)
         samples = dataset.to_dict(orient="records")
+        meta = {
+            "symbol_count": len(symbols),
+            "valid_symbol_count": len(frames),
+            "sample_count": len(dataset),
+            "train_start": start_text,
+            "train_end": end_text,
+            "horizon_days": horizon_days,
+            "target_return_pct": target_return_pct,
+            "drawdown_pct": drawdown_pct,
+            "sample_step": sample_step,
+            "errors": errors[:20],
+        }
+        try:
+            meta["split_plan"] = build_ml_split_plan(
+                dataset,
+                final_holdout_months=int(payload.get("final_time_holdout_months") or 3),
+                stock_holdout_ratio=float(payload.get("stock_holdout_ratio") or 0.20),
+                walk_forward_splits=int(payload.get("walk_forward_splits") or 5),
+            )
+        except Exception as exc:
+            meta["split_plan_error"] = str(exc)[:240]
         return {
             "df": dataset,
             "samples": samples,
-            "meta": {
-                "symbol_count": len(symbols),
-                "valid_symbol_count": len(frames),
-                "sample_count": len(dataset),
-                "train_start": start_text,
-                "train_end": end_text,
-                "horizon_days": horizon_days,
-                "target_return_pct": target_return_pct,
-                "drawdown_pct": drawdown_pct,
-                "sample_step": sample_step,
-                "errors": errors[:20],
-            },
+            "meta": meta,
         }
