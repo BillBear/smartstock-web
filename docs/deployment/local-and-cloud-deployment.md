@@ -72,3 +72,16 @@ Cloud deployment must not depend on:
 
 - `GET /api/system/version` returns secret-safe runtime metadata.
 - `./doctor.sh` identifies process roots, ports, Git version, env file status, and candidate pool coverage.
+- `scripts/local/check_cloud_readiness.py` checks required cloud-boundary environment variables without printing secret values.
+
+Advisory local check:
+
+```bash
+scripts/local/check_cloud_readiness.py
+```
+
+Strict cloud preflight:
+
+```bash
+scripts/local/check_cloud_readiness.py --strict --env-file /path/to/cloud.env
+```
