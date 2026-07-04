@@ -1025,6 +1025,7 @@ async def coach_symbol_strategy(symbol: str, user_id: str = "default", risk_leve
 @app.get(f"{settings.API_PREFIX}/coach/diagnostics/universe-funnel")
 async def coach_universe_funnel_diagnostics(
     trade_date: str = None,
+    requested_date: str = None,
     risk_level: str = "medium",
     user_id: str = "default",
     limit: int = 5000,
@@ -1035,6 +1036,7 @@ async def coach_universe_funnel_diagnostics(
         data = await run_in_threadpool(
             coach_service.get_universe_funnel_diagnostics,
             trade_date=trade_date,
+            requested_date=requested_date,
             risk_level=risk_level,
             user_id=user_id,
             limit=limit,
@@ -1051,6 +1053,7 @@ async def coach_universe_funnel_diagnostics(
 async def coach_universe_funnel_symbol_diagnostic(
     symbol: str,
     trade_date: str = None,
+    requested_date: str = None,
     risk_level: str = "medium",
     user_id: str = "default",
     strategy_code: str = "trend_breakout",
@@ -1062,6 +1065,7 @@ async def coach_universe_funnel_symbol_diagnostic(
             coach_service.get_universe_funnel_symbol_diagnostic,
             symbol=resolved["symbol"],
             trade_date=trade_date,
+            requested_date=requested_date,
             risk_level=risk_level,
             user_id=user_id,
             strategy_code=strategy_code,

@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -394,6 +395,65 @@ class CoachServiceObservabilityTests(unittest.TestCase):
         self.assertIn("成交额低于阈值", "；".join(report["items_by_symbol"]["000003"]["reasons"]))
         self.assertEqual(report["items_by_symbol"]["900001"]["last_layer"], "full_market")
 
+    def test_universe_funnel_defaults_to_previous_trading_snapshot_on_weekend(self):
+        class DataSourceStub:
+            def get_stock_industry_map(self):
+                return {"000001": "银行"}
+
+            def get_realtime_quotes_batch(self, symbols):
+                return {}
+
+        entries = [
+            {
+                "symbol": "000001",
+                "name": "平安银行",
+                "price": 12.0,
+                "open": 11.8,
+                "high": 12.3,
+                "low": 11.7,
+                "pct_change": 2.1,
+                "amount": 900_000_000,
+                "turnover_rate": 4.0,
+                "industry": "银行",
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = CoachStore(str(Path(tmpdir) / "coach.db"))
+            for trade_date in ["2026-07-03", "2026-07-04"]:
+                store.upsert_pick_snapshots(
+                    user_id="default",
+                    trade_date=trade_date,
+                    strategy_code="trend_breakout",
+                    risk_level="medium",
+                    picks=[
+                        {
+                            "pick_id": f"pick-{trade_date}",
+                            "symbol": "000001",
+                            "name": "平安银行",
+                            "rank_no": 1,
+                            "decision": {"grade": "C"},
+                            "score_breakdown": {"total": 80.0},
+                        }
+                    ],
+                )
+            service = CoachService(
+                data_source_manager=DataSourceStub(),
+                store=store,
+                news_service=None,
+            )
+            service._get_universe_snapshot = lambda force=False: entries
+
+            report = service.get_universe_funnel_diagnostics(
+                risk_level="medium",
+                user_id="default",
+                limit=20,
+                requested_date="2026-07-04",
+            )
+
+        self.assertEqual(report["trade_date"], "2026-07-03")
+        self.assertEqual(report["calendar_context"]["mode"], "preparation")
+
     def test_universe_funnel_symbol_lookup_returns_single_item(self):
         class DataSourceStub:
             def get_stock_industry_map(self):
@@ -469,6 +529,11 @@ class SmartScreenRefreshDegradationTests(unittest.TestCase):
             )
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            class FixedDatetime(datetime):
+                @classmethod
+                def now(cls, tz=None):
+                    return cls(2026, 7, 2, 10, 0, 0)
+
             service = CoachService(
                 data_source_manager=DataSourceStub(entries),
                 store=CoachStore(str(Path(tmpdir) / "coach.db")),
@@ -487,7 +552,9 @@ class SmartScreenRefreshDegradationTests(unittest.TestCase):
             def mark_all_pending(futures, timeout=None):
                 return set(), set(futures)
 
-            with patch("app.services.coach_service.wait", side_effect=mark_all_pending):
+            with patch("app.services.coach_service.datetime", FixedDatetime), patch(
+                "app.services.coach_service.wait", side_effect=mark_all_pending
+            ):
                 result = service.get_today_picks(max_count=30, user_id="default", risk_level="medium")
 
         self.assertFalse(result["no_trade"])

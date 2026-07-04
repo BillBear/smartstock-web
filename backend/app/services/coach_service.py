@@ -290,9 +290,13 @@ class CoachService:
             return None
 
     def list_pick_snapshot_dates(self, user_id: str = "default", limit: int = 30) -> List[str]:
+        dates: List[str] = []
         if hasattr(self.store, "list_pick_snapshot_dates"):
-            return self.store.list_pick_snapshot_dates(user_id=user_id, limit=limit)
-        return []
+            try:
+                dates = self.store.list_pick_snapshot_dates(user_id=user_id, limit=limit)
+            except Exception:
+                dates = []
+        return [date_text for date_text in dates if self._is_weekday_date(date_text)]
 
     def _market_snapshot_diagnostics(self, trade_date: Optional[str]) -> Dict[str, Any]:
         target_date = self._normalize_trade_date(trade_date)
@@ -766,13 +770,25 @@ class CoachService:
     def get_universe_funnel_diagnostics(
         self,
         trade_date: Optional[str] = None,
+        requested_date: Optional[str] = None,
         risk_level: str = "medium",
         user_id: str = "default",
         limit: int = 5000,
         strategy_code: str = "trend_breakout",
     ) -> Dict[str, Any]:
         """Explain the read-only universe funnel without refreshing or changing picks."""
-        effective_trade_date = str(trade_date or datetime.now().strftime("%Y-%m-%d"))
+        calendar_context = self.resolve_pick_calendar_context(
+            user_id=user_id,
+            requested_date=requested_date,
+            trade_date=trade_date,
+        )
+        effective_trade_date = (
+            calendar_context.get("snapshot_trade_date")
+            or calendar_context.get("effective_trade_date")
+            or self._normalize_trade_date(trade_date)
+            or self._normalize_trade_date(requested_date)
+            or datetime.now().strftime("%Y-%m-%d")
+        )
         level = str(risk_level or "medium").strip().lower()
         if level not in {"low", "medium", "high"}:
             level = "medium"
@@ -945,6 +961,7 @@ class CoachService:
             "trade_date": effective_trade_date,
             "risk_level": level,
             "strategy_code": strategy_code,
+            "calendar_context": calendar_context,
             "universe_count": len(entries),
             "prefilter_count": len(filtered),
             "recall_count": len(candidates),
@@ -968,6 +985,7 @@ class CoachService:
         self,
         symbol: str,
         trade_date: Optional[str] = None,
+        requested_date: Optional[str] = None,
         risk_level: str = "medium",
         user_id: str = "default",
         strategy_code: str = "trend_breakout",
@@ -975,6 +993,7 @@ class CoachService:
         code = str(symbol or "").strip()
         report = self.get_universe_funnel_diagnostics(
             trade_date=trade_date,
+            requested_date=requested_date,
             risk_level=risk_level,
             user_id=user_id,
             limit=10000,
@@ -2731,6 +2750,19 @@ class CoachService:
         trade_date: Optional[str] = None,
     ) -> Dict[str, Any]:
         if cached_only:
+            return self.get_cached_today_picks(
+                max_count=max_count,
+                user_id=user_id,
+                risk_level=risk_level,
+                requested_date=requested_date,
+                trade_date=trade_date,
+            )
+        calendar_context = self.resolve_pick_calendar_context(
+            user_id=user_id,
+            requested_date=requested_date,
+            trade_date=trade_date,
+        )
+        if not ((calendar_context.get("actions") or {}).get("can_refresh")):
             return self.get_cached_today_picks(
                 max_count=max_count,
                 user_id=user_id,

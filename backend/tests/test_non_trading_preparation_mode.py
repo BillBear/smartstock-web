@@ -126,6 +126,28 @@ class NonTradingPreparationModeTests(unittest.TestCase):
         self.assertFalse(context["is_trading_day"])
         self.assertFalse(context["actions"]["can_refresh"])
         self.assertFalse(context["actions"]["can_paper_buy"])
+        self.assertEqual(result["snapshot_dates"], ["2026-07-03"])
+
+    def test_non_cached_today_picks_uses_preparation_snapshot_on_non_trading_day(self):
+        self.save_snapshot("2026-07-03")
+
+        def fail_dynamic_generation(*args, **kwargs):
+            raise AssertionError("non-trading picks/today must not generate a fresh candidate pool")
+
+        self.service._build_dynamic_candidates = fail_dynamic_generation
+
+        result = self.service.get_today_picks(
+            max_count=5,
+            user_id="default",
+            risk_level="medium",
+            requested_date="2026-07-04",
+            cached_only=False,
+        )
+
+        self.assertEqual(result["trade_date"], "2026-07-03")
+        self.assertEqual(result["calendar_context"]["mode"], "preparation")
+        self.assertFalse(result["calendar_context"]["actions"]["can_refresh"])
+        self.assertFalse(result["calendar_context"]["actions"]["can_paper_buy"])
 
     def test_cached_watch_only_snapshot_summary_does_not_suggest_paper_buy(self):
         trade_date = "2026-07-03"
