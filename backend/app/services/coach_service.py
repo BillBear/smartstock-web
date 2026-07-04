@@ -2578,6 +2578,29 @@ class CoachService:
         merged["risk_snapshot_fallback"] = "same_day_complete_pool"
         return merged
 
+    @staticmethod
+    def _normalize_cached_decision_display(picks: List[Dict[str, Any]]) -> None:
+        """Keep old cached snapshots aligned with the current action semantics."""
+        for pick in picks or []:
+            decision = pick.get("decision")
+            if not isinstance(decision, dict):
+                continue
+            if str(decision.get("mode") or "") != "watch_only":
+                continue
+
+            decision["executable"] = False
+            summary = str(decision.get("summary") or "")
+            if "模拟验证" in summary or "模拟买入验证" in summary:
+                summary = summary.replace(
+                    "策略尚未通过实盘准入，建议只做模拟验证",
+                    "策略尚未通过实盘准入，当前仅适合加入观察",
+                )
+                summary = summary.replace("建议只做模拟验证", "当前仅适合加入观察")
+                summary = summary.replace("模拟买入验证", "加入观察")
+            if not summary or "加入观察" not in summary:
+                summary = "策略尚未通过实盘准入，当前仅适合加入观察"
+            decision["summary"] = summary
+
     def get_cached_today_picks(
         self,
         max_count: int = 5,
@@ -2630,6 +2653,7 @@ class CoachService:
 
         picks = copy.deepcopy(snapshot_result.get("picks") or [])
         self._attach_user_actions(picks, user_id)
+        self._normalize_cached_decision_display(picks)
         risk_profile = self.get_risk_profile(user_id).copy()
         if risk_level in {"low", "medium", "high"}:
             risk_profile["risk_level"] = risk_level

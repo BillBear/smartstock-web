@@ -127,6 +127,37 @@ class NonTradingPreparationModeTests(unittest.TestCase):
         self.assertFalse(context["actions"]["can_refresh"])
         self.assertFalse(context["actions"]["can_paper_buy"])
 
+    def test_cached_watch_only_snapshot_summary_does_not_suggest_paper_buy(self):
+        trade_date = "2026-07-03"
+        watch_pick = sample_pick(trade_date=trade_date, symbol="002294", rank_no=1)
+        watch_pick["action"] = "watch"
+        watch_pick["decision"] = {
+            "grade": "C",
+            "mode": "watch_only",
+            "executable": False,
+            "summary": "策略尚未通过实盘准入，建议只做模拟验证；最近回测仍有未通过项：闭环交易数",
+        }
+
+        self.store.upsert_pick_snapshots(
+            user_id="default",
+            trade_date=trade_date,
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            picks=[watch_pick],
+        )
+
+        result = self.service.get_cached_today_picks(
+            max_count=5,
+            user_id="default",
+            requested_date="2026-07-04",
+        )
+
+        decision = result["picks"][0]["decision"]
+        self.assertEqual(decision["mode"], "watch_only")
+        self.assertFalse(decision["executable"])
+        self.assertNotIn("模拟验证", decision["summary"])
+        self.assertIn("加入观察", decision["summary"])
+
     def test_sparse_risk_snapshot_keeps_complete_same_day_observation_pool(self):
         trade_date = "2026-06-29"
         medium_pick = sample_pick(trade_date=trade_date, symbol="002603", rank_no=2)
