@@ -132,6 +132,37 @@ skipped_incomplete_metric_row_count: 30
 4. 近期日期标签不完整：2026-07-01 至 2026-07-03 的未来行情窗口尚未完全发生；当前指标已排除这些不完整 horizon，但覆盖不足的问题仍然存在。
 5. 同区间 baseline 回测已能运行，但本次结果为 `closed_roundtrips=0`，不能作为策略通过证据；仍缺少足够长区间的闭环交易 baseline 和 walk-forward 分段结论。
 
+## 覆盖诊断
+
+新增只读 coverage audit，用于解释 ranking evaluation 为什么仍被阻塞。该命令只读取已保存快照，不重跑策略、不回填候选池、不改变生产输出：
+
+```bash
+cd smartstock-web/backend
+source venv/bin/activate
+python scripts/audit_ranking_snapshot_coverage.py \
+  --strategy-code trend_breakout \
+  --risk-level medium \
+  --start-date 2026-04-28 \
+  --end-date 2026-07-03 \
+  --horizons 3,5,10,20 \
+  --as-of-date 2026-07-04 \
+  --output /tmp/smartstock-ranking-coverage-audit.json
+```
+
+当前输出摘要：
+
+```text
+coverage_status: partial
+requested_dates: 49
+pick_covered_dates: 22
+missing_pick_dates: 27
+market_snapshot_summary: {"missing_count": 23, "prior_only_count": 8, "same_day_count": 18}
+incomplete_label_dates: 13
+blocking_reasons: covered_dates_below_30,market_snapshots_missing,label_windows_incomplete
+```
+
+这说明下一步不能只看 Precision@K，还要先补齐历史候选快照覆盖、全 A 市场快照覆盖，并等待或补足未来标签窗口。缺失候选日期清单保存在 audit JSON 的 `missing_pick_dates` 中。
+
 ## 下一步准入要求
 
 继续推进前，必须至少补齐：

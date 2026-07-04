@@ -29,6 +29,23 @@ python3 scripts/run_ranking_evaluation.py \
   --fixture smoke
 ```
 
+Before interpreting real ranking metrics, audit persisted snapshot coverage:
+
+```bash
+python3 scripts/audit_ranking_snapshot_coverage.py \
+  --strategy-code trend_breakout \
+  --risk-level medium \
+  --start-date 2026-04-28 \
+  --end-date 2026-07-03 \
+  --horizons 3,5,10,20 \
+  --output /tmp/smartstock-ranking-coverage-audit.json
+```
+
+The coverage audit is read-only. It reports missing pick snapshot dates,
+same-day versus prior full-market snapshots, and estimated incomplete
+forward-label windows. It must not backfill, regenerate, or alter production
+strategy outputs.
+
 Generated CSV/JSON files under `ranking-evaluation/runs/` are local
 reproducibility artifacts and are ignored by default. Do not commit generated
 report directories unless a reviewer explicitly requests evidence artifacts for
