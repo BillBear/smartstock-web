@@ -1,0 +1,167 @@
+import unittest
+
+from app.evaluation.offline_recall_candidates import (
+    generate_offline_recall_rows,
+    offline_recall_coverage,
+)
+
+
+class SnapshotStoreStub:
+    def __init__(self, snapshots):
+        self.snapshots = snapshots
+        self.calls = []
+
+    def get_latest_valid_market_snapshot_items(self, trade_date=None, min_count=500):
+        self.calls.append({"trade_date": trade_date, "min_count": min_count})
+        return self.snapshots.get(trade_date)
+
+
+def _row(symbol, *, name=None, price=10.0, pct_change=2.0, amount=500_000_000, turnover=4.0, high=10.5, low=9.8, industry="测试"):
+    return {
+        "symbol": symbol,
+        "name": name or f"样本{symbol}",
+        "price": price,
+        "open": price * 0.98,
+        "high": high,
+        "low": low,
+        "pct_change": pct_change,
+        "amount": amount,
+        "turnover_rate": turnover,
+        "industry": industry,
+    }
+
+
+class OfflineRecallCandidateTests(unittest.TestCase):
+    def test_generates_rows_from_same_day_persisted_market_snapshot_only(self):
+        store = SnapshotStoreStub(
+            {
+                "2026-07-02": {
+                    "trade_date": "2026-07-02",
+                    "source": "a_share_snapshot",
+                    "snapshot_count": 3,
+                    "quality_status": "ok",
+                    "items": [
+                        _row("000001", amount=900_000_000, turnover=5.0, industry="银行"),
+                        _row("000002", name="ST样本", amount=900_000_000, turnover=5.0),
+                        _row("900001", amount=900_000_000, turnover=5.0),
+                    ],
+                }
+            }
+        )
+
+        result = generate_offline_recall_rows(
+            store=store,
+            experiment_key="recall_220_deep_150",
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            start_date="2026-07-02",
+            end_date="2026-07-03",
+        )
+
+        self.assertEqual(result["coverage"]["requested_dates"], ["2026-07-02", "2026-07-03"])
+        self.assertEqual(result["coverage"]["available_dates"], ["2026-07-02"])
+        self.assertEqual(result["coverage"]["missing_dates"], ["2026-07-03"])
+        self.assertEqual(len(result["rows"]), 1)
+        self.assertEqual(result["rows"][0]["symbol"], "000001")
+        self.assertEqual(result["rows"][0]["source"], "offline_recall:recall_220_deep_150")
+        self.assertEqual(result["rows"][0]["experiment_key"], "recall_220_deep_150")
+        self.assertEqual(result["rows"][0]["rank_no"], 1)
+        self.assertGreater(result["rows"][0]["factor_total_score"], 0)
+
+    def test_experiment_size_controls_output_count_without_changing_production(self):
+        items = [
+            _row("000001", amount=900_000_000, turnover=5.0, industry="银行"),
+            _row("000002", amount=800_000_000, turnover=4.0, industry="家电"),
+            _row("000003", amount=700_000_000, turnover=3.0, industry="医药"),
+            _row("000004", amount=600_000_000, turnover=2.0, industry="科技"),
+        ]
+        store = SnapshotStoreStub(
+            {
+                "2026-07-02": {
+                    "trade_date": "2026-07-02",
+                    "source": "a_share_snapshot",
+                    "snapshot_count": len(items),
+                    "quality_status": "ok",
+                    "items": items,
+                }
+            }
+        )
+
+        small = generate_offline_recall_rows(
+            store=store,
+            experiment_key="recall_220_deep_150",
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            start_date="2026-07-02",
+            end_date="2026-07-02",
+            max_rows_per_day=2,
+        )
+        large = generate_offline_recall_rows(
+            store=store,
+            experiment_key="recall_500_deep_500",
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            start_date="2026-07-02",
+            end_date="2026-07-02",
+            max_rows_per_day=4,
+        )
+
+        self.assertEqual(len(small["rows"]), 2)
+        self.assertEqual(len(large["rows"]), 4)
+        self.assertEqual(small["experiment"]["recall_size"], 220)
+        self.assertEqual(large["experiment"]["recall_size"], 500)
+
+    def test_multi_channel_union_can_recall_pullback_candidate_not_in_pre_score_top_slice(self):
+        items = [
+            _row("000001", pct_change=2.5, amount=900_000_000, turnover=7.0, high=10.9, low=9.7, industry="强势"),
+            _row("000002", pct_change=2.3, amount=850_000_000, turnover=6.5, high=10.8, low=9.7, industry="强势"),
+            _row("000003", pct_change=-1.8, amount=450_000_000, turnover=3.0, high=10.2, low=9.7, industry="修复"),
+        ]
+        store = SnapshotStoreStub(
+            {
+                "2026-07-02": {
+                    "trade_date": "2026-07-02",
+                    "source": "a_share_snapshot",
+                    "snapshot_count": len(items),
+                    "quality_status": "ok",
+                    "items": items,
+                }
+            }
+        )
+
+        pre_score = generate_offline_recall_rows(
+            store=store,
+            experiment_key="recall_220_deep_150",
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            start_date="2026-07-02",
+            end_date="2026-07-02",
+            max_rows_per_day=2,
+        )
+        union = generate_offline_recall_rows(
+            store=store,
+            experiment_key="multi_channel_union",
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            start_date="2026-07-02",
+            end_date="2026-07-02",
+            max_rows_per_day=3,
+        )
+
+        self.assertNotIn("000003", {row["symbol"] for row in pre_score["rows"]})
+        self.assertIn("000003", {row["symbol"] for row in union["rows"]})
+        recalled = next(row for row in union["rows"] if row["symbol"] == "000003")
+        self.assertIn("pullback_repair", recalled["recall_channels"])
+
+    def test_offline_recall_coverage_requires_same_day_market_snapshot(self):
+        coverage = offline_recall_coverage(
+            requested_dates=["2026-07-02", "2026-07-03"],
+            available_dates=["2026-07-02"],
+        )
+
+        self.assertEqual(coverage["coverage_status"], "partial")
+        self.assertEqual(coverage["missing_dates"], ["2026-07-03"])
+
+
+if __name__ == "__main__":
+    unittest.main()

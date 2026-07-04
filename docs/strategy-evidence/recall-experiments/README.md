@@ -20,7 +20,50 @@ The default matrix is:
 
 ## Report Command
 
-Prepare one `ranking_summary.json` per experiment:
+There are two supported steps.
+
+### Generate offline variant summaries
+
+Generate research-only variant summaries from persisted full-market snapshots:
+
+```bash
+cd smartstock-web/backend
+source venv/bin/activate
+python scripts/run_offline_recall_evaluation.py \
+  --strategy-code trend_breakout \
+  --risk-level medium \
+  --start-date 2026-04-28 \
+  --end-date 2026-07-03 \
+  --horizons 3,5,10,20 \
+  --top-k 3,5,10 \
+  --commission 0.0003 \
+  --slippage 0.001 \
+  --include-baseline \
+  --output-root /tmp/smartstock-offline-recall-experiment
+```
+
+This command is read-only:
+
+- it reads persisted `market_snapshots` / `market_snapshot_items`;
+- it labels candidates with explicit future history ranges;
+- it writes ranking CSV/JSON artifacts under `--output-root`;
+- it does not write pick snapshots, actions, strategy settings, or production recommendations.
+
+Smoke mode validates the artifact pipeline only and is not strategy evidence:
+
+```bash
+python scripts/run_offline_recall_evaluation.py \
+  --strategy-code trend_breakout \
+  --risk-level medium \
+  --start-date 2026-01-02 \
+  --end-date 2026-01-09 \
+  --output-root /tmp/smartstock-offline-recall-smoke \
+  --fixture smoke
+```
+
+### Compare precomputed summaries
+
+Alternatively, prepare one `ranking_summary.json` per experiment:
 
 ```text
 <experiment-root>/baseline/ranking_summary.json
@@ -45,7 +88,7 @@ blocked with `incompatible_experiment_reports`. This prevents comparing a wider
 recall experiment against a baseline from a different date range, label setup,
 or cost/slippage assumption.
 
-Then run from `smartstock-web/backend`:
+Then run the comparison from `smartstock-web/backend`:
 
 ```bash
 source venv/bin/activate
