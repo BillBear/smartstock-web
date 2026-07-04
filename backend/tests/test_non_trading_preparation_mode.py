@@ -108,6 +108,25 @@ class NonTradingPreparationModeTests(unittest.TestCase):
         self.assertTrue(result["calendar_context"]["actions"]["can_refresh"])
         self.assertTrue(result["calendar_context"]["actions"]["can_paper_buy"])
 
+    def test_weekend_same_day_snapshot_does_not_enable_trading_actions(self):
+        self.save_snapshot("2026-07-03")
+        self.save_snapshot("2026-07-04")
+
+        result = self.service.get_cached_today_picks(
+            max_count=5,
+            user_id="default",
+            requested_date="2026-07-04",
+        )
+
+        self.assertEqual(result["trade_date"], "2026-07-03")
+        context = result["calendar_context"]
+        self.assertEqual(context["mode"], "preparation")
+        self.assertEqual(context["requested_date"], "2026-07-04")
+        self.assertEqual(context["effective_trade_date"], "2026-07-03")
+        self.assertFalse(context["is_trading_day"])
+        self.assertFalse(context["actions"]["can_refresh"])
+        self.assertFalse(context["actions"]["can_paper_buy"])
+
     def test_sparse_risk_snapshot_keeps_complete_same_day_observation_pool(self):
         trade_date = "2026-06-29"
         medium_pick = sample_pick(trade_date=trade_date, symbol="002603", rank_no=2)
