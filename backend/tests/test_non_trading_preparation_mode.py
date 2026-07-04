@@ -77,6 +77,11 @@ class NonTradingPreparationModeTests(unittest.TestCase):
         self.assertFalse(context["actions"]["can_refresh"])
         self.assertFalse(context["actions"]["can_paper_buy"])
         self.assertTrue(context["actions"]["can_add_watch"])
+        self.assertFalse(context["requested_date_is_trading_day"])
+        self.assertTrue(context["effective_trade_date_is_trading_day"])
+        self.assertEqual(context["refresh_disabled_reason_date"], "2026-06-19")
+        self.assertIn("当前日期 2026-06-19 非交易日", context["message"])
+        self.assertIn("2026-06-18 交易日候选池", context["message"])
 
     def test_cached_only_historical_mode_reads_requested_snapshot_date(self):
         self.save_snapshot("2026-06-17")
@@ -127,6 +132,36 @@ class NonTradingPreparationModeTests(unittest.TestCase):
         self.assertFalse(context["actions"]["can_refresh"])
         self.assertFalse(context["actions"]["can_paper_buy"])
         self.assertEqual(result["snapshot_dates"], ["2026-07-03"])
+        self.assertFalse(context["requested_date_is_trading_day"])
+        self.assertTrue(context["effective_trade_date_is_trading_day"])
+        self.assertEqual(context["refresh_disabled_reason_date"], "2026-07-04")
+        self.assertIn("当前日期 2026-07-04 非交易日", context["message"])
+        self.assertIn("2026-07-03 交易日候选池", context["message"])
+
+    def test_cached_only_can_read_more_than_forty_persisted_snapshot_picks(self):
+        trade_date = "2026-07-03"
+        picks = [
+            sample_pick(trade_date=trade_date, symbol=f"60{index:04d}", rank_no=index)
+            for index in range(1, 56)
+        ]
+        self.store.upsert_pick_snapshots(
+            user_id="default",
+            trade_date=trade_date,
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            picks=picks,
+        )
+
+        result = self.service.get_cached_today_picks(
+            max_count=80,
+            user_id="default",
+            risk_level="medium",
+            requested_date="2026-07-04",
+        )
+
+        self.assertEqual(len(result["picks"]), 55)
+        self.assertEqual(result["universe_meta"]["candidate_count"], 55)
+        self.assertEqual(result["universe_meta"]["display_limit"], 80)
 
     def test_non_cached_today_picks_uses_preparation_snapshot_on_non_trading_day(self):
         self.save_snapshot("2026-07-03")

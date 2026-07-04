@@ -400,6 +400,14 @@ class CoachServiceObservabilityTests(unittest.TestCase):
         self.assertIn("ST/退市名称过滤", report["items_by_symbol"]["000002"]["reasons"])
         self.assertIn("成交额低于阈值", "；".join(report["items_by_symbol"]["000003"]["reasons"]))
         self.assertEqual(report["items_by_symbol"]["900001"]["last_layer"], "full_market")
+        self.assertEqual(report["rejection_summary"]["ST/退市名称过滤"], 1)
+        self.assertEqual(report["rejection_summary"]["成交额低于阈值"], 1)
+        self.assertEqual(report["rejection_summary"]["非A股股票代码过滤"], 1)
+        self.assertEqual(report["filter_policy"]["status"], "legacy_hard_filter")
+        self.assertFalse(report["filter_policy"]["evidence_validated"])
+        self.assertIn("不代表已通过样本外验证的最优过滤", report["filter_policy"]["message"])
+        self.assertIn("成交额低于阈值", report["filter_policy"]["hard_filter_reasons"])
+        self.assertIn("价格低于阈值", report["filter_policy"]["hard_filter_reasons"])
 
     def test_universe_funnel_defaults_to_previous_trading_snapshot_on_weekend(self):
         class DataSourceStub:

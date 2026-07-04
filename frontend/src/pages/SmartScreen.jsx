@@ -22,6 +22,7 @@ import { InfoCircleOutlined, ReloadOutlined, ThunderboltOutlined, TrophyOutlined
 import { coachApi } from '../services/api'
 import MarketFactorExplain from '../components/MarketFactorExplain'
 import {
+  getCalendarDisplayContext,
   getRankingEvidenceStatus,
   getSmartScreenDiagnostic,
   getUniverseFunnelSummary,
@@ -36,6 +37,7 @@ import {
 import './SmartScreen.css'
 
 const { Option } = Select
+const SMART_SCREEN_CACHED_PICK_LIMIT = 80
 
 const USER_ACTION_LABEL = {
   added_watchlist: { text: '已加观察', color: 'blue' },
@@ -164,7 +166,7 @@ const SmartScreen = () => {
       const effectiveRisk = targetRisk || riskLevel
       const params = {
         user_id: 'default',
-        max_count: 30,
+        max_count: SMART_SCREEN_CACHED_PICK_LIMIT,
         risk_level: effectiveRisk,
         cached_only: true,
       }
@@ -274,24 +276,23 @@ const SmartScreen = () => {
   const stateTag = result?.market_state?.state_tag
   const stateMeta = STATE_META[stateTag] || STATE_META.neutral
   const calendarContext = result?.calendar_context || {}
+  const calendarDisplay = useMemo(
+    () => getCalendarDisplayContext(calendarContext, tradePlan),
+    [calendarContext, tradePlan]
+  )
   const calendarActions = calendarContext?.actions || {}
-  const calendarMode = calendarContext?.mode || 'trading'
-  const isPreparationMode = calendarMode === 'preparation'
-  const isHistoricalMode = calendarMode === 'historical'
-  const isObservationMode = isPreparationMode || isHistoricalMode
+  const calendarMode = calendarDisplay.mode
+  const isPreparationMode = calendarDisplay.isPreparationMode
+  const isHistoricalMode = calendarDisplay.isHistoricalMode
+  const isObservationMode = calendarDisplay.isObservationMode
   const snapshotDates = result?.snapshot_dates || []
   const canRefresh = calendarActions.can_refresh !== false && calendarMode === 'trading'
   const canPaperBuy = calendarActions.can_paper_buy !== false
-  const candidateDate = calendarContext?.effective_trade_date || result?.trade_date || '-'
-  const signalAge = calendarContext?.signal_age_days
-  const signalAgeText = signalAge === null || signalAge === undefined ? '-' : `${signalAge} 天`
-  const heroKicker = isPreparationMode ? '备战观察' : (isHistoricalMode ? '历史快照' : '今日行动')
-  const heroHeadline = isPreparationMode
-    ? '备战观察'
-    : (isHistoricalMode ? '历史快照观察' : (tradePlan.headline || '等待生成交易计划'))
-  const heroSummary = isObservationMode
-    ? (calendarContext?.message || '当前只读取已保存候选池快照，不重新运行策略。')
-    : (tradePlan.summary || '系统会先判断市场环境和策略证据，再决定是否输出可执行候选。')
+  const candidateDate = calendarDisplay.dateMetricValue || result?.trade_date || '-'
+  const signalAgeText = calendarDisplay.signalAgeText
+  const heroKicker = calendarDisplay.kicker
+  const heroHeadline = calendarDisplay.headline
+  const heroSummary = calendarDisplay.summary
   const heroBadge = isPreparationMode
     ? { label: '观察准备', color: '#60a5fa' }
     : (isHistoricalMode ? { label: '复盘观察', color: '#a78bfa' } : planMeta)
@@ -332,7 +333,7 @@ const SmartScreen = () => {
 
   const triggerRefresh = async () => {
     if (!canRefresh) {
-      message.warning('非交易日不生成交易计划')
+      message.warning(calendarDisplay.refreshDisabledReason || '当前不可生成交易计划')
       return
     }
     setLoading(true)
@@ -555,7 +556,7 @@ const SmartScreen = () => {
           style={{ marginBottom: 16 }}
           type={isPreparationMode ? 'info' : 'success'}
           showIcon
-          message={calendarContext?.message || `以下为 ${candidateDate} 候选池，仅供观察准备。`}
+          message={calendarDisplay.alertMessage || `以下为 ${candidateDate} 候选池，仅供观察准备。`}
         />
       )}
       {result?.strategy_health && (
@@ -667,7 +668,8 @@ const SmartScreen = () => {
       <Row gutter={16} className="stats-row">
         <Col xs={24} sm={6}>
           <Card className="stat-card">
-            <Statistic title={isObservationMode ? '候选池日期' : '交易日'} value={candidateDate} />
+            <Statistic title={calendarDisplay.dateMetricTitle} value={candidateDate} />
+            <div className="stat-extra">{calendarDisplay.currentDateText}</div>
             <div className="stat-extra">信号年龄：{signalAgeText}</div>
           </Card>
         </Col>
@@ -706,7 +708,7 @@ const SmartScreen = () => {
                   <Option value={dateText} key={dateText}>{dateText}</Option>
                 ))}
               </Select>
-              <Tooltip title={!canRefresh ? '非交易日不生成交易计划' : '刷新当前交易日候选池'}>
+              <Tooltip title={!canRefresh ? (calendarDisplay.refreshDisabledReason || '当前不可生成交易计划') : '刷新当前交易日候选池'}>
                 <Button icon={<ReloadOutlined />} loading={loading} disabled={!canRefresh} onClick={triggerRefresh}>
                   后台刷新
                 </Button>
@@ -800,7 +802,7 @@ const SmartScreen = () => {
             <Tag color="geekblue">全A {funnelSummary.fullMarket || '-'}</Tag>
             <Tag color="cyan">基础过滤 {funnelSummary.prefilter || '-'}</Tag>
             <Tag color="green">召回候选 {funnelSummary.recall || '-'}</Tag>
-            <Tag color="lime">深度分析 {funnelSummary.deepAnalysis || '-'}</Tag>
+            <Tag color="lime">深度分析 {funnelSummary.deepAnalysis ?? '-'}</Tag>
             <Tag color="gold">最终输出 {funnelSummary.finalOutput || '-'}</Tag>
           </Space>
           <Alert
@@ -808,7 +810,16 @@ const SmartScreen = () => {
             type={funnelSummary.fullMarket >= 5000 ? 'info' : 'warning'}
             showIcon
             message={funnelSummary.summaryText}
-            description="如果强势股票未出现，应优先查看单票漏斗原因，而不是直接调整策略参数。"
+            description={
+              <Space direction="vertical" size={2}>
+                <span>{funnelSummary.policyText || '如果强势股票未出现，应优先查看单票漏斗原因，而不是直接调整策略参数。'}</span>
+                {funnelSummary.topRejectionReasons.length > 0 && (
+                  <span>
+                    主要剔除原因：{funnelSummary.topRejectionReasons.map((item) => `${item.reason} ${item.count} 只`).join('；')}
+                  </span>
+                )}
+              </Space>
+            }
           />
           <Divider />
           <Space wrap>

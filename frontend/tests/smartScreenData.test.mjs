@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  getCalendarDisplayContext,
   getRankingEvidenceStatus,
   getSmartScreenDiagnostic,
   getUniverseFunnelSummary,
@@ -48,6 +49,28 @@ test('non-trading and already refreshing states do not trigger background refres
     }),
     false
   )
+})
+
+test('calendar display context separates current non-trading date from candidate trade date', () => {
+  const display = getCalendarDisplayContext({
+    mode: 'preparation',
+    requested_date: '2026-07-04',
+    effective_trade_date: '2026-07-03',
+    requested_date_is_trading_day: false,
+    effective_trade_date_is_trading_day: true,
+    signal_age_days: 1,
+    message: '当前日期 2026-07-04 非交易日，正在展示 2026-07-03 交易日候选池，仅供观察准备。',
+  })
+
+  assert.equal(display.kicker, '备战观察')
+  assert.equal(display.headline, '备战观察')
+  assert.equal(display.dateMetricTitle, '候选池交易日')
+  assert.equal(display.dateMetricValue, '2026-07-03')
+  assert.equal(display.currentDateText, '当前日期：2026-07-04')
+  assert.match(display.alertMessage, /当前日期 2026-07-04 非交易日/)
+  assert.match(display.alertMessage, /2026-07-03 交易日候选池/)
+  assert.match(display.refreshDisabledReason, /当前日期 2026-07-04 非交易日/)
+  assert.doesNotMatch(display.refreshDisabledReason, /2026-07-03 非交易日/)
 })
 
 test('diagnostic separates full universe coverage from risk-gated no-buy state', () => {
@@ -125,6 +148,15 @@ test('funnel summary reports compression from full market to final output', () =
     recall_count: 220,
     deep_analysis_count: 72,
     final_pick_count: 17,
+    rejection_summary: {
+      '成交额低于阈值': 1200,
+      '换手率不在阈值内': 600,
+    },
+    filter_policy: {
+      status: 'legacy_hard_filter',
+      evidence_validated: false,
+      message: '当前漏斗包含历史硬过滤门槛，不代表已通过样本外验证的最优过滤。',
+    },
   })
 
   assert.equal(summary.fullMarket, 5210)
@@ -133,6 +165,9 @@ test('funnel summary reports compression from full market to final output', () =
   assert.equal(summary.deepAnalysis, 72)
   assert.equal(summary.finalOutput, 17)
   assert.match(summary.summaryText, /5210 -> 1975 -> 220 -> 72 -> 17/)
+  assert.match(summary.policyText, /历史硬过滤门槛/)
+  assert.equal(summary.topRejectionReasons[0].reason, '成交额低于阈值')
+  assert.equal(summary.topRejectionReasons[0].count, 1200)
 })
 
 test('ranking evidence status warns when latest report is insufficient', () => {

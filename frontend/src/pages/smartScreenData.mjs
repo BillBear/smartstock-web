@@ -7,6 +7,57 @@ export function shouldRefreshCurrentTradingPicks({
   return Boolean(canRefresh && !isRefreshing && hasStaleTradingSnapshot)
 }
 
+export function getCalendarDisplayContext(calendarContext = {}, tradePlan = {}) {
+  const mode = calendarContext?.mode || 'trading'
+  const requestedDate = calendarContext?.requested_date || '-'
+  const candidateDate = calendarContext?.effective_trade_date || calendarContext?.snapshot_trade_date || '-'
+  const signalAge = calendarContext?.signal_age_days
+  const isPreparationMode = mode === 'preparation'
+  const isHistoricalMode = mode === 'historical'
+  const isObservationMode = isPreparationMode || isHistoricalMode
+  const planHeadline = tradePlan?.headline || '等待生成交易计划'
+  const planSummary = tradePlan?.summary || '系统会先判断市场环境和策略证据，再决定是否输出可执行候选。'
+
+  let kicker = '今日行动'
+  let headline = planHeadline
+  let alertMessage = calendarContext?.message || ''
+  let dateMetricTitle = '交易日'
+  let refreshDisabledReason = ''
+
+  if (isPreparationMode) {
+    kicker = '备战观察'
+    headline = '备战观察'
+    dateMetricTitle = '候选池交易日'
+    alertMessage = calendarContext?.message || `当前日期 ${requestedDate} 非交易日，正在展示 ${candidateDate} 交易日候选池，仅供观察准备。`
+    refreshDisabledReason = `当前日期 ${requestedDate} 非交易日，不生成新的交易计划；${candidateDate} 是展示的候选池交易日。`
+  } else if (isHistoricalMode) {
+    kicker = '历史快照'
+    headline = '历史快照观察'
+    dateMetricTitle = '历史候选池日期'
+    alertMessage = calendarContext?.message || `展示 ${candidateDate} 历史候选池，仅供复盘观察。`
+    refreshDisabledReason = '历史快照只读复盘，不生成新的交易计划。'
+  } else if (calendarContext?.snapshot_trade_date) {
+    refreshDisabledReason = ''
+  }
+
+  return {
+    mode,
+    isPreparationMode,
+    isHistoricalMode,
+    isObservationMode,
+    kicker,
+    headline,
+    summary: isObservationMode ? alertMessage : planSummary,
+    alertMessage,
+    dateMetricTitle,
+    dateMetricValue: candidateDate,
+    currentDateText: `当前日期：${requestedDate}`,
+    candidateDateText: `候选池交易日：${candidateDate}`,
+    signalAgeText: signalAge === null || signalAge === undefined ? '-' : `${signalAge} 天`,
+    refreshDisabledReason,
+  }
+}
+
 export function getSmartScreenDiagnostic(result = {}) {
   const universeMeta = result?.universe_meta || {}
   const tradePlan = result?.trade_plan || {}
@@ -62,10 +113,21 @@ export function getUniverseFunnelSummary(funnel = {}) {
   const fullMarket = Number(funnel.universe_count || 0)
   const prefilter = Number(funnel.prefilter_count || 0)
   const recall = Number(funnel.recall_count || 0)
-  const deepAnalysis = Number(funnel.deep_analysis_count || 0)
+  const deepAnalysis = funnel.deep_analysis_count === null || funnel.deep_analysis_count === undefined
+    ? null
+    : Number(funnel.deep_analysis_count || 0)
   const finalOutput = Number(funnel.final_pick_count || 0)
+  const rejectionSummary = funnel.rejection_summary && typeof funnel.rejection_summary === 'object'
+    ? funnel.rejection_summary
+    : {}
+  const topRejectionReasons = Object.entries(rejectionSummary)
+    .map(([reason, count]) => ({ reason, count: Number(count || 0) }))
+    .sort((left, right) => right.count - left.count || left.reason.localeCompare(right.reason))
+    .slice(0, 6)
+  const policyText = funnel?.filter_policy?.message || ''
+  const deepAnalysisText = deepAnalysis === null ? '未记录' : deepAnalysis
   const summaryText = fullMarket
-    ? `候选漏斗：${fullMarket} -> ${prefilter} -> ${recall} -> ${deepAnalysis} -> ${finalOutput}`
+    ? `候选漏斗：${fullMarket} -> ${prefilter} -> ${recall} -> ${deepAnalysisText} -> ${finalOutput}`
     : '候选漏斗暂无数据'
 
   return {
@@ -75,6 +137,8 @@ export function getUniverseFunnelSummary(funnel = {}) {
     deepAnalysis,
     finalOutput,
     summaryText,
+    policyText,
+    topRejectionReasons,
   }
 }
 

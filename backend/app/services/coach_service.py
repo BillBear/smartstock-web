@@ -464,6 +464,11 @@ class CoachService:
             effective_trade_date = valid_prior_dates[0] if valid_prior_dates else None
 
         is_trading_day = mode == "trading"
+        effective_trade_date_is_trading_day = bool(
+            effective_trade_date
+            and self._is_weekday_date(effective_trade_date)
+            and (effective_trade_date in snapshot_dates or self._is_recommendation_trading_day(effective_trade_date))
+        )
         signal_age_days = self._date_age_days(requested, effective_trade_date)
         snapshot_age_days = self._date_age_days(requested, displayed_snapshot_date)
         can_paper_buy = mode == "trading" and has_requested_snapshot
@@ -477,15 +482,18 @@ class CoachService:
         elif mode == "historical":
             message = f"展示 {effective_trade_date or explicit_trade_date} 历史候选池，仅供复盘观察。"
         elif effective_trade_date:
-            message = f"今日非交易日，展示最近有效交易日 {effective_trade_date} 候选池，仅供观察准备。"
+            message = f"当前日期 {requested} 非交易日，正在展示 {effective_trade_date} 交易日候选池，仅供观察准备。"
         else:
-            message = "暂无候选池快照。非交易日不会生成新的交易计划。"
+            message = f"当前日期 {requested} 非交易日，暂无候选池快照，不会生成新的交易计划。"
 
         return {
             "mode": mode,
             "requested_date": requested,
             "effective_trade_date": effective_trade_date,
             "is_trading_day": is_trading_day,
+            "requested_date_is_trading_day": is_requested_trading_day,
+            "effective_trade_date_is_trading_day": effective_trade_date_is_trading_day,
+            "refresh_disabled_reason_date": requested if not is_trading_day else None,
             "signal_age_days": signal_age_days,
             "snapshot_trade_date": displayed_snapshot_date,
             "snapshot_age_days": snapshot_age_days,
@@ -853,6 +861,19 @@ class CoachService:
         items_by_symbol: Dict[str, Dict[str, Any]] = {}
         filtered: List[Dict[str, Any]] = []
         industries = set()
+        rejection_summary: Dict[str, int] = {}
+        hard_filter_reasons = [
+            "非A股股票代码过滤",
+            "ST/退市名称过滤",
+            "价格低于阈值",
+            "成交额低于阈值",
+            "换手率不在阈值内",
+            "涨跌幅绝对值超过阈值",
+        ]
+
+        def reject(item: Dict[str, Any], reason_key: str, detail: str) -> None:
+            item["reasons"].append(detail)
+            rejection_summary[reason_key] = rejection_summary.get(reason_key, 0) + 1
 
         def base_item(row: Dict[str, Any]) -> Dict[str, Any]:
             symbol = str(row.get("symbol") or "")
@@ -877,20 +898,20 @@ class CoachService:
             if symbol:
                 items_by_symbol[symbol] = item
             if len(symbol) != 6 or not symbol.isdigit() or symbol[0] not in {"0", "3", "6"}:
-                item["reasons"].append("非A股股票代码过滤")
+                reject(item, "非A股股票代码过滤", "非A股股票代码过滤")
                 continue
             name = str(row.get("name") or symbol)
             item["last_layer"] = "basic_filter"
             if self._is_excluded_name(name):
-                item["reasons"].append("ST/退市名称过滤")
+                reject(item, "ST/退市名称过滤", "ST/退市名称过滤")
                 continue
             price = self._safe_float(row.get("price"), 0)
             if price < rules["min_price"]:
-                item["reasons"].append(f"价格低于阈值 {rules['min_price']}")
+                reject(item, "价格低于阈值", f"价格低于阈值 {rules['min_price']}")
                 continue
             amount_yi = self._safe_float(row.get("amount"), 0) / 100000000
             if amount_yi < rules["min_amount_yi"]:
-                item["reasons"].append(f"成交额低于阈值 {rules['min_amount_yi']} 亿")
+                reject(item, "成交额低于阈值", f"成交额低于阈值 {rules['min_amount_yi']} 亿")
                 continue
             turnover_rate = self._safe_float(row.get("turnover_rate"), 0)
             if turnover_rate <= 0:
@@ -901,13 +922,15 @@ class CoachService:
                     turnover_rate = self._clamp(amount_yi * 0.35, 0.2, 25)
             item["metrics"]["turnover_rate"] = round(turnover_rate, 4)
             if turnover_rate < rules["min_turnover_rate"] or turnover_rate > rules["max_turnover_rate"]:
-                item["reasons"].append(
-                    f"换手率不在阈值 {rules['min_turnover_rate']} - {rules['max_turnover_rate']} 内"
+                reject(
+                    item,
+                    "换手率不在阈值内",
+                    f"换手率不在阈值 {rules['min_turnover_rate']} - {rules['max_turnover_rate']} 内",
                 )
                 continue
             pct_change = self._safe_float(row.get("pct_change"), 0)
             if abs(pct_change) > rules["max_abs_pct_change"]:
-                item["reasons"].append(f"涨跌幅绝对值超过阈值 {rules['max_abs_pct_change']}%")
+                reject(item, "涨跌幅绝对值超过阈值", f"涨跌幅绝对值超过阈值 {rules['max_abs_pct_change']}%")
                 continue
 
             if turnover_rate <= 2:
@@ -955,6 +978,7 @@ class CoachService:
                 if item:
                     item["kept"] = False
                     item["reasons"].append(f"行业分散上限 {dynamic_industry_cap} 只，未进入召回池")
+                    rejection_summary["行业分散上限"] = rejection_summary.get("行业分散上限", 0) + 1
         diversified.sort(key=lambda x: x.get("pre_score", 0), reverse=True)
         candidates = diversified[:target_candidate_size]
         candidate_symbols = {str(row.get("symbol") or "") for row in candidates}
@@ -963,6 +987,7 @@ class CoachService:
             if item:
                 item["kept"] = False
                 item["reasons"].append(f"未进入Top{target_candidate_size}召回池")
+                rejection_summary["未进入Top召回池"] = rejection_summary.get("未进入Top召回池", 0) + 1
         for symbol in candidate_symbols:
             item = items_by_symbol.get(symbol)
             if item:
@@ -1011,6 +1036,9 @@ class CoachService:
         )
         capped_limit = max(1, min(int(limit or 5000), 10000))
         latest_meta = copy.deepcopy(snapshot_meta or self._universe_state.get("last_meta") or {})
+        deep_analysis_count = latest_meta.get("analyzed_count")
+        if deep_analysis_count is None:
+            deep_analysis_count = latest_meta.get("analysis_completed_count")
         return {
             "trade_date": effective_trade_date,
             "risk_level": level,
@@ -1019,7 +1047,7 @@ class CoachService:
             "universe_count": len(entries),
             "prefilter_count": len(filtered),
             "recall_count": len(candidates),
-            "deep_analysis_count": int(latest_meta.get("analyzed_count") or len(candidates)),
+            "deep_analysis_count": int(deep_analysis_count) if deep_analysis_count is not None else None,
             "final_pick_count": len(snapshots),
             "layers": [
                 "full_market",
@@ -1030,6 +1058,15 @@ class CoachService:
                 "final_output",
             ],
             "rules": {**rules, "strategy_target_size": target_candidate_size, "industry_cap_effective": dynamic_industry_cap},
+            "rejection_summary": dict(sorted(rejection_summary.items(), key=lambda item: (-item[1], item[0]))),
+            "filter_policy": {
+                "status": "legacy_hard_filter",
+                "evidence_validated": False,
+                "message": "当前漏斗包含历史硬过滤门槛，不代表已通过样本外验证的最优过滤；放宽或移除这些门槛会改变生产候选，必须先完成 ranking evaluation 和 baseline 回测。",
+                "hard_filter_reasons": hard_filter_reasons,
+                "selection_reasons": ["行业分散上限", "未进入Top召回池", "最终输出来自已保存 pick_snapshots"],
+                "final_output_note": "最终输出数量来自后端刷新时保存的候选快照，不是前端展示上限；当前只读诊断不会补生成更多股票。",
+            },
             "industry_count": len(industries),
             "items": items[:capped_limit],
             "items_by_symbol": items_by_symbol,
@@ -2544,6 +2581,24 @@ class CoachService:
             summary = calendar_context.get("message") or "展示最近有效交易日候选池，仅供下个交易日前观察准备。"
             primary_action = "watch" if picks else "no_trade"
 
+        if mode == "trading":
+            execution_rules = [
+                "当前视图读取当前交易日候选池快照。",
+                "仅当候选池日期与当前交易日一致时允许模拟验证。",
+            ]
+        elif mode == "historical":
+            execution_rules = [
+                "当前视图只读取指定历史候选池快照。",
+                "历史快照仅供复盘观察，不生成新的交易计划。",
+            ]
+        else:
+            requested_date = calendar_context.get("requested_date") or "当前日期"
+            effective_date = calendar_context.get("effective_trade_date") or "最近有效交易日"
+            execution_rules = [
+                "当前视图只读取已保存候选池快照。",
+                f"当前日期 {requested_date} 非交易日，不生成新的交易计划；{effective_date} 为展示的候选池交易日。",
+            ]
+
         return {
             "primary_action": primary_action,
             "headline": headline,
@@ -2560,10 +2615,7 @@ class CoachService:
                 "sample_count": 0,
                 "next_phase": "当前只读取已保存候选池快照，不重新生成交易计划。",
             },
-            "execution_rules": [
-                "当前视图只读取已保存候选池快照。",
-                "非交易日允许加入观察，禁止模拟买入。",
-            ],
+            "execution_rules": execution_rules,
         }
 
     def _empty_cached_picks_result(
@@ -2683,7 +2735,7 @@ class CoachService:
         requested_date: Optional[str] = None,
         trade_date: Optional[str] = None,
     ) -> Dict[str, Any]:
-        max_count = max(1, min(max_count, 40))
+        max_count = max(1, min(max_count, 120))
         calendar_context = self.resolve_pick_calendar_context(
             user_id=user_id,
             requested_date=requested_date,
