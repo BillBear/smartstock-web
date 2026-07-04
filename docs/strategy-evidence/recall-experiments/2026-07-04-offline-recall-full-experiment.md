@@ -9,7 +9,9 @@
 - 阻塞原因：`no_variant_passed_gates`
 - 证据属性：只读离线研究，不修改生产选股、排序、买入、卖出、止盈止损或仓位逻辑。
 
-宽召回组的 Top5 平均收益高于 baseline，但 Precision@3、Precision@5 均远低于生产准入门槛，且 NDCG@10 低于 baseline。多通道 union 在本次样本中表现更差。
+宽召回组的 Precision@3、Precision@5 和 Top5 平均收益高于 baseline，但 Precision@3、Precision@5 均远低于生产准入门槛，且 NDCG@10 低于 baseline。多通道 union 的 Top5 平均收益最高，但排序质量仍未通过门禁。
+
+本轮已修复离线标签读取链路：优先读取已持久化的 `market_snapshots` / `market_snapshot_items`，仅在本地快照无可用历史时 fallback 到显式远端历史区间。因此，前一版实验中的大量 `missing_history` 已不再是主要阻塞点。
 
 ## 复现命令
 
@@ -33,7 +35,7 @@ cd /Users/xiong/Documents/SmartStock/smartstock-web/backend
   --commission 0.0003 \
   --slippage 0.001 \
   --include-baseline \
-  --output-root /tmp/smartstock-offline-recall-full-20260704
+  --output-root /tmp/smartstock-offline-recall-full-snapshot-labels-20260704
 ```
 
 关键输出：
@@ -51,8 +53,8 @@ production_switch_ready: False
 原始本地产物：
 
 ```text
-/tmp/smartstock-offline-recall-full-20260704
-/tmp/smartstock-offline-recall-full-20260704.log
+/tmp/smartstock-offline-recall-full-snapshot-labels-20260704
+/tmp/smartstock-offline-recall-full-snapshot-labels-20260704.log
 ```
 
 这些 `/tmp` 产物未提交到仓库；本文档只记录可复查摘要。
@@ -61,38 +63,38 @@ production_switch_ready: False
 
 | 实验 | 样本行数 | 覆盖状态 | 覆盖交易日 | Precision@3 | Precision@5 | Precision@10 | Recall@10 | NDCG@10 | MRR | Top5 平均收益 |
 | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| baseline | 635 | partial | 22 / 49 | 0.132184 | 0.151724 | 0.134483 | 0.312681 | 0.275454 | 0.293519 | 0.099766 |
-| recall_220_deep_150 | 2700 | partial | 18 / 49 | 0.238095 | 0.204762 | 0.207143 | 0.069689 | 0.152444 | 0.396962 | 2.696065 |
-| recall_300_deep_300 | 5400 | partial | 18 / 49 | 0.238095 | 0.204762 | 0.207143 | 0.038000 | 0.139628 | 0.396962 | 2.696065 |
-| recall_500_deep_500 | 9000 | partial | 18 / 49 | 0.238095 | 0.204762 | 0.207143 | 0.027717 | 0.135048 | 0.396962 | 2.696065 |
-| multi_channel_union | 4776 | partial | 18 / 49 | 0.103175 | 0.123810 | 0.119048 | 0.022065 | 0.071229 | 0.267039 | 1.191355 |
+| baseline | 635 | partial | 22 / 49 | 0.160000 | 0.132000 | 0.134000 | 0.213528 | 0.242221 | 0.357264 | -1.525033 |
+| recall_220_deep_150 | 2700 | partial | 18 / 49 | 0.264957 | 0.251282 | 0.241026 | 0.054221 | 0.153053 | 0.451197 | 1.755358 |
+| recall_300_deep_300 | 5400 | partial | 18 / 49 | 0.264957 | 0.251282 | 0.241026 | 0.028186 | 0.137071 | 0.451197 | 1.755358 |
+| recall_500_deep_500 | 9000 | partial | 18 / 49 | 0.264957 | 0.251282 | 0.241026 | 0.017832 | 0.128966 | 0.451197 | 1.755358 |
+| multi_channel_union | 4776 | partial | 18 / 49 | 0.256410 | 0.225641 | 0.223077 | 0.030969 | 0.146095 | 0.397578 | 3.082375 |
 
 ## 标签质量
 
-| 实验 | label errors | missing history | tradable labels |
+| 实验 | tradable labels | limit-up blocked | missing history |
 | --- | ---: | ---: | ---: |
-| baseline | 0 | 20 | 615 |
-| recall_220_deep_150 | 0 | 805 | 1891 |
-| recall_300_deep_300 | 0 | 1944 | 3448 |
-| recall_500_deep_500 | 0 | 3951 | 5034 |
-| multi_channel_union | 0 | 1688 | 3077 |
+| baseline | 634 | 1 | 0 |
+| recall_220_deep_150 | 2693 | 7 | 0 |
+| recall_300_deep_300 | 5388 | 12 | 0 |
+| recall_500_deep_500 | 8975 | 25 | 0 |
+| multi_channel_union | 4762 | 14 | 0 |
 
-运行期间出现 TuShare / AKShare 显式历史区间读取熔断冷却日志。离线评估脚本已按股票缓存宽区间行情，避免同一股票按候选行重复请求；但本次全量宽召回仍涉及上千只股票，历史标签覆盖不足仍然显著。
+本轮标签质量已改善：离线标签优先使用本地持久化全市场快照，候选行不再大量落入 `missing_history`。当前仍然不足的是可用交易日期覆盖，宽召回实验只有 `18 / 49` 个日期有同日全市场快照，baseline 只有 `22 / 49` 个日期有历史候选快照。
 
 ## 判断
 
 本次实验不能证明宽召回可直接切生产：
 
-- Precision@3 最高只有 `0.238095`，低于准入要求 `0.65`。
-- Precision@5 最高只有 `0.204762`，低于准入要求 `0.60`。
+- Precision@3 最高只有 `0.264957`，低于准入要求 `0.65`。
+- Precision@5 最高只有 `0.251282`，低于准入要求 `0.60`。
 - 三个宽召回组的 NDCG@10 均低于 baseline，说明排序质量没有变好。
-- `multi_channel_union` 的 Precision、Recall、NDCG 均弱于 baseline 和固定宽召回组。
+- `multi_channel_union` 的 Top5 平均收益最高，但 Precision、NDCG 仍不足，不能作为切换依据。
 - 覆盖交易日不足 30 个，所有实验 `evidence_readiness.status=insufficient`。
-- 大量 `missing_history` 会压低标签可信度，不能用这次结果做生产参数切换依据。
+- 当前阻塞原因为 `no_variant_passed_gates`，不能用这次结果做生产参数切换依据。
 
 ## 下一步
 
-1. 先扩充或修复历史行情标签覆盖，避免全量实验中大量 `missing_history`。
-2. 将离线实验拆成可恢复批处理，记录每只股票历史行情缓存命中、失败和熔断原因。
-3. 在至少 30 个有效交易日、标签覆盖充分后重新跑同一矩阵。
-4. 若宽召回仍只改善 Top5 平均收益但不改善 NDCG 和 Precision，不应切生产；应转向排序因子和准入门禁研究。
+1. 继续积累或回填至少 30 个同口径全市场快照日期，并补齐历史候选快照覆盖。
+2. 在覆盖日期达标后重新跑同一矩阵。
+3. 若宽召回仍只改善 Top5 平均收益但不改善 NDCG 和 Precision，不应切生产；应转向排序因子和准入门禁研究。
+4. 任何生产策略切换仍需额外 backtest baseline、walk-forward、成本滑点、最大回撤和收益回撤比证据。

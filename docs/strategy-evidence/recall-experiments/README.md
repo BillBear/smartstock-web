@@ -46,9 +46,10 @@ python scripts/run_offline_recall_evaluation.py \
 This command is read-only:
 
 - it reads persisted `market_snapshots` / `market_snapshot_items`;
-- it labels candidates with explicit future history ranges;
-- it caches one broad explicit history range per symbol for the run, then slices
-  that cache for each candidate date;
+- it labels candidates with explicit future history ranges, preferring
+  persisted market snapshot history before remote fallback;
+- it caches one broad explicit fallback history range per symbol for the run,
+  then slices that cache for each candidate date;
 - it writes ranking CSV/JSON artifacts under `--output-root`;
 - it does not write pick snapshots, actions, strategy settings, or production recommendations.
 

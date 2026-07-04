@@ -7,6 +7,7 @@ stock selection, change ranking, or create buy/sell decisions.
 Current readiness summary:
 
 - [ML current readiness](current-readiness.md)
+- [2026-07-04 training dataset audit](2026-07-04-training-dataset-audit.md)
 
 ## Production Minimums
 
@@ -50,3 +51,21 @@ Historical small models, including models trained on tens or hundreds of stocks
 with a short date range, fail this gate. They remain useful for debugging the
 feature pipeline, but they are not reliable enough to present as calibrated
 stock-selection probabilities.
+
+## Training Dataset Audit
+
+Before training a new model, run the read-only dataset readiness audit:
+
+```bash
+cd smartstock-web/backend
+source venv/bin/activate
+python scripts/audit_ml_training_readiness.py \
+  --train-start 2024-07-01 \
+  --train-end 2026-07-03 \
+  --sample-step 3 \
+  --output-json /tmp/smartstock-ml-training-readiness.json \
+  --output-md /tmp/smartstock-ml-training-readiness.md
+```
+
+The audit reads persisted full-market snapshots only. It does not train models,
+write predictions, alter strategy logic, or change production recommendations.

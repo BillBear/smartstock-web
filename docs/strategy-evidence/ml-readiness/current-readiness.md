@@ -85,4 +85,14 @@ market_state_coverage_incomplete
 
 2026-07-04 后进一步补充的训练窗口边界：`MLDatasetBuilder` 在数据源支持时会优先调用显式 `get_history_data_range(symbol, start_date, end_date)`，历史窗口由 `train_start - feature_warmup_calendar_days` 到 `train_end + label_lookahead_calendar_days` 派生，避免训练数据隐式落到“最近 N 天/今天”。这仍只影响离线训练数据构建，不训练新模型、不改变生产推荐。
 
+2026-07-04 新增只读训练数据审计：
+
+```text
+backend/scripts/audit_ml_training_readiness.py
+backend/app/evaluation/ml_training_audit.py
+docs/strategy-evidence/ml-readiness/2026-07-04-training-dataset-audit.md
+```
+
+最新审计结果显示：当前最新全 A 快照为 `2026-07-03`，数量 `5210`，股票数、板块和行业覆盖已经达标；但满足全市场阈值的历史快照日期只有 `18` 个，按 `sample_step=3` 估算样本数 `31260`，低于 `100000` 最低要求。因此 `dataset_build_ready=false`，还不能训练新的生产候选模型。
+
 在新模型通过样本外证据前，前端和 API 必须继续把模型概率标记为 `弱模型参考`。

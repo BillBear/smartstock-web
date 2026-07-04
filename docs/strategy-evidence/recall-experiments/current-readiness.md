@@ -4,26 +4,27 @@
 
 ## 结论
 
-当前已有离线召回实验比较器，并新增了只读的离线召回候选生成器。但还没有完成全区间真实宽召回实验并通过门禁。因此，本阶段不能切换生产召回、深度分析数量或多通道召回逻辑。
+当前已有离线召回实验比较器、只读离线召回候选生成器，并已完成一轮同口径全区间真实宽召回实验。但实验组没有通过生产切换门禁。因此，本阶段不能切换生产召回、深度分析数量或多通道召回逻辑。
 
 - 状态：`blocked`
 - 生产切换：`false`
-- 已有能力：`baseline replay`、`offline variant generator`、`experiment comparator`
-- 已有正式实验报告：`1 / 5`
-- 可用实验：`baseline`
-- 缺失实验：`recall_220_deep_150`、`recall_300_deep_300`、`recall_500_deep_500`、`multi_channel_union`
-- 阻塞原因：`missing_experiment_reports`、`no_variant_passed_gates`
+- 已有能力：`baseline replay`、`offline variant generator`、`experiment comparator`、`snapshot-backed forward labels`
+- 已有正式实验报告：`5 / 5`
+- 可用实验：`baseline`、`recall_220_deep_150`、`recall_300_deep_300`、`recall_500_deep_500`、`multi_channel_union`
+- 缺失实验：无
+- 阻塞原因：`no_variant_passed_gates`
 
-这说明当前已经具备“生成离线实验候选”和“比较实验结果”的工具，但还不具备“证明宽召回更优”的正式证据。
+这说明当前已经具备“生成离线实验候选”和“比较实验结果”的工具，但最新证据不支持把宽召回或多通道召回切入生产。
 
 2026-07-04 后新增的只读生成器：
 
 ```text
 backend/scripts/run_offline_recall_evaluation.py
 backend/app/evaluation/offline_recall_candidates.py
+backend/app/evaluation/market_snapshot_history.py
 ```
 
-该生成器只读取已保存的全 A 市场快照和显式历史行情窗口，输出 ranking evaluation 产物；不写入候选池、不刷新策略、不改变生产排序、买入、卖出、止盈止损或仓位逻辑。
+该生成器只读取已保存的全 A 市场快照和 forward label 历史。标签读取优先使用持久化 `market_snapshots` / `market_snapshot_items`，本地快照缺失时才 fallback 到显式远端历史行情窗口。它只输出 ranking evaluation 产物；不写入候选池、不刷新策略、不改变生产排序、买入、卖出、止盈止损或仓位逻辑。
 
 2026-07-04 后新增的比较门禁：即使五个实验报告都存在，也必须和 baseline 使用相同的 `strategy_code`、`risk_level`、起止日期、horizon、Top-K、标签配置、交易成本和滑点配置。任一可用实验组口径不一致时，比较器会返回 `incompatible_experiment_reports`，并禁止给出生产切换结论。
 
@@ -81,7 +82,7 @@ python scripts/run_offline_recall_evaluation.py \
   --output-root /tmp/smartstock-offline-recall-experiment
 ```
 
-注意：该命令可能需要较长时间，但当前脚本会在单次运行内按股票缓存宽日期区间行情，再为每个候选日期切片打标签，避免同一股票重复请求历史行情。生成结果仍必须经过 `recall_experiment_report.json` 的门禁判断，不能直接用于生产切换。
+注意：该命令可能需要较长时间。当前脚本会先按显式日期范围读取本地持久化市场快照，缺失时才走远端历史行情 fallback。生成结果仍必须经过 `recall_experiment_report.json` 的门禁判断，不能直接用于生产切换。
 
 ## 本轮工具验证
 
@@ -161,15 +162,35 @@ recall_method: production_pre_score
 指标：
 
 ```text
-Precision@3: 0.132184
-Precision@5: 0.151724
-NDCG@10: 0.275454
-Top5 average return pct: 0.099766
+Precision@3: 0.160000
+Precision@5: 0.132000
+NDCG@10: 0.242221
+Top5 average return pct: -1.525033
 max_drawdown: 0.0
+```
+
+最新离线实验摘要：
+
+```text
+recall_220_deep_150 Precision@3: 0.264957, Precision@5: 0.251282, NDCG@10: 0.153053, Top5 average return pct: 1.755358
+recall_300_deep_300 Precision@3: 0.264957, Precision@5: 0.251282, NDCG@10: 0.137071, Top5 average return pct: 1.755358
+recall_500_deep_500 Precision@3: 0.264957, Precision@5: 0.251282, NDCG@10: 0.128966, Top5 average return pct: 1.755358
+multi_channel_union Precision@3: 0.256410, Precision@5: 0.225641, NDCG@10: 0.146095, Top5 average return pct: 3.082375
+```
+
+标签质量摘要：
+
+```text
+missing_history: 0
+baseline tradable labels: 634 / 635
+recall_220_deep_150 tradable labels: 2693 / 2700
+recall_300_deep_300 tradable labels: 5388 / 5400
+recall_500_deep_500 tradable labels: 8975 / 9000
+multi_channel_union tradable labels: 4762 / 4776
 ```
 
 ## 影响判断
 
 本次只运行离线比较器并记录当前缺口，不修改生产选股、召回、排序、买入、卖出、止盈、止损或仓位逻辑。
 
-下一步若要推进 Phase 5，必须运行完整真实区间的四个离线实验组，并确保它们和 baseline 使用同一区间、同一标签、同一交易成本与滑点口径。只有实验组通过门禁后，才允许提出独立的策略切换方案。
+下一步若要推进 Phase 5，需要积累或回填至少 30 个同口径全市场快照日期，并在覆盖达标后重新跑同一矩阵。只有实验组通过 Precision/NDCG/收益/回撤门禁后，才允许提出独立的策略切换方案。

@@ -23,6 +23,7 @@ from app.evaluation.ranking_labels import DEFAULT_STRONG_LABEL_CONFIG
 from app.evaluation.ranking_latest import annotate_ranking_evidence_readiness
 from app.evaluation.ranking_replay import RankingReplayService, attach_forward_labels
 from app.evaluation.ranking_report import build_ranking_report
+from app.evaluation.market_snapshot_history import MarketSnapshotHistoryProvider
 from app.evaluation.recall_experiments import DEFAULT_EXPERIMENTS, build_recall_experiment_report, write_recall_experiment_report
 
 
@@ -93,10 +94,13 @@ def run(argv: Optional[Iterable[str]] = None) -> int:
         load_local_env()
         from app.main import coach_store, data_source_manager
 
-        history_manager = CachedHistoryRangeManager(
-            data_source_manager,
+        history_manager = build_history_manager(
+            store=coach_store,
+            data_source_manager=data_source_manager,
             start_date=args.start_date,
-            end_date=_label_cache_end_date(args.end_date, label_config),
+            end_date=args.end_date,
+            label_config=label_config,
+            min_market_snapshot_count=args.min_market_snapshot_count,
         )
         if args.include_baseline:
             _write_baseline_report(args, output_root, label_config, execution_config, coach_store, history_manager)
@@ -203,6 +207,26 @@ class CachedHistoryRangeManager:
         end = _normalize_date_text(end_date) or str(end_date)
         rows = history[(history["date"] >= start) & (history["date"] <= end)]
         return rows.reset_index(drop=True)
+
+
+def build_history_manager(
+    store,
+    data_source_manager,
+    start_date: str,
+    end_date: str,
+    label_config: dict,
+    min_market_snapshot_count: int = 1,
+):
+    remote_history = CachedHistoryRangeManager(
+        data_source_manager,
+        start_date=start_date,
+        end_date=_label_cache_end_date(end_date, label_config),
+    )
+    return MarketSnapshotHistoryProvider(
+        store=store,
+        fallback=remote_history,
+        min_count=max(1, int(min_market_snapshot_count or 1)),
+    )
 
 
 def _label_cache_end_date(end_date: str, label_config: dict) -> str:

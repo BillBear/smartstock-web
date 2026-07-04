@@ -119,6 +119,27 @@ class OfflineRecallEvaluationCliTests(unittest.TestCase):
         self.assertEqual(first["date"].tolist(), ["2026-05-30", "2026-06-01"])
         self.assertEqual(second["date"].tolist(), ["2026-06-01", "2026-06-20"])
 
+    def test_build_history_manager_prefers_persisted_market_snapshots_with_remote_fallback(self):
+        module = _load_script_module()
+
+        class Source:
+            pass
+
+        manager = module.build_history_manager(
+            store=object(),
+            data_source_manager=Source(),
+            start_date="2026-05-01",
+            end_date="2026-05-31",
+            label_config={"horizons": [3, 5]},
+            min_market_snapshot_count=1,
+        )
+
+        self.assertEqual(manager.__class__.__name__, "MarketSnapshotHistoryProvider")
+        self.assertEqual(manager.min_count, 1)
+        self.assertEqual(manager.fallback.__class__.__name__, "CachedHistoryRangeManager")
+        self.assertEqual(manager.fallback.start_date, "2026-05-01")
+        self.assertEqual(manager.fallback.end_date, "2026-07-05")
+
 
 if __name__ == "__main__":
     unittest.main()
