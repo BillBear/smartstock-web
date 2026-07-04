@@ -154,6 +154,7 @@ def run_experiment(cfg: Dict[str, Any], run_dir: Path) -> Dict[str, Any]:
     if len(valid_symbols) < int(cfg["min_formal_model_symbols"]):
         dataset_meta = {
             "valid_symbol_count": len(valid_symbols),
+            "required_valid_symbol_count": int(cfg["min_formal_model_symbols"]),
             "sample_count": 0,
             "blocked": True,
             "blocking_reason": "valid_symbols_below_required",
@@ -184,6 +185,7 @@ def run_experiment(cfg: Dict[str, Any], run_dir: Path) -> Dict[str, Any]:
     dataset_meta = {
         **(dataset.get("meta") or {}),
         "valid_symbol_count": int(frame["symbol"].nunique()) if not frame.empty else 0,
+        "required_valid_symbol_count": int(cfg["min_formal_model_symbols"]),
         "sample_count": int(len(frame)),
         "excluded_features": excluded_features,
     }

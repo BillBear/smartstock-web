@@ -26,6 +26,7 @@ def build_training_review(
     model_comparison: Dict[str, Any],
 ) -> Dict[str, Any]:
     valid_symbols = int(dataset_meta.get("valid_symbol_count") or dataset_meta.get("actual_valid_symbols") or 0)
+    required_symbols = int(dataset_meta.get("required_valid_symbol_count") or 700)
     sample_count = int(dataset_meta.get("sample_count") or 0)
     leakage = list(feature_audit.get("leakage_violations") or [])
     best_model = str(model_comparison.get("best_model") or "")
@@ -35,8 +36,8 @@ def build_training_review(
     blocking = []
     warnings = []
 
-    if valid_symbols < 700:
-        blocking.append("valid_symbols_below_700")
+    if valid_symbols < required_symbols:
+        blocking.append(f"valid_symbols_below_{required_symbols}")
     if leakage:
         blocking.append("feature_leakage_detected")
     if sample_count < 100000:
@@ -66,6 +67,7 @@ def build_training_review(
         "blocking_reasons": blocking,
         "warnings": warnings,
         "valid_symbol_count": valid_symbols,
+        "required_valid_symbol_count": required_symbols,
         "sample_count": sample_count,
         "best_model": best_model,
         "metrics": {
@@ -109,8 +111,9 @@ def _next_run_recommendations(
 
 def _sample_adjustments(blocking: List[str], warnings: List[str]) -> List[Dict[str, str]]:
     result = []
-    if "valid_symbols_below_700" in blocking:
-        result.append({"reason": "valid_symbols_below_700", "next_run_change": "increase oversample_symbols above 760"})
+    symbol_block = next((item for item in blocking if item.startswith("valid_symbols_below_")), None)
+    if symbol_block:
+        result.append({"reason": symbol_block, "next_run_change": "increase oversample_symbols before rerunning"})
     if "sample_count_below_100000" in warnings:
         result.append({"reason": "sample_count_below_100000", "next_run_change": "extend train_start or lower sample_step"})
     return result

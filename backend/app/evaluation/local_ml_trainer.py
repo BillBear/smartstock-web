@@ -95,7 +95,7 @@ def _make_logistic(y: np.ndarray, random_state: int):
     model = (
         DummyClassifier(strategy="prior")
         if len(set(y.tolist())) < 2
-        else LogisticRegression(max_iter=800, class_weight="balanced", random_state=random_state)
+        else LogisticRegression(max_iter=800, class_weight="balanced", random_state=random_state, solver="liblinear")
     )
     return Pipeline([("scaler", StandardScaler()), ("model", model)])
 

@@ -50,6 +50,21 @@ class MLTrainingReviewerTests(unittest.TestCase):
             self.assertIn("valid_symbols_below_700", review["blocking_reasons"])
             self.assertIn("feature_leakage_detected", review["blocking_reasons"])
 
+    def test_reviewer_uses_run_specific_required_symbol_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            write_json(
+                run_dir / "dataset_meta.json",
+                {"valid_symbol_count": 19, "required_valid_symbol_count": 20, "sample_count": 1000},
+            )
+            write_json(run_dir / "feature_audit.json", {"leakage_violations": [], "features": {}})
+            write_json(run_dir / "model_comparison.json", {"best_model": "logistic_baseline", "models": {}})
+
+            review = review_local_ml_run(run_dir)
+
+            self.assertEqual(review["recommendation"], "blocked")
+            self.assertIn("valid_symbols_below_20", review["blocking_reasons"])
+
 
 if __name__ == "__main__":
     unittest.main()
