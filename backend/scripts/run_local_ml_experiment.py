@@ -81,6 +81,12 @@ def history_window_for_config(cfg: Dict[str, Any]) -> tuple[str, str]:
     )
 
 
+def history_cache_root_for_config(cfg: Dict[str, Any]) -> Path:
+    if cfg.get("history_cache_root"):
+        return Path(str(cfg["history_cache_root"]))
+    return Path(str(cfg["output_root"])).parent / "history_cache"
+
+
 def main(argv=None) -> int:
     backend_root = _bootstrap_paths()
     args = parse_args(argv)
@@ -139,7 +145,7 @@ def run_experiment(cfg: Dict[str, Any], run_dir: Path) -> Dict[str, Any]:
 
     history_cache = MLHistoryCache(
         data_source_manager,
-        cache_root=run_dir / "history_cache",
+        cache_root=history_cache_root_for_config(cfg),
         retry_count=int(cfg["history_retry_count"]),
         sleep_seconds=float(cfg["history_retry_sleep_seconds"]),
         inter_request_sleep_seconds=float(cfg.get("history_inter_request_sleep_seconds") or 0.0),

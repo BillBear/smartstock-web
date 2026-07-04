@@ -9,6 +9,7 @@ import pandas as pd
 
 from app.evaluation.local_ml_labels import add_local_core_labels
 from scripts.run_local_ml_experiment import (
+    history_cache_root_for_config,
     _limit_frame_to_target_symbols,
     _prepare_local_training_frame,
     build_config_from_args,
@@ -64,6 +65,21 @@ class RunLocalMLExperimentCLITests(unittest.TestCase):
 
         self.assertEqual(start, "2024-01-02")
         self.assertEqual(end, "2026-09-01")
+
+    def test_history_cache_root_is_shared_across_run_ids_under_output_parent(self):
+        cfg = build_config_from_args(
+            parse_args(
+                [
+                    "--output-root",
+                    "/tmp/smartstock/runtime/ml_runs/local_core_v1/formal_700",
+                ]
+            )
+        )
+
+        self.assertEqual(
+            str(history_cache_root_for_config(cfg)),
+            "/tmp/smartstock/runtime/ml_runs/local_core_v1/history_cache",
+        )
 
     def test_prepare_training_frame_adds_multi_horizon_labels_before_sampling(self):
         dates = pd.date_range("2026-01-01", periods=8, freq="D").strftime("%Y-%m-%d")
