@@ -63,6 +63,17 @@ secret_status() {
   fi
 }
 
+protected_path_status() {
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    return
+  fi
+  case "$BASE_DIR" in
+    "$HOME/Documents"/*|"$HOME/Desktop"/*|"$HOME/Downloads"/*)
+      line "Launchd path warning: deploy root is under a macOS protected directory; launchd may need Full Disk Access or a non-protected repo path"
+      ;;
+  esac
+}
+
 check_port() {
   local label="$1"
   local port="$2"
@@ -113,6 +124,7 @@ else
   line "Backend env: missing"
 fi
 secret_status
+protected_path_status
 
 check_launchd "com.smartstock.postgres"
 check_launchd "com.smartstock.backend"

@@ -9,10 +9,11 @@ LOG_DIR="$RUNTIME_DIR/logs"
 RENDER_DIR="$RUNTIME_DIR/launchd"
 DRY_RUN=0
 NO_LOAD=0
+FORCE_LOAD="${SMARTSTOCK_ALLOW_PROTECTED_LAUNCHD:-0}"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/local/install_launchd_services.sh [--dry-run] [--no-load]
+Usage: scripts/local/install_launchd_services.sh [--dry-run] [--no-load] [--force-load]
 
 Installs macOS user launchd services for the local SmartStock validation
 environment. The generated services call repository-local scripts and keep
@@ -21,6 +22,9 @@ local-only paths outside business code.
 Options:
   --dry-run   Render and validate planned files without writing or loading.
   --no-load   Write plist files but do not bootstrap them into launchd.
+  --force-load
+              Load services even when the project is under a macOS protected
+              directory such as ~/Documents. Use only after granting access.
 EOF
 }
 
@@ -31,6 +35,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-load)
       NO_LOAD=1
+      ;;
+    --force-load)
+      FORCE_LOAD=1
       ;;
     -h|--help)
       usage
@@ -47,6 +54,33 @@ done
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "launchd services are only supported on macOS" >&2
+  exit 1
+fi
+
+is_protected_macos_path() {
+  case "$BASE_DIR" in
+    "$HOME/Documents"/*|"$HOME/Desktop"/*|"$HOME/Downloads"/*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+if [[ "$DRY_RUN" != "1" && "$NO_LOAD" != "1" && "$FORCE_LOAD" != "1" ]] && is_protected_macos_path; then
+  cat >&2 <<EOF
+Refusing to load launchd services from a macOS protected directory:
+  $BASE_DIR
+
+launchd may fail with "Operation not permitted" when reading files under
+Documents/Desktop/Downloads unless the service has explicit Full Disk Access.
+
+Use one of these options:
+  1. Move the repo to a non-protected path such as ~/Developer/smartstock-web.
+  2. Grant the relevant launcher Full Disk Access, then rerun with --force-load.
+  3. Run --no-load to only write plist files, or keep using ./start.sh manually.
+EOF
   exit 1
 fi
 

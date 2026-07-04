@@ -25,6 +25,16 @@ cd /Users/xiong/Documents/SmartStock/smartstock-web
 scripts/local/install_launchd_services.sh
 ```
 
+If the repo stays under `~/Documents`, macOS may block launchd from reading the
+project or Python virtual environment with `Operation not permitted`. In that
+case the installer refuses to load services by default. Prefer moving the repo
+to a non-protected path such as `~/Developer/smartstock-web`, or grant the
+launcher Full Disk Access before using:
+
+```bash
+scripts/local/install_launchd_services.sh --force-load
+```
+
 Dry run without writing plist files:
 
 ```bash
