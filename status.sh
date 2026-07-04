@@ -17,6 +17,70 @@ git_value() {
   echo "$label: ${value:-unknown}"
 }
 
+git_relation() {
+  local head origin count
+  head="$(git -C "$BASE_DIR" rev-parse HEAD 2>/dev/null || true)"
+  origin="$(git -C "$BASE_DIR" rev-parse refs/remotes/origin/main 2>/dev/null || true)"
+  if [ -z "$head" ] || [ -z "$origin" ]; then
+    echo "git relation: unknown (missing HEAD or origin/main)"
+  elif [ "$head" = "$origin" ]; then
+    echo "git relation: in sync with origin/main"
+  elif git -C "$BASE_DIR" merge-base --is-ancestor "$origin" "$head" 2>/dev/null; then
+    count="$(git -C "$BASE_DIR" rev-list --count "$origin..$head" 2>/dev/null || echo "?")"
+    echo "git relation: ahead of origin/main by $count commit(s)"
+  elif git -C "$BASE_DIR" merge-base --is-ancestor "$head" "$origin" 2>/dev/null; then
+    count="$(git -C "$BASE_DIR" rev-list --count "$head..$origin" 2>/dev/null || echo "?")"
+    echo "git relation: behind origin/main by $count commit(s)"
+  else
+    echo "git relation: diverged from origin/main"
+  fi
+}
+
+stable_tag_line() {
+  local stable
+  stable="$(git -C "$BASE_DIR" tag --merged HEAD --list 'local-stable-*' --sort=-creatordate 2>/dev/null | head -n 1 || true)"
+  if [ -n "$stable" ]; then
+    local sha
+    sha="$(git -C "$BASE_DIR" rev-list -n 1 "$stable" 2>/dev/null | cut -c1-12 || true)"
+    echo "stable tag: $stable${sha:+ ($sha)}"
+  else
+    echo "stable tag: none reachable from HEAD"
+  fi
+}
+
+workspace_dir() {
+  if [[ "$BASE_DIR" == */.worktrees/* ]]; then
+    cd "$BASE_DIR/../.." && pwd
+  else
+    cd "$BASE_DIR/.." && pwd
+  fi
+}
+
+secret_line() {
+  local workspace env_file token_line
+  workspace="$(workspace_dir)"
+  env_file="${SMARTSTOCK_LOCAL_ENV_FILE:-$workspace/.local-secrets/smartstock.env}"
+  if [ -L "$BASE_DIR/backend/.env" ]; then
+    echo "backend env: symlink -> $(readlink "$BASE_DIR/backend/.env")"
+  elif [ -f "$BASE_DIR/backend/.env" ]; then
+    echo "backend env: regular file"
+  else
+    echo "backend env: missing"
+  fi
+  if [ ! -f "$env_file" ]; then
+    echo "local secret file: missing ($env_file)"
+    echo "TuShare token: not configured"
+    return
+  fi
+  echo "local secret file: present ($env_file)"
+  token_line="$(grep -E '^[[:space:]]*(export[[:space:]]+)?TUSHARE_TOKEN=' "$env_file" 2>/dev/null | tail -n 1 || true)"
+  if [ -n "$token_line" ] && [[ ! "$token_line" =~ TUSHARE_TOKEN=[[:space:]]*$ ]]; then
+    echo "TuShare token: configured"
+  else
+    echo "TuShare token: not configured"
+  fi
+}
+
 process_cwd() {
   local pid="$1"
   lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1
@@ -63,7 +127,10 @@ launchd_line() {
 echo "SmartStock status"
 git_value "git branch" branch --show-current
 git_value "git commit" rev-parse --short=12 HEAD
+git_relation
+stable_tag_line
 echo "Expected deploy root: $EXPECTED_DEPLOY_ROOT"
+secret_line
 
 launchd_line "com.smartstock.postgres"
 launchd_line "com.smartstock.backend"
@@ -89,10 +156,17 @@ import json, os
 try:
     payload = json.loads(os.environ.get("PICKS_JSON") or "{}").get("data") or {}
     meta = payload.get("universe_meta") or {}
+    context = payload.get("calendar_context") or {}
+    actions = context.get("actions") or {}
     print(
         f"trade_date={payload.get('trade_date') or '-'} "
         f"picks={len(payload.get('picks') or [])} "
-        f"total_universe={meta.get('total_universe_count', '-')}"
+        f"total_universe={meta.get('total_universe_count', '-')} "
+        f"mode={context.get('mode') or '-'} "
+        f"requested={context.get('requested_date') or '-'} "
+        f"effective={context.get('effective_trade_date') or '-'} "
+        f"can_refresh={actions.get('can_refresh')} "
+        f"can_paper_buy={actions.get('can_paper_buy')}"
     )
 except Exception:
     print("unavailable")
