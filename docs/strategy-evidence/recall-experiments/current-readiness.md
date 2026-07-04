@@ -15,6 +15,8 @@
 
 这说明当前只具备“比较实验结果”的工具，不具备“证明宽召回更优”的证据。
 
+2026-07-04 后新增的比较门禁：即使五个实验报告都存在，也必须和 baseline 使用相同的 `strategy_code`、`risk_level`、起止日期、horizon、Top-K、标签配置、交易成本和滑点配置。任一可用实验组口径不一致时，比较器会返回 `incompatible_experiment_reports`，并禁止给出生产切换结论。
+
 ## 输入
 
 本次只使用最新真实 ranking baseline 摘要作为 baseline 输入：

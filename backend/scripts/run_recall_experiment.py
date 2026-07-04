@@ -44,15 +44,20 @@ def write_markdown_report(report: dict, output_path: Path) -> Path:
         f"- production_switch_ready: `{str(report.get('production_switch_ready')).lower()}`",
         f"- blocking_reasons: `{', '.join(report.get('blocking_reasons') or []) or '-'}`",
         "",
-        "| experiment | evidence | Precision@3 | Precision@5 | NDCG@10 | Top5 Avg Return | Max Drawdown |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        "| experiment | evidence | compatibility | Precision@3 | Precision@5 | NDCG@10 | Top5 Avg Return | Max Drawdown |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in report.get("experiments") or []:
         metrics = row.get("metrics") or {}
+        compatibility = row.get("compatibility_status") or "-"
+        issues = row.get("compatibility_issues") or []
+        if issues:
+            compatibility = f"{compatibility}: {', '.join(str(item) for item in issues)}"
         lines.append(
-            "| {key} | {evidence} | {p3:.4f} | {p5:.4f} | {ndcg:.4f} | {ret:.4f} | {dd:.4f} |".format(
+            "| {key} | {evidence} | {compatibility} | {p3:.4f} | {p5:.4f} | {ndcg:.4f} | {ret:.4f} | {dd:.4f} |".format(
                 key=row.get("key"),
                 evidence=row.get("evidence_status"),
+                compatibility=compatibility,
                 p3=float(metrics.get("precision_at_3") or 0.0),
                 p5=float(metrics.get("precision_at_5") or 0.0),
                 ndcg=float(metrics.get("ndcg_at_10") or 0.0),
