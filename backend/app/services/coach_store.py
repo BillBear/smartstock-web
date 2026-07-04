@@ -1197,6 +1197,48 @@ class CoachStore:
             data["meta"] = {}
         return data
 
+    def get_latest_valid_market_snapshot_items(
+        self,
+        trade_date: Optional[str] = None,
+        min_count: int = 500,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the latest valid market snapshot plus persisted item payloads."""
+        snapshot = self.get_latest_valid_market_snapshot(trade_date=trade_date, min_count=min_count)
+        if not snapshot:
+            return None
+
+        with self._lock:
+            with self.engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT symbol, name, industry, item_json, created_at
+                        FROM market_snapshot_items
+                        WHERE snapshot_id = :snapshot_id
+                        ORDER BY symbol ASC
+                        """
+                    ),
+                    {"snapshot_id": snapshot["snapshot_id"]},
+                ).fetchall()
+
+        items: List[Dict[str, Any]] = []
+        for row in rows:
+            item_row = self._row_to_dict(row) or {}
+            try:
+                payload = json.loads(item_row.get("item_json") or "{}")
+            except Exception:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            payload.setdefault("symbol", item_row.get("symbol"))
+            payload.setdefault("name", item_row.get("name") or item_row.get("symbol"))
+            payload.setdefault("industry", item_row.get("industry") or "未知行业")
+            items.append(payload)
+
+        result = dict(snapshot)
+        result["items"] = items
+        return result
+
     def get_pick_snapshot(self, pick_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         clauses = ["pick_id = :pick_id"]
         params: Dict[str, Any] = {"pick_id": str(pick_id)}

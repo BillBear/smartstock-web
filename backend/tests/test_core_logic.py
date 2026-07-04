@@ -353,6 +353,13 @@ class CoachServiceObservabilityTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             store = CoachStore(str(Path(tmpdir) / "coach.db"))
+            store.save_market_snapshot(
+                trade_date="2026-07-02",
+                source="a_share_snapshot",
+                items=entries,
+                min_reliable_count=1,
+                created_at="2026-07-02 15:05:00",
+            )
             store.upsert_pick_snapshots(
                 user_id="default",
                 trade_date="2026-07-02",
@@ -374,7 +381,6 @@ class CoachServiceObservabilityTests(unittest.TestCase):
                 store=store,
                 news_service=None,
             )
-            service._get_universe_snapshot = lambda force=False: entries
 
             report = service.get_universe_funnel_diagnostics(
                 trade_date="2026-07-02",
@@ -397,6 +403,13 @@ class CoachServiceObservabilityTests(unittest.TestCase):
 
     def test_universe_funnel_defaults_to_previous_trading_snapshot_on_weekend(self):
         class DataSourceStub:
+            def __init__(self):
+                self.snapshot_calls = 0
+
+            def get_a_share_snapshot(self):
+                self.snapshot_calls += 1
+                return []
+
             def get_stock_industry_map(self):
                 return {"000001": "银行"}
 
@@ -420,6 +433,13 @@ class CoachServiceObservabilityTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             store = CoachStore(str(Path(tmpdir) / "coach.db"))
+            store.save_market_snapshot(
+                trade_date="2026-07-03",
+                source="a_share_snapshot",
+                items=entries,
+                min_reliable_count=1,
+                created_at="2026-07-03 15:05:00",
+            )
             for trade_date in ["2026-07-03", "2026-07-04"]:
                 store.upsert_pick_snapshots(
                     user_id="default",
@@ -442,7 +462,6 @@ class CoachServiceObservabilityTests(unittest.TestCase):
                 store=store,
                 news_service=None,
             )
-            service._get_universe_snapshot = lambda force=False: entries
 
             report = service.get_universe_funnel_diagnostics(
                 risk_level="medium",
@@ -453,6 +472,80 @@ class CoachServiceObservabilityTests(unittest.TestCase):
 
         self.assertEqual(report["trade_date"], "2026-07-03")
         self.assertEqual(report["calendar_context"]["mode"], "preparation")
+
+    def test_universe_funnel_reads_persisted_market_snapshot_without_refreshing_data_source(self):
+        class DataSourceStub:
+            def __init__(self):
+                self.snapshot_calls = 0
+
+            def get_a_share_snapshot(self):
+                self.snapshot_calls += 1
+                return []
+
+            def get_stock_industry_map(self):
+                return {"000001": "银行"}
+
+            def get_realtime_quotes_batch(self, symbols):
+                return {}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = CoachStore(str(Path(tmpdir) / "coach.db"))
+            store.save_market_snapshot(
+                trade_date="2026-07-02",
+                source="a_share_snapshot",
+                items=[
+                    {
+                        "symbol": "000001",
+                        "name": "平安银行",
+                        "price": 12.0,
+                        "open": 11.8,
+                        "high": 12.3,
+                        "low": 11.7,
+                        "pct_change": 2.1,
+                        "amount": 900_000_000,
+                        "turnover_rate": 4.0,
+                        "industry": "银行",
+                    }
+                ],
+                min_reliable_count=1,
+                created_at="2026-07-02 15:05:00",
+            )
+            store.upsert_pick_snapshots(
+                user_id="default",
+                trade_date="2026-07-02",
+                strategy_code="trend_breakout",
+                risk_level="medium",
+                picks=[
+                    {
+                        "pick_id": "pick-000001",
+                        "symbol": "000001",
+                        "name": "平安银行",
+                        "rank_no": 1,
+                        "decision": {"grade": "C"},
+                        "score_breakdown": {"total": 80.0},
+                    }
+                ],
+            )
+            data_source = DataSourceStub()
+            service = CoachService(
+                data_source_manager=data_source,
+                store=store,
+                news_service=None,
+            )
+
+            report = service.get_universe_funnel_diagnostics(
+                trade_date="2026-07-02",
+                risk_level="medium",
+                user_id="default",
+                limit=20,
+            )
+
+        self.assertEqual(data_source.snapshot_calls, 0)
+        self.assertEqual(report["trade_date"], "2026-07-02")
+        self.assertEqual(report["universe_count"], 1)
+        self.assertEqual(report["market_snapshot_source"], "a_share_snapshot")
+        self.assertEqual(report["market_snapshot_created_at"], "2026-07-02 15:05:00")
+        self.assertEqual(report["items_by_symbol"]["000001"]["last_layer"], "final_output")
 
     def test_universe_funnel_symbol_lookup_returns_single_item(self):
         class DataSourceStub:
@@ -478,12 +571,19 @@ class CoachServiceObservabilityTests(unittest.TestCase):
         ]
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            store = CoachStore(str(Path(tmpdir) / "coach.db"))
+            store.save_market_snapshot(
+                trade_date="2026-07-02",
+                source="a_share_snapshot",
+                items=entries,
+                min_reliable_count=1,
+                created_at="2026-07-02 15:05:00",
+            )
             service = CoachService(
                 data_source_manager=DataSourceStub(),
-                store=CoachStore(str(Path(tmpdir) / "coach.db")),
+                store=store,
                 news_service=None,
             )
-            service._get_universe_snapshot = lambda force=False: entries
 
             item = service.get_universe_funnel_symbol_diagnostic(
                 symbol="000001",

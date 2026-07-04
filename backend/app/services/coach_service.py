@@ -335,6 +335,51 @@ class CoachService:
         )
         return diagnostic
 
+    def _read_market_snapshot_items_for_diagnostics(self, trade_date: Optional[str]) -> Dict[str, Any]:
+        target_date = self._normalize_trade_date(trade_date)
+        if not target_date or not self.store or not hasattr(self.store, "get_latest_valid_market_snapshot_items"):
+            return {"items": [], "meta": {"data_coverage_status": "market_snapshot_unavailable"}}
+        try:
+            snapshot = self.store.get_latest_valid_market_snapshot_items(trade_date=target_date, min_count=1)
+        except Exception:
+            return {"items": [], "meta": {"data_coverage_status": "market_snapshot_unavailable"}}
+        if not snapshot:
+            return {"items": [], "meta": {"data_coverage_status": "market_snapshot_missing"}}
+
+        snapshot_date = self._normalize_trade_date(snapshot.get("trade_date"))
+        snapshot_count = int(snapshot.get("snapshot_count") or 0)
+        quality_status = str(snapshot.get("quality_status") or "")
+        meta = {
+            "latest_market_snapshot_trade_date": snapshot_date,
+            "latest_market_snapshot_count": snapshot_count,
+            "latest_market_snapshot_source": snapshot.get("source"),
+            "latest_market_snapshot_created_at": snapshot.get("created_at"),
+        }
+        if snapshot_date != target_date:
+            meta["data_coverage_status"] = "market_snapshot_missing"
+            return {"items": [], "meta": meta}
+
+        meta.update(
+            {
+                "data_coverage_status": "full_snapshot_available" if quality_status == "ok" else "sparse_market_snapshot",
+                "total_universe_count": snapshot_count,
+                "market_snapshot_trade_date": snapshot_date,
+                "market_snapshot_source": snapshot.get("source"),
+                "market_snapshot_quality_status": quality_status,
+                "market_snapshot_created_at": snapshot.get("created_at"),
+                "full_refresh_at": snapshot.get("created_at"),
+            }
+        )
+        return {"items": copy.deepcopy(snapshot.get("items") or []), "meta": meta}
+
+    def _get_cached_universe_snapshot_for_diagnostics(self) -> Dict[str, Any]:
+        with self._universe_lock:
+            entries = copy.deepcopy(self._universe_state.get("entries") or [])
+            meta = copy.deepcopy(self._universe_state.get("last_meta") or {})
+        if not entries:
+            return {"items": [], "meta": {"data_coverage_status": "market_snapshot_missing"}}
+        return {"items": entries, "meta": meta}
+
     def _cached_universe_meta(
         self,
         picks: List[Dict[str, Any]],
@@ -792,7 +837,16 @@ class CoachService:
         level = str(risk_level or "medium").strip().lower()
         if level not in {"low", "medium", "high"}:
             level = "medium"
-        entries = self._get_universe_snapshot(force=False)
+        snapshot_source = self._read_market_snapshot_items_for_diagnostics(effective_trade_date)
+        entries = snapshot_source.get("items") or []
+        snapshot_meta = copy.deepcopy(snapshot_source.get("meta") or {})
+        if not entries:
+            cached_snapshot = self._get_cached_universe_snapshot_for_diagnostics()
+            entries = cached_snapshot.get("items") or []
+            fallback_meta = copy.deepcopy(cached_snapshot.get("meta") or {})
+            if entries:
+                fallback_meta.setdefault("data_coverage_status", snapshot_meta.get("data_coverage_status") or "cached_universe_snapshot")
+                snapshot_meta = fallback_meta
         rules = self._get_universe_rules(level)
         target_candidate_size = max(30, min(int(rules.get("max_analyze_count") or 120), 220))
         industry_map = self.data_source_manager.get_stock_industry_map()
@@ -956,7 +1010,7 @@ class CoachService:
             ),
         )
         capped_limit = max(1, min(int(limit or 5000), 10000))
-        latest_meta = copy.deepcopy(self._universe_state.get("last_meta") or {})
+        latest_meta = copy.deepcopy(snapshot_meta or self._universe_state.get("last_meta") or {})
         return {
             "trade_date": effective_trade_date,
             "risk_level": level,
@@ -979,6 +1033,7 @@ class CoachService:
             "industry_count": len(industries),
             "items": items[:capped_limit],
             "items_by_symbol": items_by_symbol,
+            **snapshot_meta,
         }
 
     def get_universe_funnel_symbol_diagnostic(
