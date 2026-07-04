@@ -87,7 +87,15 @@ class MLDatasetBuilder:
         label_lookahead_days = max(7, min(365, int(payload.get("label_lookahead_calendar_days") or max(30, horizon_days * 4 + 20))))
         history_start_text = (start_dt - timedelta(days=feature_warmup_days)).strftime("%Y-%m-%d")
         history_end_text = (end_dt + timedelta(days=label_lookahead_days)).strftime("%Y-%m-%d")
-        history_source = "explicit_history_range" if hasattr(self.data_source_manager, "get_history_data_range") else "rolling_days"
+        history_provider = payload.get("history_source") or self.data_source_manager
+        history_source = (
+            "injected_history_source"
+            if payload.get("history_source") is not None
+            else "explicit_history_range" if hasattr(self.data_source_manager, "get_history_data_range") else "rolling_days"
+        )
+        excluded_features = {str(item) for item in (payload.get("exclude_feature_names") or [])}
+        feature_names = [name for name in self.feature_builder.FEATURE_NAMES if name not in excluded_features]
+        include_samples = bool(payload.get("include_samples", True))
 
         symbols = self.select_symbols(max_symbols=max_symbols, explicit_symbols=payload.get("symbols"))
         frames: List[pd.DataFrame] = []
@@ -103,7 +111,7 @@ class MLDatasetBuilder:
             if not symbol:
                 continue
             try:
-                history = self._fetch_history(symbol, fetch_days, history_start_text, history_end_text)
+                history = self._fetch_history(history_provider, symbol, fetch_days, history_start_text, history_end_text)
                 if history is None or history.empty or len(history) < 100:
                     continue
                 features = self.feature_builder.build_feature_frame(
@@ -143,12 +151,13 @@ class MLDatasetBuilder:
                     "feature_warmup_calendar_days": feature_warmup_days,
                     "label_lookahead_calendar_days": label_lookahead_days,
                     "errors": errors[:20],
+                    "feature_names": feature_names,
                 },
+                "feature_names": feature_names,
             }
 
         dataset = pd.concat(frames, ignore_index=True)
         dataset = dataset.sort_values(["date", "symbol"]).reset_index(drop=True)
-        feature_names = self.feature_builder.FEATURE_NAMES
         keep_cols = [
             "date", "symbol", "name",
             *feature_names,
@@ -156,7 +165,7 @@ class MLDatasetBuilder:
             "label_up", "label_dd", "label_risk_adjusted_return",
         ]
         dataset = dataset[keep_cols].replace([float("inf"), float("-inf")], 0).fillna(0)
-        samples = dataset.to_dict(orient="records")
+        samples = dataset.to_dict(orient="records") if include_samples else []
         meta = {
             "symbol_count": len(symbols),
             "valid_symbol_count": len(frames),
@@ -172,6 +181,8 @@ class MLDatasetBuilder:
             "history_end": history_end_text,
             "feature_warmup_calendar_days": feature_warmup_days,
             "label_lookahead_calendar_days": label_lookahead_days,
+            "feature_names": feature_names,
+            "include_samples": include_samples,
             "errors": errors[:20],
         }
         try:
@@ -187,13 +198,14 @@ class MLDatasetBuilder:
             "df": dataset,
             "samples": samples,
             "meta": meta,
+            "feature_names": feature_names,
         }
 
-    def _fetch_history(self, symbol: str, fetch_days: int, start_date: str, end_date: str) -> pd.DataFrame:
-        if hasattr(self.data_source_manager, "get_history_data_range"):
-            return self.data_source_manager.get_history_data_range(
+    def _fetch_history(self, history_provider, symbol: str, fetch_days: int, start_date: str, end_date: str) -> pd.DataFrame:
+        if hasattr(history_provider, "get_history_data_range"):
+            return history_provider.get_history_data_range(
                 symbol,
                 start_date=start_date,
                 end_date=end_date,
             )
-        return self.data_source_manager.get_history_data(symbol, days=fetch_days)
+        return history_provider.get_history_data(symbol, days=fetch_days)

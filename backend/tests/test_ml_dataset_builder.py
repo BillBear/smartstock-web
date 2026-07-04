@@ -96,6 +96,44 @@ class MLFeatureBuilderStub:
         return labeled
 
 
+class MLLocalFeatureBuilderStub:
+    FEATURE_NAMES = ["feature", "news_total_score", "market_state_score"]
+
+    def build_feature_frame(self, history, market_state=None, news_factor=None):
+        return pd.DataFrame(
+            {
+                "date": history["date"],
+                "feature": range(len(history)),
+                "news_total_score": 50.0,
+                "market_state_score": 50.0,
+            }
+        )
+
+    def add_forward_labels(self, features, horizon_days=15, target_return_pct=8.0, drawdown_pct=6.0):
+        labeled = features.copy()
+        labeled["future_return_pct"] = 1.0
+        labeled["future_max_drawdown_pct"] = -1.0
+        labeled["label_up"] = 1
+        labeled["label_dd"] = 0
+        labeled["label_risk_adjusted_return"] = 1.0
+        return labeled
+
+
+class MLCachedHistorySourceStub:
+    def __init__(self):
+        self.range_calls = []
+
+    def get_history_data_range(self, symbol, start_date, end_date):
+        self.range_calls.append((symbol, start_date, end_date))
+        dates = pd.date_range(start=start_date, end=end_date, freq="D")
+        return pd.DataFrame(
+            {
+                "date": dates.strftime("%Y-%m-%d"),
+                "close": [10.0 + idx * 0.01 for idx in range(len(dates))],
+            }
+        )
+
+
 class MLDatasetBuilderTests(unittest.TestCase):
     def test_build_dataset_allows_full_market_symbol_targets_above_legacy_300_cap(self):
         builder = MLDatasetBuilder(MLDataSourceStub())
@@ -161,6 +199,63 @@ class MLDatasetBuilderTests(unittest.TestCase):
         self.assertEqual(dataset["meta"]["history_source"], "explicit_history_range")
         self.assertEqual(dataset["meta"]["history_start"], "2024-01-31")
         self.assertEqual(dataset["meta"]["history_end"], "2024-05-20")
+
+    def test_dataset_can_use_injected_cached_history_source(self):
+        cached_source = MLCachedHistorySourceStub()
+        builder = MLDatasetBuilder(MLExplicitRangeDataSourceStub(), feature_builder=MLFeatureBuilderStub())
+
+        dataset = builder.build_dataset(
+            {
+                "train_start": "2024-03-01",
+                "train_end": "2024-04-30",
+                "symbols": ["600001"],
+                "history_source": cached_source,
+                "sample_step": 10,
+                "feature_warmup_calendar_days": 30,
+                "label_lookahead_calendar_days": 20,
+            }
+        )
+
+        self.assertEqual(cached_source.range_calls, [("600001", "2024-01-31", "2024-05-20")])
+        self.assertEqual(dataset["meta"]["history_source"], "injected_history_source")
+        self.assertGreater(dataset["meta"]["sample_count"], 0)
+
+    def test_dataset_can_exclude_news_and_market_state_features(self):
+        builder = MLDatasetBuilder(MLExplicitRangeDataSourceStub(), feature_builder=MLLocalFeatureBuilderStub())
+
+        dataset = builder.build_dataset(
+            {
+                "train_start": "2024-03-01",
+                "train_end": "2024-04-30",
+                "symbols": ["600001"],
+                "exclude_feature_names": ["news_total_score", "market_state_score"],
+                "sample_step": 10,
+                "feature_warmup_calendar_days": 30,
+                "label_lookahead_calendar_days": 20,
+            }
+        )
+
+        self.assertEqual(dataset["feature_names"], ["feature"])
+        self.assertNotIn("news_total_score", dataset["df"].columns)
+        self.assertNotIn("market_state_score", dataset["df"].columns)
+
+    def test_dataset_can_skip_large_samples_payload(self):
+        builder = MLDatasetBuilder(MLExplicitRangeDataSourceStub(), feature_builder=MLFeatureBuilderStub())
+
+        dataset = builder.build_dataset(
+            {
+                "train_start": "2024-03-01",
+                "train_end": "2024-04-30",
+                "symbols": ["600001"],
+                "include_samples": False,
+                "sample_step": 10,
+                "feature_warmup_calendar_days": 30,
+                "label_lookahead_calendar_days": 20,
+            }
+        )
+
+        self.assertEqual(dataset["samples"], [])
+        self.assertGreater(dataset["meta"]["sample_count"], 0)
 
 
 if __name__ == "__main__":
