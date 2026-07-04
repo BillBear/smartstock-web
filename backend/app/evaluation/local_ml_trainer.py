@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import warnings
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -37,7 +38,7 @@ def train_local_models(
     for name, factory in candidates.items():
         try:
             model = factory(train_df[label_col].astype(int).to_numpy())
-            model.fit(_x(train_df, feature_names), train_df[label_col].astype(int))
+            _fit_model(model, _x(train_df, feature_names), train_df[label_col].astype(int))
             final_metrics = _evaluate_model(model, final_holdout_df, feature_names, label_col, return_col)
             stock_metrics = _evaluate_model(model, stock_holdout_df, feature_names, label_col, return_col)
             walk_metrics = _walk_forward_metrics(
@@ -178,7 +179,7 @@ def _walk_forward_metrics(
         if train.empty or validation.empty:
             continue
         model = factory(train[label_col].astype(int).to_numpy())
-        model.fit(_x(train, feature_names), train[label_col].astype(int))
+        _fit_model(model, _x(train, feature_names), train[label_col].astype(int))
         scored = validation[[label_col, return_col]].copy()
         scored["_prob"] = _predict_class1(model, _x(validation, feature_names))
         frames.append(scored)
@@ -244,8 +245,16 @@ def _x(df: pd.DataFrame, feature_names: List[str]) -> pd.DataFrame:
     return df[feature_names].replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(float)
 
 
+def _fit_model(model: Any, x: pd.DataFrame, y: pd.Series) -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        model.fit(x, y)
+
+
 def _predict_class1(model: Any, x: pd.DataFrame) -> np.ndarray:
-    prob = model.predict_proba(x)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        prob = model.predict_proba(x)
     classes = list(getattr(model, "classes_", []))
     if not classes and hasattr(model, "named_steps"):
         classes = list(getattr(model.named_steps.get("model"), "classes_", [0, 1]))
