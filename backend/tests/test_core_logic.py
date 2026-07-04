@@ -244,6 +244,59 @@ class CoachServiceObservabilityTests(unittest.TestCase):
         self.assertEqual(trade_plan["probability_model"]["label"], "弱模型参考")
         self.assertFalse(trade_plan["probability_model"]["calibrated"])
 
+    def test_watch_only_decision_summary_does_not_suggest_paper_buy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = CoachService(
+                data_source_manager=None,
+                store=CoachStore(str(Path(tmpdir) / "coach.db")),
+                news_service=None,
+            )
+
+            watch_decision = service._build_pick_decision(
+                {
+                    "action": "watch",
+                    "up_prob": 0.62,
+                    "dd_prob": 0.26,
+                    "expected_edge_pct": 1.5,
+                    "profit_factor_proxy": 1.4,
+                    "score_breakdown": {"total": 82.0},
+                },
+                strategy_health={
+                    "live_ready": False,
+                    "status": "paper_only",
+                    "failed_checks": [{"label": "闭环交易数"}],
+                },
+                market_state={"state_tag": "neutral"},
+                risk_level="medium",
+            )
+
+            paper_decision = service._build_pick_decision(
+                {
+                    "action": "buy",
+                    "up_prob": 0.62,
+                    "dd_prob": 0.26,
+                    "expected_edge_pct": 1.5,
+                    "profit_factor_proxy": 1.4,
+                    "score_breakdown": {"total": 82.0},
+                },
+                strategy_health={
+                    "live_ready": False,
+                    "status": "paper_only",
+                    "failed_checks": [{"label": "闭环交易数"}],
+                },
+                market_state={"state_tag": "neutral"},
+                risk_level="medium",
+            )
+
+        self.assertEqual(watch_decision["grade"], "C")
+        self.assertEqual(watch_decision["mode"], "watch_only")
+        self.assertFalse(watch_decision["executable"])
+        self.assertNotIn("模拟验证", watch_decision["summary"])
+        self.assertIn("加入观察", watch_decision["summary"])
+        self.assertEqual(paper_decision["grade"], "B")
+        self.assertEqual(paper_decision["mode"], "paper_only")
+        self.assertIn("模拟验证", paper_decision["summary"])
+
     def test_universe_funnel_diagnostics_explain_filter_and_final_output_layers(self):
         class DataSourceStub:
             def __init__(self, entries):
