@@ -2,9 +2,10 @@
 
 This document records the current accepted local validation baseline for SmartStock AI.
 
-- Stable application commit: `a284b3324d585aa316440b30350d9ad93a982e76`
+- Stable application commit: `d0f9e03e0bd1fa88c3e51a2082147ad11877ff7c`
 - Stable branch at capture time: `main`
-- Stable tag: `local-stable-2026-07-04-a284b33`
+- Stable tag: `local-stable-2026-07-04-d0f9e03`
+- Previous local baseline tag: `local-stable-2026-07-04-a284b33` at `a284b3324d585aa316440b30350d9ad93a982e76`
 - Previous local baseline tag: `local-stable-2026-07-04-44f0532` at `44f05323f23ea5bc9d353ef3d2166c33ee053271`
 - Previous local baseline tag: `local-stable-2026-07-04-7fbb73b` at `7fbb73b68ab91bb47ceac0c2ee7b23a4a9f371e6`
 - Previous local baseline tag: `local-stable-2026-07-02-bdd537c` at `bdd537cbc49d31fa66abf72e2781e8da9fa1e805`
@@ -19,7 +20,7 @@ This document records the current accepted local validation baseline for SmartSt
 Runtime evidence captured during audit:
 
 - Backend health: `{"status":"healthy"}`
-- Runtime application commit reported by API during capture: `a284b3324d58`
+- Runtime application commit reported by API during capture: `d0f9e03e0bd1`
 - Smart screen date: `2026-07-03`
 - Calendar context during capture: requested `2026-07-04`, mode `preparation`, effective trade date `2026-07-03`
 - Non-trading guard: ordinary `/api/coach/picks/today` and `cached_only=true` both returned `2026-07-03`; default `snapshot_dates` did not expose the stale weekend `2026-07-04` snapshot.
@@ -30,6 +31,7 @@ Runtime evidence captured during audit:
 - Recall candidates: `120`
 - Deep analysis count: `120`
 - Final output count: `20`
+- Universe funnel diagnostics: read-only path uses persisted `market_snapshots` / `market_snapshot_items`; querying diagnostics no longer triggers a live full-market refresh.
 - Ranking evidence status: `real_insufficient`, `production_evidence=false`
 - Ranking evaluation coverage: `22 / 49`
 - Ranking Precision@3: `0.132184`
