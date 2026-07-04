@@ -4,6 +4,10 @@ This directory documents the production-readiness gate for SmartStock AI's
 explainable ML models. The gate is read-only: it does not train models, change
 stock selection, change ranking, or create buy/sell decisions.
 
+Current readiness summary:
+
+- [ML current readiness](current-readiness.md)
+
 ## Production Minimums
 
 A model can only be presented as production-grade ML evidence when all of the
