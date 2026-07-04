@@ -16,6 +16,53 @@ line() {
   printf '%s\n' "$1"
 }
 
+workspace_dir() {
+  if [[ "$BASE_DIR" == */.worktrees/* ]]; then
+    cd "$BASE_DIR/../.." && pwd
+  else
+    cd "$BASE_DIR/.." && pwd
+  fi
+}
+
+git_relation() {
+  local head origin count
+  head="$(git -C "$BASE_DIR" rev-parse HEAD 2>/dev/null || true)"
+  origin="$(git -C "$BASE_DIR" rev-parse refs/remotes/origin/main 2>/dev/null || true)"
+  if [[ -z "$head" || -z "$origin" ]]; then
+    line "Git relation: unknown (missing HEAD or origin/main)"
+    return
+  fi
+  if [[ "$head" == "$origin" ]]; then
+    line "Git relation: in sync with origin/main"
+  elif git -C "$BASE_DIR" merge-base --is-ancestor "$origin" "$head" 2>/dev/null; then
+    count="$(git -C "$BASE_DIR" rev-list --count "$origin..$head" 2>/dev/null || echo "?")"
+    line "Git relation: ahead of origin/main by $count commit(s)"
+  elif git -C "$BASE_DIR" merge-base --is-ancestor "$head" "$origin" 2>/dev/null; then
+    count="$(git -C "$BASE_DIR" rev-list --count "$head..$origin" 2>/dev/null || echo "?")"
+    line "Git relation: behind origin/main by $count commit(s)"
+  else
+    line "Git relation: diverged from origin/main"
+  fi
+}
+
+secret_status() {
+  local workspace env_file token_line
+  workspace="$(workspace_dir)"
+  env_file="${SMARTSTOCK_LOCAL_ENV_FILE:-$workspace/.local-secrets/smartstock.env}"
+  if [[ ! -f "$env_file" ]]; then
+    line "Local secret file: missing ($env_file)"
+    line "TuShare token: not configured"
+    return
+  fi
+  line "Local secret file: present ($env_file)"
+  token_line="$(grep -E '^[[:space:]]*(export[[:space:]]+)?TUSHARE_TOKEN=' "$env_file" 2>/dev/null | tail -n 1 || true)"
+  if [[ -n "$token_line" && ! "$token_line" =~ TUSHARE_TOKEN=[[:space:]]*$ ]]; then
+    line "TuShare token: configured"
+  else
+    line "TuShare token: not configured"
+  fi
+}
+
 check_port() {
   local label="$1"
   local port="$2"
@@ -26,6 +73,9 @@ check_port() {
     cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
     line "$label: listening on $port (pid=$pid)"
     line "$label process cwd: ${cwd:-unknown}"
+    if [[ -n "$cwd" && "$cwd" != "$EXPECTED_DEPLOY_ROOT"* ]]; then
+      line "$label warning: process is not running from expected deploy root"
+    fi
   else
     line "$label: not listening on $port"
   fi
@@ -36,6 +86,7 @@ line "Expected deploy root: $EXPECTED_DEPLOY_ROOT"
 line "Current script root: $BASE_DIR"
 line "Git branch: $(git -C "$BASE_DIR" branch --show-current 2>/dev/null || echo unknown)"
 line "Git commit: $(git -C "$BASE_DIR" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+git_relation
 
 if [[ -L "$BASE_DIR/backend/.env" ]]; then
   line "Backend env: symlink -> $(readlink "$BASE_DIR/backend/.env")"
@@ -44,6 +95,7 @@ elif [[ -f "$BASE_DIR/backend/.env" ]]; then
 else
   line "Backend env: missing"
 fi
+secret_status
 
 check_port "PostgreSQL" "$POSTGRES_PORT"
 check_port "Backend" "$BACKEND_PORT"
