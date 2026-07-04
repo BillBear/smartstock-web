@@ -7,9 +7,11 @@ import json
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable, List, Optional
+
+import pandas as pd
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -91,10 +93,15 @@ def run(argv: Optional[Iterable[str]] = None) -> int:
         load_local_env()
         from app.main import coach_store, data_source_manager
 
+        history_manager = CachedHistoryRangeManager(
+            data_source_manager,
+            start_date=args.start_date,
+            end_date=_label_cache_end_date(args.end_date, label_config),
+        )
         if args.include_baseline:
-            _write_baseline_report(args, output_root, label_config, execution_config, coach_store, data_source_manager)
+            _write_baseline_report(args, output_root, label_config, execution_config, coach_store, history_manager)
         for key in args.experiment_key:
-            _write_offline_variant_report(args, key, output_root, label_config, execution_config, coach_store, data_source_manager)
+            _write_offline_variant_report(args, key, output_root, label_config, execution_config, coach_store, history_manager)
             print(f"generated {key}: offline market snapshots")
 
     comparison = build_recall_experiment_report(output_root)
@@ -146,6 +153,64 @@ def _default_local_env_file() -> Path:
     else:
         workspace = repo_root.parent
     return workspace / ".local-secrets" / "smartstock.env"
+
+
+class CachedHistoryRangeManager:
+    """Cache explicit history ranges per symbol for offline labeling.
+
+    The ranking labeler asks for one forward window per candidate row. Offline
+    recall experiments can produce thousands of rows with repeated symbols, so
+    this wrapper fetches one broad, explicit range per symbol and serves slices
+    to the read-only labeler.
+    """
+
+    def __init__(self, source, start_date: str, end_date: str):
+        self.source = source
+        self.start_date = _normalize_date_text(start_date) or str(start_date)
+        self.end_date = _normalize_date_text(end_date) or str(end_date)
+        self._cache = {}
+        self.fetch_count = 0
+
+    def get_history_data_range(self, symbol, start_date: str, end_date: str):
+        normalized_symbol = str(symbol or "")
+        if normalized_symbol not in self._cache:
+            if not hasattr(self.source, "get_history_data_range"):
+                raise RuntimeError("explicit_history_range_unavailable")
+            history = self.source.get_history_data_range(
+                normalized_symbol,
+                start_date=self.start_date,
+                end_date=self.end_date,
+            )
+            self._cache[normalized_symbol] = self._normalize_history_dates(history)
+            self.fetch_count += 1
+        return self._slice_history(self._cache[normalized_symbol], start_date=start_date, end_date=end_date)
+
+    @staticmethod
+    def _normalize_history_dates(history):
+        if history is None:
+            return pd.DataFrame()
+        rows = history.copy()
+        if "date" in rows.columns:
+            rows["date"] = rows["date"].map(_normalize_date_text)
+            rows = rows.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+        return rows
+
+    @staticmethod
+    def _slice_history(history, start_date: str, end_date: str):
+        if history is None or history.empty or "date" not in history.columns:
+            return pd.DataFrame() if history is None else history.copy()
+        start = _normalize_date_text(start_date) or str(start_date)
+        end = _normalize_date_text(end_date) or str(end_date)
+        rows = history[(history["date"] >= start) & (history["date"] <= end)]
+        return rows.reset_index(drop=True)
+
+
+def _label_cache_end_date(end_date: str, label_config: dict) -> str:
+    parsed_end = _parse_iso_date(end_date)
+    horizons = [int(item) for item in label_config.get("horizons") or DEFAULT_STRONG_LABEL_CONFIG["horizons"]]
+    max_horizon = max(horizons or [20])
+    calendar_days = int(label_config.get("history_window_calendar_days") or max(14, max_horizon * 5 + 10))
+    return (parsed_end + timedelta(days=calendar_days)).isoformat()
 
 
 def _write_smoke_report(key: str, args: argparse.Namespace, output_root: Path, label_config: dict, execution_config: dict) -> None:
@@ -297,12 +362,40 @@ def _experiment_by_key(key: str) -> dict:
 
 def _parse_date(parser: argparse.ArgumentParser, name: str, value: str):
     try:
-        parsed = datetime.strptime(value, "%Y-%m-%d").date()
+        parsed = _parse_iso_date(value)
     except ValueError:
         parser.error(f"{name} must use YYYY-MM-DD")
     if parsed.isoformat() != value:
         parser.error(f"{name} must use YYYY-MM-DD")
     return parsed
+
+
+def _parse_iso_date(value: str) -> date:
+    return datetime.strptime(str(value), "%Y-%m-%d").date()
+
+
+def _normalize_date_text(value) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    text_value = str(value).strip()
+    if not text_value:
+        return None
+    for fmt, width in (("%Y-%m-%d", 10), ("%Y%m%d", 8)):
+        try:
+            return datetime.strptime(text_value[:width], fmt).date().isoformat()
+        except ValueError:
+            continue
+    try:
+        parsed = pd.to_datetime(text_value, errors="coerce")
+    except Exception:
+        return None
+    if pd.isna(parsed):
+        return None
+    return parsed.date().isoformat()
 
 
 def _parse_int_list(parser: argparse.ArgumentParser, name: str, value: str) -> List[int]:

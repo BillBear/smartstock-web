@@ -81,7 +81,7 @@ python scripts/run_offline_recall_evaluation.py \
   --output-root /tmp/smartstock-offline-recall-experiment
 ```
 
-注意：该命令可能需要较长时间，因为每只离线候选都要按显式日期范围读取未来行情标签。生成结果仍必须经过 `recall_experiment_report.json` 的门禁判断，不能直接用于生产切换。
+注意：该命令可能需要较长时间，但当前脚本会在单次运行内按股票缓存宽日期区间行情，再为每个候选日期切片打标签，避免同一股票重复请求历史行情。生成结果仍必须经过 `recall_experiment_report.json` 的门禁判断，不能直接用于生产切换。
 
 ## 本轮工具验证
 

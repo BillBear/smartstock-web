@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pandas as pd
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = PROJECT_ROOT / "scripts" / "run_offline_recall_evaluation.py"
@@ -88,6 +90,34 @@ class OfflineRecallEvaluationCliTests(unittest.TestCase):
             self.assertFalse(report["production_switch_ready"])
             self.assertIn("missing_experiment_reports", report["blocking_reasons"])
             self.assertIn("generated recall_220_deep_150", result.stdout)
+
+    def test_cached_history_range_manager_fetches_each_symbol_once(self):
+        module = _load_script_module()
+
+        class FakeDataSourceManager:
+            def __init__(self):
+                self.calls = []
+
+            def get_history_data_range(self, symbol, start_date, end_date):
+                self.calls.append((symbol, start_date, end_date))
+                return pd.DataFrame(
+                    [
+                        {"date": "2026-05-30", "close": 10.0},
+                        {"date": "2026-06-01", "close": 10.5},
+                        {"date": "2026-06-20", "close": 11.0},
+                        {"date": "2026-07-01", "close": 12.0},
+                    ]
+                )
+
+        source = FakeDataSourceManager()
+        cached = module.CachedHistoryRangeManager(source, start_date="2026-05-29", end_date="2026-07-10")
+
+        first = cached.get_history_data_range("000001", start_date="2026-05-29", end_date="2026-06-10")
+        second = cached.get_history_data_range("000001", start_date="2026-06-01", end_date="2026-06-30")
+
+        self.assertEqual(source.calls, [("000001", "2026-05-29", "2026-07-10")])
+        self.assertEqual(first["date"].tolist(), ["2026-05-30", "2026-06-01"])
+        self.assertEqual(second["date"].tolist(), ["2026-06-01", "2026-06-20"])
 
 
 if __name__ == "__main__":
