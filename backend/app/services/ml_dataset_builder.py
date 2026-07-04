@@ -14,6 +14,8 @@ from app.services.ml_feature_builder import MLFeatureBuilder
 class MLDatasetBuilder:
     """Build panel data without using future information in feature columns."""
 
+    MAX_SYMBOLS = 5000
+
     FALLBACK_SYMBOLS = [
         "000001", "000333", "000338", "000651", "002594", "300059", "300750",
         "600036", "600519", "601318", "601398", "601899", "600276", "600309",
@@ -73,7 +75,7 @@ class MLDatasetBuilder:
         horizon_days = max(5, min(60, int(payload.get("horizon_days") or 15)))
         target_return_pct = float(payload.get("target_return_pct") or 8.0)
         drawdown_pct = float(payload.get("drawdown_pct") or 6.0)
-        max_symbols = max(5, min(300, int(payload.get("max_symbols") or 120)))
+        max_symbols = max(5, min(self.MAX_SYMBOLS, int(payload.get("max_symbols") or 120)))
         sample_step = max(1, min(20, int(payload.get("sample_step") or 3)))
         end_dt = self._parse_date(payload.get("train_end")) or datetime.now()
         start_dt = self._parse_date(payload.get("train_start")) or (end_dt - timedelta(days=540))
