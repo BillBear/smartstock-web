@@ -4,6 +4,10 @@ This directory is reserved for offline recall-width and recall-channel
 experiments. These artifacts compare precomputed ranking evaluation summaries;
 they do not change production strategy logic.
 
+Current readiness summary:
+
+- [Recall experiment readiness](current-readiness.md)
+
 ## Experiment Matrix
 
 The default matrix is:
