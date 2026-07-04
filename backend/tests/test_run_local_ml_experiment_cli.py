@@ -9,6 +9,7 @@ import pandas as pd
 
 from app.evaluation.local_ml_labels import add_local_core_labels
 from scripts.run_local_ml_experiment import (
+    _limit_frame_to_target_symbols,
     _prepare_local_training_frame,
     build_config_from_args,
     history_window_for_config,
@@ -103,6 +104,23 @@ class RunLocalMLExperimentCLITests(unittest.TestCase):
         self.assertIn("label_tp_before_sl_3d", frame.columns)
         self.assertEqual(frame["symbol"].nunique(), 2)
         self.assertLess(len(frame), len(rows))
+
+    def test_limit_frame_uses_oversampled_order_after_label_filtering(self):
+        frame = pd.DataFrame(
+            {
+                "date": ["2026-01-01"] * 4,
+                "symbol": ["600001", "600003", "600004", "600005"],
+                "value": [1, 3, 4, 5],
+            }
+        )
+
+        limited = _limit_frame_to_target_symbols(
+            frame,
+            symbol_order=["600001", "600002", "600003", "600004", "600005"],
+            target_count=3,
+        )
+
+        self.assertEqual(limited["symbol"].drop_duplicates().tolist(), ["600001", "600003", "600004"])
 
 
 if __name__ == "__main__":

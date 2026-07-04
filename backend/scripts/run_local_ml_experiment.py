@@ -150,11 +150,11 @@ def run_experiment(cfg: Dict[str, Any], run_dir: Path) -> Dict[str, Any]:
         history_end,
         workers=int(cfg["history_fetch_workers"]),
     )
-    valid_symbols = cache_result["valid_symbols"][: int(cfg["target_valid_symbols"])]
+    candidate_valid_symbols = list(cache_result["valid_symbols"] or [])
     _write_json(run_dir / "history_cache_manifest.json", history_cache.manifest())
-    if len(valid_symbols) < int(cfg["min_formal_model_symbols"]):
+    if len(candidate_valid_symbols) < int(cfg["min_formal_model_symbols"]):
         dataset_meta = {
-            "valid_symbol_count": len(valid_symbols),
+            "valid_symbol_count": len(candidate_valid_symbols),
             "required_valid_symbol_count": int(cfg["min_formal_model_symbols"]),
             "sample_count": 0,
             "blocked": True,
@@ -170,7 +170,7 @@ def run_experiment(cfg: Dict[str, Any], run_dir: Path) -> Dict[str, Any]:
         {
             "train_start": cfg["train_start"],
             "train_end": cfg["train_end"],
-            "symbols": valid_symbols,
+            "symbols": candidate_valid_symbols,
             "history_source": history_cache,
             "horizon_days": int(cfg["primary_horizon"]),
             "sample_step": 1,
@@ -189,10 +189,16 @@ def run_experiment(cfg: Dict[str, Any], run_dir: Path) -> Dict[str, Any]:
         sample_step=int(cfg["sample_step"]),
         labeler=add_local_core_labels,
     )
+    frame = _limit_frame_to_target_symbols(
+        frame,
+        symbol_order=candidate_valid_symbols,
+        target_count=int(cfg["target_valid_symbols"]),
+    )
     feature_names = list(dataset.get("feature_names") or [])
     dataset_meta = {
         **(dataset.get("meta") or {}),
         "valid_symbol_count": int(frame["symbol"].nunique()) if not frame.empty else 0,
+        "candidate_valid_symbol_count": len(candidate_valid_symbols),
         "required_valid_symbol_count": int(cfg["min_formal_model_symbols"]),
         "sample_count": int(len(frame)),
         "excluded_features": excluded_features,
@@ -251,6 +257,19 @@ def _prepare_local_training_frame(df, horizons: List[int], primary_horizon: int,
     if not sampled:
         return pd.DataFrame(columns=labeled.columns)
     return pd.concat(sampled, ignore_index=True).sort_values(["date", "symbol"]).reset_index(drop=True)
+
+
+def _limit_frame_to_target_symbols(frame, symbol_order: List[str], target_count: int):
+    import pandas as pd
+
+    if frame is None or frame.empty:
+        return pd.DataFrame() if frame is None else frame
+    present = set(frame["symbol"].astype(str).unique())
+    selected = [symbol for symbol in symbol_order if str(symbol) in present][: max(1, int(target_count))]
+    if not selected:
+        return frame.iloc[0:0].copy()
+    limited = frame[frame["symbol"].astype(str).isin(selected)].copy()
+    return limited.sort_values(["date", "symbol"]).reset_index(drop=True)
 
 
 def _label_columns(frame) -> List[str]:
