@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -69,6 +70,17 @@ def build_config_from_args(args) -> Dict[str, Any]:
     return build_local_ml_config(payload)
 
 
+def history_window_for_config(cfg: Dict[str, Any]) -> tuple[str, str]:
+    start_dt = datetime.strptime(str(cfg["train_start"]), "%Y-%m-%d")
+    end_dt = datetime.strptime(str(cfg["train_end"]), "%Y-%m-%d")
+    warmup_days = int(cfg.get("feature_warmup_calendar_days") or 365)
+    lookahead_days = int(cfg.get("label_lookahead_calendar_days") or max(30, int(cfg["primary_horizon"]) * 4 + 20))
+    return (
+        (start_dt - timedelta(days=warmup_days)).strftime("%Y-%m-%d"),
+        (end_dt + timedelta(days=lookahead_days)).strftime("%Y-%m-%d"),
+    )
+
+
 def main(argv=None) -> int:
     backend_root = _bootstrap_paths()
     args = parse_args(argv)
@@ -130,8 +142,7 @@ def run_experiment(cfg: Dict[str, Any], run_dir: Path) -> Dict[str, Any]:
         retry_count=int(cfg["history_retry_count"]),
         sleep_seconds=float(cfg["history_retry_sleep_seconds"]),
     )
-    history_start = str(cfg["train_start"])
-    history_end = str(cfg["train_end"])
+    history_start, history_end = history_window_for_config(cfg)
     cache_result = history_cache.fetch_many(
         [row["symbol"] for row in sampled],
         history_start,

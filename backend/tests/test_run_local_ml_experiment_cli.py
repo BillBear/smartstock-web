@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.run_local_ml_experiment import build_config_from_args, parse_args
+from scripts.run_local_ml_experiment import build_config_from_args, history_window_for_config, parse_args
 
 
 class RunLocalMLExperimentCLITests(unittest.TestCase):
@@ -46,6 +46,14 @@ class RunLocalMLExperimentCLITests(unittest.TestCase):
             self.assertTrue(payload["dry_run"])
             self.assertFalse(payload["production_enabled"])
             self.assertTrue(Path(payload["run_config_path"]).exists())
+
+    def test_history_window_matches_feature_warmup_and_label_lookahead(self):
+        cfg = build_config_from_args(parse_args(["--train-start", "2025-01-01", "--train-end", "2026-07-03"]))
+
+        start, end = history_window_for_config(cfg)
+
+        self.assertEqual(start, "2024-01-02")
+        self.assertEqual(end, "2026-09-01")
 
 
 if __name__ == "__main__":
