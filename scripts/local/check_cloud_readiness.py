@@ -64,10 +64,10 @@ def parse_env_file(path: Path) -> Dict[str, str]:
 
 
 def configured_value(key: str, env_values: Dict[str, str]) -> Optional[str]:
-    value = os.environ.get(key)
+    value = env_values.get(key)
     if value is not None and str(value).strip() != "":
         return str(value).strip()
-    value = env_values.get(key)
+    value = os.environ.get(key)
     if value is not None and str(value).strip() != "":
         return str(value).strip()
     return None
@@ -110,6 +110,10 @@ def check_values(env_values: Dict[str, str], strict: bool) -> Tuple[List[str], L
     mock_fallback = (configured_value("ENABLE_MOCK_FALLBACK", env_values) or "").lower()
     if mock_fallback not in {"false", "0", "no"}:
         (failures if strict else warnings).append("ENABLE_MOCK_FALLBACK should be false for real-data deployments")
+
+    use_mock_data = (configured_value("USE_MOCK_DATA", env_values) or "false").lower()
+    if use_mock_data not in {"false", "0", "no"}:
+        (failures if strict else warnings).append("USE_MOCK_DATA should be false for real-data deployments")
 
     db_url = configured_value("COACH_DB_URL", env_values) or ""
     if "127.0.0.1" in db_url or "localhost" in db_url:
