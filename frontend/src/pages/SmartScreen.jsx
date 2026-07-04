@@ -6,6 +6,7 @@ import {
   Col,
   Descriptions,
   Divider,
+  Input,
   Modal,
   Progress,
   Row,
@@ -139,6 +140,9 @@ const SmartScreen = () => {
   const [riskLevel, setRiskLevel] = useState('medium')
   const [result, setResult] = useState(null)
   const [funnelDiagnostics, setFunnelDiagnostics] = useState(null)
+  const [symbolQuery, setSymbolQuery] = useState('')
+  const [symbolDiagnostic, setSymbolDiagnostic] = useState(null)
+  const [symbolDiagnosticLoading, setSymbolDiagnosticLoading] = useState(false)
   const [rankingEvidence, setRankingEvidence] = useState(null)
   const [loadedAt, setLoadedAt] = useState('')
   const [selectedSnapshotDate, setSelectedSnapshotDate] = useState(null)
@@ -198,6 +202,7 @@ const SmartScreen = () => {
       }
       setResult(combinedResult)
       setFunnelDiagnostics(funnel || null)
+      setSymbolDiagnostic(null)
       setRankingEvidence(rankingEvidenceLatest || null)
       const calendarContext = combinedResult.calendar_context || {}
       const refreshKey = calendarContext.requested_date || calendarContext.effective_trade_date || ''
@@ -299,7 +304,30 @@ const SmartScreen = () => {
   const handleSnapshotDateChange = async (value) => {
     const nextDate = value === 'latest' ? null : value
     setSelectedSnapshotDate(nextDate)
+    setSymbolDiagnostic(null)
     await loadPicks(riskLevel, nextDate)
+  }
+
+  const querySymbolFunnel = async () => {
+    const symbol = symbolQuery.trim()
+    if (!/^\d{6}$/.test(symbol)) {
+      message.warning('请输入 6 位股票代码')
+      return
+    }
+    setSymbolDiagnosticLoading(true)
+    try {
+      const diagnosticResult = await coachApi.getUniverseFunnelSymbolDiagnostic(symbol, {
+        user_id: 'default',
+        risk_level: riskLevel,
+        trade_date: selectedSnapshotDate || result?.trade_date || candidateDate,
+      })
+      setSymbolDiagnostic(diagnosticResult)
+    } catch (err) {
+      console.error('查询单票漏斗诊断失败', err)
+      message.error(err?.response?.data?.message || err?.message || '查询失败')
+    } finally {
+      setSymbolDiagnosticLoading(false)
+    }
   }
 
   const triggerRefresh = async () => {
@@ -782,6 +810,35 @@ const SmartScreen = () => {
             message={funnelSummary.summaryText}
             description="如果强势股票未出现，应优先查看单票漏斗原因，而不是直接调整策略参数。"
           />
+          <Divider />
+          <Space wrap>
+            <Input
+              value={symbolQuery}
+              onChange={(event) => setSymbolQuery(event.target.value.replace(/\D/g, '').slice(0, 6))}
+              onPressEnter={querySymbolFunnel}
+              placeholder="输入股票代码"
+              maxLength={6}
+              style={{ width: 180 }}
+            />
+            <Button loading={symbolDiagnosticLoading} onClick={querySymbolFunnel}>
+              查询单票原因
+            </Button>
+          </Space>
+          {symbolDiagnostic && (
+            <Alert
+              style={{ marginTop: 12 }}
+              type={symbolDiagnostic.kept ? 'success' : 'warning'}
+              showIcon
+              message={`${symbolDiagnostic.name || '-'} ${symbolDiagnostic.symbol || ''}：${symbolDiagnostic.kept ? '已进入候选链路' : '未进入最终候选'}，停留在 ${symbolDiagnostic.last_layer || '-'}`}
+              description={
+                <Space direction="vertical" size={4}>
+                  {(symbolDiagnostic.reasons || []).map((reason) => (
+                    <span key={reason}>{reason}</span>
+                  ))}
+                </Space>
+              }
+            />
+          )}
         </Card>
       )}
 
