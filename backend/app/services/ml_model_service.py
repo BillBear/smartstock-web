@@ -90,6 +90,70 @@ class MLModelService:
         }
 
     @staticmethod
+    def _predict_class1_batch(model, x: pd.DataFrame) -> np.ndarray:
+        prob = model.predict_proba(x)
+        classes = list(getattr(model.named_steps.get("model"), "classes_", [0, 1]))
+        if 1 in classes:
+            return np.asarray(prob[:, classes.index(1)], dtype=float)
+        return np.zeros(len(x), dtype=float)
+
+    @staticmethod
+    def _precision_at_k(y_true: np.ndarray, y_prob: np.ndarray, k: int) -> float:
+        if len(y_true) == 0:
+            return 0.0
+        top_k = max(1, min(int(k), len(y_true)))
+        order = np.argsort(y_prob)[::-1][:top_k]
+        return round(float(np.mean(y_true[order])), 6)
+
+    def _evaluate_holdout(
+        self,
+        model_up,
+        model_dd,
+        df: pd.DataFrame,
+        feature_names: List[str],
+    ) -> Dict[str, Any]:
+        if df is None or df.empty:
+            return {
+                "sample_count": 0,
+                "symbol_count": 0,
+                "date_count": 0,
+                "auc": None,
+                "brier_score": None,
+                "ece": None,
+                "precision_at_3": 0.0,
+                "precision_at_5": 0.0,
+                "bucket_hit_rates": [],
+            }
+
+        x = df[feature_names].astype(float)
+        y_up = df["label_up"].astype(int).to_numpy()
+        y_dd = df["label_dd"].astype(int).to_numpy()
+        up_prob = self._predict_class1_batch(model_up, x)
+        dd_prob = self._predict_class1_batch(model_dd, x)
+        up_metrics = self._evaluate_classifier(y_up, up_prob)
+        dd_metrics = self._evaluate_classifier(y_dd, dd_prob)
+        return {
+            "sample_count": int(len(df)),
+            "symbol_count": int(df["symbol"].nunique()) if "symbol" in df.columns else 0,
+            "date_count": int(df["date"].nunique()) if "date" in df.columns else 0,
+            "auc": up_metrics.get("auc"),
+            "brier_score": up_metrics.get("brier_score"),
+            "ece": up_metrics.get("ece"),
+            "precision_at_3": self._precision_at_k(y_up, up_prob, 3),
+            "precision_at_5": self._precision_at_k(y_up, up_prob, 5),
+            "bucket_hit_rates": [
+                {
+                    "bucket": item.get("label"),
+                    "hit_rate": item.get("hit_rate"),
+                    "sample_count": item.get("sample_count"),
+                }
+                for item in up_metrics.get("bucket_metrics") or []
+            ],
+            "up_model": up_metrics,
+            "dd_model": dd_metrics,
+        }
+
+    @staticmethod
     def _make_pipeline(label: np.ndarray):
         from sklearn.dummy import DummyClassifier
         from sklearn.linear_model import LogisticRegression
@@ -125,14 +189,80 @@ class MLModelService:
             dd_model.fit(x_train, train["label_dd"].astype(int))
             up_true.extend(test["label_up"].astype(int).tolist())
             dd_true.extend(test["label_dd"].astype(int).tolist())
-            up_prob.extend(up_model.predict_proba(x_test)[:, 1].tolist())
-            dd_prob.extend(dd_model.predict_proba(x_test)[:, 1].tolist())
+            up_prob.extend(self._predict_class1_batch(up_model, x_test).tolist())
+            dd_prob.extend(self._predict_class1_batch(dd_model, x_test).tolist())
 
         return {
             "method": "walk_forward_timeseries_split",
             "split_count": split_count,
             "up_model": self._evaluate_classifier(np.array(up_true), np.array(up_prob)),
             "dd_model": self._evaluate_classifier(np.array(dd_true), np.array(dd_prob)),
+        }
+
+    @staticmethod
+    def _date_text_series(df: pd.DataFrame) -> pd.Series:
+        return pd.to_datetime(df["date"], errors="coerce").dt.date.astype(str)
+
+    def _split_dataset_for_training(self, df: pd.DataFrame, split_plan: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        if not split_plan:
+            return df.copy(), pd.DataFrame(), pd.DataFrame()
+
+        date_text = self._date_text_series(df)
+        symbol_text = df["symbol"].astype(str)
+        training_dates = set(str(item) for item in split_plan.get("training_dates") or [])
+        training_symbols = set(str(item) for item in split_plan.get("training_symbols") or [])
+        final_dates = set(str(item) for item in ((split_plan.get("final_holdout") or {}).get("dates") or []))
+        holdout_symbols = set(str(item) for item in ((split_plan.get("stock_holdout") or {}).get("symbols") or []))
+
+        if not training_dates or not training_symbols:
+            return df.copy(), pd.DataFrame(), pd.DataFrame()
+
+        train_mask = date_text.isin(training_dates) & symbol_text.isin(training_symbols)
+        final_mask = date_text.isin(final_dates) & symbol_text.isin(training_symbols)
+        stock_mask = date_text.isin(training_dates) & symbol_text.isin(holdout_symbols)
+        return (
+            df.loc[train_mask].copy(),
+            df.loc[final_mask].copy(),
+            df.loc[stock_mask].copy(),
+        )
+
+    @staticmethod
+    def _split_plan_summary(split_plan: Dict[str, Any]) -> Dict[str, Any]:
+        if not split_plan:
+            return {}
+        final_holdout = split_plan.get("final_holdout") or {}
+        stock_holdout = split_plan.get("stock_holdout") or {}
+        walk_forward = split_plan.get("walk_forward") or {}
+        windows = []
+        for item in walk_forward.get("windows") or []:
+            windows.append(
+                {
+                    "window": item.get("window"),
+                    "train_start": item.get("train_start"),
+                    "train_end": item.get("train_end"),
+                    "validation_start": item.get("validation_start"),
+                    "validation_end": item.get("validation_end"),
+                    "train_date_count": item.get("train_date_count"),
+                    "validation_date_count": item.get("validation_date_count"),
+                }
+            )
+        return {
+            "method": split_plan.get("method"),
+            "training_date_count": len(split_plan.get("training_dates") or []),
+            "training_symbol_count": len(split_plan.get("training_symbols") or []),
+            "final_holdout": {
+                "start_date": final_holdout.get("start_date"),
+                "end_date": final_holdout.get("end_date"),
+                "date_count": final_holdout.get("date_count") or len(final_holdout.get("dates") or []),
+            },
+            "stock_holdout": {
+                "ratio": stock_holdout.get("ratio"),
+                "symbol_count": stock_holdout.get("symbol_count") or len(stock_holdout.get("symbols") or []),
+            },
+            "walk_forward": {
+                "split_count": walk_forward.get("split_count") or len(windows),
+                "windows": windows,
+            },
         }
 
     def train_model(self, payload: Dict[str, Any], user_id: str = "default") -> Dict[str, Any]:
@@ -147,10 +277,16 @@ class MLModelService:
         if df is None or df.empty or len(df) < 80:
             raise ValueError("历史样本不足，无法训练模型；请扩大股票池、区间或降低 sample_step")
 
+        meta = dataset.get("meta") or {}
+        split_plan = meta.get("split_plan") or {}
+        train_df, final_holdout_df, stock_holdout_df = self._split_dataset_for_training(df, split_plan)
+        if train_df is None or train_df.empty or len(train_df) < 80:
+            raise ValueError("训练切分后的样本不足，无法训练模型；请扩大股票池、区间或降低 holdout 比例")
+
         feature_names = self.feature_builder.FEATURE_NAMES
-        x = df[feature_names].astype(float)
-        y_up = df["label_up"].astype(int)
-        y_dd = df["label_dd"].astype(int)
+        x = train_df[feature_names].astype(float)
+        y_up = train_df["label_up"].astype(int)
+        y_dd = train_df["label_dd"].astype(int)
 
         model_up = self._make_pipeline(y_up.to_numpy())
         model_dd = self._make_pipeline(y_dd.to_numpy())
@@ -161,7 +297,7 @@ class MLModelService:
         tree.fit(x, y_up)
         tree_rules = export_text(tree, feature_names=feature_names, max_depth=4)
 
-        metrics = self._walk_forward_metrics(df, feature_names)
+        metrics = self._walk_forward_metrics(train_df, feature_names)
         up_metrics = metrics.get("up_model") or {}
         dd_metrics = metrics.get("dd_model") or {}
         live_ready = bool(
@@ -179,9 +315,20 @@ class MLModelService:
         joblib.dump(tree, artifact_dir / "tree_model.joblib")
 
         importance = self._factor_importance(model_up, model_dd, feature_names)
-        meta = dataset.get("meta") or {}
+        sample_meta = dict(meta)
+        sample_meta["split_plan"] = self._split_plan_summary(split_plan)
         full_metrics = {
             **metrics,
+            "sample_count": int(meta.get("sample_count") or len(df)),
+            "symbol_count": int(meta.get("symbol_count") or 0),
+            "valid_symbol_count": int(meta.get("valid_symbol_count") or 0),
+            "training_sample_count": int(len(train_df)),
+            "training_symbol_count": int(train_df["symbol"].nunique()) if "symbol" in train_df.columns else 0,
+            "training_date_count": int(train_df["date"].nunique()) if "date" in train_df.columns else 0,
+            "split_plan": self._split_plan_summary(split_plan),
+            "final_holdout": self._evaluate_holdout(model_up, model_dd, final_holdout_df, feature_names),
+            "stock_holdout": self._evaluate_holdout(model_up, model_dd, stock_holdout_df, feature_names),
+            "sample_meta": sample_meta,
             "live_ready": live_ready,
             "readiness_rules": {
                 "up_high_prob_beats_low": up_metrics.get("high_beats_low"),
@@ -216,13 +363,13 @@ class MLModelService:
         }
         self.store.save_ml_model_version(record)
         self.store.save_ml_factor_importance(model_id, importance)
-        self.store.save_ml_training_samples(model_id, dataset.get("samples") or [], feature_names=feature_names)
+        self.store.save_ml_training_samples(model_id, train_df.to_dict(orient="records"), feature_names=feature_names)
         self._loaded_model_id = None
 
         return {
             "model_id": model_id,
             "status": record["status"],
-            "sample_meta": meta,
+            "sample_meta": sample_meta,
             "metrics": full_metrics,
             "ml_readiness": full_metrics["ml_readiness"],
             "model_validation_status": full_metrics["ml_readiness"]["status"],

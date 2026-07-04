@@ -45,7 +45,8 @@ def assess_ml_readiness(model_record: Dict[str, Any]) -> Dict[str, Any]:
 
     stock_holdout_ratio = _safe_float(train_config.get("stock_holdout_ratio"), 0.0)
     stock_holdout_symbols = _safe_int(stock_holdout.get("symbol_count"), 0)
-    if stock_holdout_ratio < MIN_STOCK_HOLDOUT_RATIO and stock_holdout_symbols < int(symbol_count * MIN_STOCK_HOLDOUT_RATIO):
+    required_stock_holdout_symbols = max(1, int(symbol_count * MIN_STOCK_HOLDOUT_RATIO)) if symbol_count > 0 else 1
+    if stock_holdout_ratio < MIN_STOCK_HOLDOUT_RATIO or stock_holdout_symbols < required_stock_holdout_symbols:
         blocking.append(_block("stock_holdout_missing", "缺少至少 20% 股票完全留出的样本外验证"))
 
     final_holdout_months = _safe_float(train_config.get("final_time_holdout_months"), 0.0)
