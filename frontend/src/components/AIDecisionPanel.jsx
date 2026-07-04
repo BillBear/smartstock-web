@@ -7,6 +7,7 @@ import {
   ThunderboltOutlined,
   BulbOutlined
 } from '@ant-design/icons'
+import { getAIDecisionTerminology } from './aiDecisionPresentation.mjs'
 
 const AIDecisionPanel = ({ data }) => {
   if (!data) {
@@ -34,6 +35,7 @@ const AIDecisionPanel = ({ data }) => {
 
   const decisionColor = getDecisionColor(data.decision)
   const isCoachAligned = data.decision_source === 'coach_service'
+  const terminology = getAIDecisionTerminology({ decisionSource: data.decision_source })
   const coachContext = data.coach_context || {}
   const scores = data.scores || {}
   const legacyScores = data.legacy_scores || {}
@@ -64,7 +66,7 @@ const AIDecisionPanel = ({ data }) => {
 
   return (
     <Card
-      title="AI智能决策（小白版）"
+      title={terminology.panelTitle}
       variant="borderless"
       style={{ marginTop: 16 }}
     >
@@ -72,13 +74,13 @@ const AIDecisionPanel = ({ data }) => {
       <Alert
         message={
           <div style={{ fontSize: 18, fontWeight: 600 }}>
-            <RocketOutlined /> {isCoachAligned ? '智能选股动作' : 'AI最终决策'}: <span style={{ color: decisionColor }}>{data.decision}</span>
+            <RocketOutlined /> {terminology.decisionLabel}: <span style={{ color: decisionColor }}>{data.decision}</span>
           </div>
         }
         description={
           <div style={{ marginTop: 8 }}>
             <div style={{ marginBottom: 8 }}>
-              <strong>信心度：</strong>
+              <strong>{terminology.confidenceLabel}：</strong>
               <Tag color={getConfidenceColor(data.confidence)} style={{ marginLeft: 8 }}>
                 {data.confidence}
               </Tag>
@@ -108,7 +110,7 @@ const AIDecisionPanel = ({ data }) => {
         <Progress
           percent={confidenceValue}
           strokeColor={getConfidenceColor(data.confidence)}
-          format={() => `AI信心度: ${data.confidence} (${confidenceValue}%)`}
+          format={() => `${terminology.confidenceProgressPrefix}: ${data.confidence} (${confidenceValue}%)`}
         />
       </div>
 
@@ -265,7 +267,7 @@ const AIDecisionPanel = ({ data }) => {
             </Col>
             <Col span={8}>
               <Statistic
-                title="实现概率"
+                title={terminology.probabilityTitle}
                 value={data.expected_return.probability}
                 valueStyle={{ fontSize: 14, color: 'var(--info-color)' }}
               />
@@ -273,6 +275,9 @@ const AIDecisionPanel = ({ data }) => {
           </Row>
           <div style={{ marginTop: 12, color: 'var(--text-secondary)', fontSize: 13 }}>
             {data.expected_return.description}
+            {terminology.probabilityHelp && (
+              <span> {terminology.probabilityHelp}</span>
+            )}
           </div>
         </Card>
       </div>
