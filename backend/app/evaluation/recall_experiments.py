@@ -68,6 +68,17 @@ METRIC_ALIASES = {
     "top_5_avg_return_pct": ["top_5_avg_return_10d"],
 }
 
+CONTEXT_FIELDS = [
+    "strategy_code",
+    "risk_level",
+    "start_date",
+    "end_date",
+    "horizons",
+    "top_k_values",
+    "label_config",
+    "execution_config",
+]
+
 
 def build_recall_experiment_report(
     experiment_root: Path,
@@ -86,12 +97,15 @@ def build_recall_experiment_report(
         rows.append(_build_row(item, summary))
 
     baseline = next((row for row in rows if row["key"] == "baseline" and row.get("available")), None)
-    winner = _select_winner(rows, baseline) if baseline and not missing else None
+    incompatible = _mark_compatibility(rows, baseline)
+    winner = _select_winner(rows, baseline) if baseline and not missing and not incompatible else None
     blocking_reasons = []
     if missing:
         blocking_reasons.append("missing_experiment_reports")
     if not baseline:
         blocking_reasons.append("baseline_report_missing")
+    if incompatible:
+        blocking_reasons.append("incompatible_experiment_reports")
     if winner is None:
         blocking_reasons.append("no_variant_passed_gates")
 
@@ -140,8 +154,11 @@ def _build_row(experiment: Dict[str, Any], summary: Optional[Dict[str, Any]]) ->
     row["available"] = summary is not None
     if summary is None:
         row["evidence_status"] = "missing"
+        row["compatibility_status"] = "missing"
         row["metrics"] = {}
         return row
+    row["context"] = _summary_context(summary)
+    row["compatibility_status"] = "unchecked"
     readiness = summary.get("evidence_readiness") or {}
     production_evidence = bool(summary.get("production_evidence") or readiness.get("production_evidence"))
     row["evidence_status"] = readiness.get("status") or ("ready" if production_evidence else "insufficient")
@@ -153,10 +170,60 @@ def _build_row(experiment: Dict[str, Any], summary: Optional[Dict[str, Any]]) ->
     return row
 
 
+def _mark_compatibility(rows: List[Dict[str, Any]], baseline: Optional[Dict[str, Any]]) -> List[str]:
+    if not baseline:
+        return []
+    baseline_context = baseline.get("context") or {}
+    incompatible = []
+    for row in rows:
+        if row.get("key") == "baseline":
+            row["compatibility_status"] = "baseline"
+            row["compatibility_issues"] = []
+            continue
+        if not row.get("available"):
+            continue
+        issues = _context_issues(baseline_context, row.get("context") or {})
+        row["compatibility_issues"] = issues
+        if issues:
+            row["compatibility_status"] = "incompatible"
+            row["evidence_status"] = "incompatible"
+            row["production_evidence"] = False
+            incompatible.append(row["key"])
+        else:
+            row["compatibility_status"] = "compatible"
+    return incompatible
+
+
+def _summary_context(summary: Dict[str, Any]) -> Dict[str, Any]:
+    return {field: summary.get(field) for field in CONTEXT_FIELDS if summary.get(field) is not None}
+
+
+def _context_issues(baseline: Dict[str, Any], candidate: Dict[str, Any]) -> List[str]:
+    issues = []
+    for field in CONTEXT_FIELDS:
+        if field not in baseline or field not in candidate:
+            continue
+        if _canonical_value(baseline.get(field)) != _canonical_value(candidate.get(field)):
+            issues.append(f"{field}_mismatch")
+    return issues
+
+
+def _canonical_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _canonical_value(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        return [_canonical_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_canonical_value(item) for item in value]
+    return value
+
+
 def _select_winner(rows: List[Dict[str, Any]], baseline: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     candidates = []
     for row in rows:
         if row["key"] == "baseline" or not row.get("available"):
+            continue
+        if row.get("compatibility_status") == "incompatible":
             continue
         if not row.get("production_evidence"):
             continue

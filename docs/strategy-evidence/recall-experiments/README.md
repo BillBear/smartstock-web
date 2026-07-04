@@ -30,6 +30,21 @@ Prepare one `ranking_summary.json` per experiment:
 <experiment-root>/multi_channel_union/ranking_summary.json
 ```
 
+All summaries must use the same replay context as `baseline`:
+
+- `strategy_code`
+- `risk_level`
+- `start_date` / `end_date`
+- `horizons`
+- `top_k_values`
+- `label_config`
+- `execution_config`, including transaction cost and slippage
+
+If any available experiment differs from baseline on these fields, the report is
+blocked with `incompatible_experiment_reports`. This prevents comparing a wider
+recall experiment against a baseline from a different date range, label setup,
+or cost/slippage assumption.
+
 Then run from `smartstock-web/backend`:
 
 ```bash

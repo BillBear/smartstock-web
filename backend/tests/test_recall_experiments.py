@@ -14,11 +14,26 @@ from app.evaluation.recall_experiments import (
 )
 
 
-def _write_summary(root: Path, experiment_key: str, metrics=None, coverage=None):
+def _write_summary(root: Path, experiment_key: str, metrics=None, coverage=None, **overrides):
     run_dir = root / experiment_key
     run_dir.mkdir(parents=True)
     payload = {
         "experiment_key": experiment_key,
+        "strategy_code": "trend_breakout",
+        "risk_level": "medium",
+        "start_date": "2026-05-01",
+        "end_date": "2026-07-03",
+        "horizons": [3, 5, 10, 20],
+        "top_k_values": [3, 5, 10],
+        "label_config": {
+            "horizons": [3, 5, 10, 20],
+            "take_profit_pct": 0.08,
+            "stop_loss_pct": -0.05,
+        },
+        "execution_config": {
+            "commission": 0.0003,
+            "slippage": 0.001,
+        },
         "candidate_row_count": 300,
         "coverage": coverage or {"coverage_status": "complete", "covered_date_count": 32},
         "metrics": metrics or {
@@ -37,6 +52,7 @@ def _write_summary(root: Path, experiment_key: str, metrics=None, coverage=None)
         },
         "production_evidence": True,
     }
+    payload.update(overrides)
     (run_dir / "ranking_summary.json").write_text(json.dumps(payload), encoding="utf-8")
     return run_dir
 
@@ -125,6 +141,38 @@ class RecallExperimentReportTests(unittest.TestCase):
         baseline = report["experiments"][0]
         self.assertEqual(baseline["key"], "baseline")
         self.assertEqual(baseline["metrics"]["top_5_avg_return_pct"], -0.55)
+
+    def test_blocks_production_switch_when_experiment_context_differs_from_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_summary(root, "baseline")
+            _write_summary(root, "recall_220_deep_150")
+            _write_summary(root, "recall_300_deep_300", end_date="2026-06-30")
+            _write_summary(
+                root,
+                "recall_500_deep_500",
+                execution_config={"commission": 0.0003, "slippage": 0.002},
+            )
+            _write_summary(root, "multi_channel_union")
+
+            report = build_recall_experiment_report(root)
+
+        self.assertEqual(report["status"], "blocked")
+        self.assertFalse(report["production_switch_ready"])
+        self.assertIn("incompatible_experiment_reports", report["blocking_reasons"])
+        incompatible = {
+            row["key"]: row
+            for row in report["experiments"]
+            if row.get("compatibility_status") == "incompatible"
+        }
+        self.assertEqual(
+            incompatible["recall_300_deep_300"]["compatibility_issues"],
+            ["end_date_mismatch"],
+        )
+        self.assertEqual(
+            incompatible["recall_500_deep_500"]["compatibility_issues"],
+            ["execution_config_mismatch"],
+        )
 
 
 if __name__ == "__main__":
