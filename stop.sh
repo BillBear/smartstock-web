@@ -14,6 +14,21 @@ FRONTEND_SESSION="smartstock-frontend"
 BACKEND_PID_FILE="$RUNTIME_DIR/backend.pid"
 FRONTEND_PID_FILE="$RUNTIME_DIR/frontend.pid"
 
+stop_launchd_service() {
+  local label="$1"
+  if [ "$(uname -s)" != "Darwin" ] || ! command -v launchctl >/dev/null 2>&1; then
+    return 1
+  fi
+  local uid
+  uid="$(id -u)"
+  if launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+    launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
+    echo "$label launchd service stopped"
+    return 0
+  fi
+  return 1
+}
+
 stop_screen_session() {
   local name="$1"
   if screen -ls 2>/dev/null | grep -q "[.]$name[[:space:]]"; then
@@ -54,6 +69,10 @@ stop_by_port() {
   echo "$name stopped (port=$port)"
   return 0
 }
+
+stop_launchd_service "com.smartstock.frontend" || true
+stop_launchd_service "com.smartstock.backend" || true
+stop_launchd_service "com.smartstock.postgres" || true
 
 stop_screen_session "$BACKEND_SESSION"
 stop_screen_session "$FRONTEND_SESSION"

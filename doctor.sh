@@ -81,6 +81,23 @@ check_port() {
   fi
 }
 
+check_launchd() {
+  local label="$1"
+  if [[ "$(uname -s)" != "Darwin" ]] || ! command -v launchctl >/dev/null 2>&1; then
+    return
+  fi
+  local uid output state pid
+  uid="$(id -u)"
+  output="$(launchctl print "gui/$uid/$label" 2>/dev/null || true)"
+  if [[ -z "$output" ]]; then
+    line "Launchd $label: not loaded"
+    return
+  fi
+  state="$(printf '%s\n' "$output" | awk -F'= ' '/state =/ {print $2; exit}')"
+  pid="$(printf '%s\n' "$output" | awk -F'= ' '/pid =/ {print $2; exit}')"
+  line "Launchd $label: loaded state=${state:-unknown} pid=${pid:-none}"
+}
+
 line "SmartStock Doctor"
 line "Expected deploy root: $EXPECTED_DEPLOY_ROOT"
 line "Current script root: $BASE_DIR"
@@ -96,6 +113,10 @@ else
   line "Backend env: missing"
 fi
 secret_status
+
+check_launchd "com.smartstock.postgres"
+check_launchd "com.smartstock.backend"
+check_launchd "com.smartstock.frontend"
 
 check_port "PostgreSQL" "$POSTGRES_PORT"
 check_port "Backend" "$BACKEND_PORT"

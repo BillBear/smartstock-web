@@ -43,10 +43,31 @@ status_line() {
   fi
 }
 
+launchd_line() {
+  local label="$1"
+  if [ "$(uname -s)" != "Darwin" ] || ! command -v launchctl >/dev/null 2>&1; then
+    return
+  fi
+  local uid output state pid
+  uid="$(id -u)"
+  output="$(launchctl print "gui/$uid/$label" 2>/dev/null || true)"
+  if [ -z "$output" ]; then
+    echo "Launchd $label: not loaded"
+    return
+  fi
+  state="$(printf '%s\n' "$output" | awk -F'= ' '/state =/ {print $2; exit}')"
+  pid="$(printf '%s\n' "$output" | awk -F'= ' '/pid =/ {print $2; exit}')"
+  echo "Launchd $label: loaded state=${state:-unknown} pid=${pid:-none}"
+}
+
 echo "SmartStock status"
 git_value "git branch" branch --show-current
 git_value "git commit" rev-parse --short=12 HEAD
 echo "Expected deploy root: $EXPECTED_DEPLOY_ROOT"
+
+launchd_line "com.smartstock.postgres"
+launchd_line "com.smartstock.backend"
+launchd_line "com.smartstock.frontend"
 
 status_line "PostgreSQL" "$POSTGRES_PORT"
 status_line "Backend" "$BACKEND_PORT" "http://localhost:$BACKEND_PORT"

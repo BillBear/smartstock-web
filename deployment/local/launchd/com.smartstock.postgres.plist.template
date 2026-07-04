@@ -7,7 +7,6 @@
   <string>com.smartstock.postgres</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/bash</string>
     <string>__SMARTSTOCK_HOME__/postgres/start.sh</string>
   </array>
   <key>RunAtLoad</key>
@@ -15,8 +14,8 @@
   <key>KeepAlive</key>
   <false/>
   <key>StandardOutPath</key>
-  <string>__SMARTSTOCK_HOME__/runtime/logs/launchd-postgres.log</string>
+  <string>__SMARTSTOCK_HOME__/runtime/logs/postgres.launchd.log</string>
   <key>StandardErrorPath</key>
-  <string>__SMARTSTOCK_HOME__/runtime/logs/launchd-postgres.err.log</string>
+  <string>__SMARTSTOCK_HOME__/runtime/logs/postgres.launchd.err.log</string>
 </dict>
 </plist>
