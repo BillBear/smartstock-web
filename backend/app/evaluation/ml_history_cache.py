@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -20,6 +21,9 @@ class MLHistoryCache:
         cache_root: str | Path,
         retry_count: int = 2,
         sleep_seconds: float = 1.5,
+        inter_request_sleep_seconds: float = 0.0,
+        circuit_sleep_seconds: float = 65.0,
+        sleep_func=time.sleep,
         prefer_parquet: bool | None = None,
     ):
         self.source = source
@@ -27,6 +31,11 @@ class MLHistoryCache:
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self.retry_count = max(0, int(retry_count or 0))
         self.sleep_seconds = max(0.0, float(sleep_seconds or 0.0))
+        self.inter_request_sleep_seconds = max(0.0, float(inter_request_sleep_seconds or 0.0))
+        self.circuit_sleep_seconds = max(0.0, float(circuit_sleep_seconds or 0.0))
+        self.sleep_func = sleep_func
+        self._request_lock = threading.Lock()
+        self._last_remote_request_at = 0.0
         if prefer_parquet is None:
             prefer_parquet = importlib.util.find_spec("pyarrow") is not None
         self.format = "parquet" if prefer_parquet else "csv"
@@ -87,8 +96,8 @@ class MLHistoryCache:
                     valid_symbols.append(symbol)
         self._write_manifest()
         return {
-            "valid_symbols": sorted(set(valid_symbols)),
-            "failed_symbols": sorted(set(failed_symbols)),
+            "valid_symbols": _ordered_unique(valid_symbols, symbols),
+            "failed_symbols": _ordered_unique(failed_symbols, symbols),
             "manifest": self.manifest(),
         }
 
@@ -104,14 +113,44 @@ class MLHistoryCache:
         last_error = None
         for attempt in range(attempts):
             try:
+                self._wait_before_remote_fetch()
                 history = self.source.get_history_data_range(symbol, start_date=start_date, end_date=end_date)
-                return _normalize_history(history)
+                normalized = _normalize_history(history)
+                if not normalized.empty:
+                    return normalized
+                last_error = "empty_history"
             except Exception as exc:
                 last_error = exc
-                if attempt < attempts - 1 and self.sleep_seconds:
-                    time.sleep(self.sleep_seconds)
+            if attempt < attempts - 1 and self.sleep_seconds:
+                self.sleep_func(self.sleep_seconds)
         self._record_failed(symbol, str(last_error)[:160] if last_error else "unknown_error")
         return pd.DataFrame()
+
+    def _wait_before_remote_fetch(self) -> None:
+        with self._request_lock:
+            circuit_wait = self._history_circuit_wait_seconds()
+            if circuit_wait > 0:
+                self.sleep_func(circuit_wait)
+            if self.inter_request_sleep_seconds > 0:
+                elapsed = time.time() - self._last_remote_request_at
+                wait_seconds = self.inter_request_sleep_seconds - elapsed
+                if wait_seconds > 0:
+                    self.sleep_func(wait_seconds)
+            self._last_remote_request_at = time.time()
+
+    def _history_circuit_wait_seconds(self) -> float:
+        if self.circuit_sleep_seconds <= 0:
+            return 0.0
+        state = getattr(self.source, "_breaker_state", {}) or {}
+        now = time.time()
+        waits = []
+        for key, value in state.items():
+            if not str(key).endswith(":history"):
+                continue
+            remaining = float((value or {}).get("open_until") or 0) - now
+            if remaining > 0:
+                waits.append(min(self.circuit_sleep_seconds, remaining + 0.5))
+        return max(waits) if waits else 0.0
 
     def _cache_path(self, symbol: str, start_date: str, end_date: str) -> Path:
         key = hashlib.sha256(f"{symbol}:{start_date}:{end_date}".encode("utf-8")).hexdigest()[:16]
@@ -176,3 +215,19 @@ def _normalize_date(value: Any) -> str:
     if pd.isna(parsed):
         return ""
     return parsed.date().isoformat()
+
+
+def _ordered_unique(values: List[str], preferred_order: List[str]) -> List[str]:
+    remaining = set(str(item) for item in values)
+    ordered = []
+    for symbol in preferred_order:
+        normalized = _normalize_symbol(symbol)
+        if normalized in remaining:
+            ordered.append(normalized)
+            remaining.remove(normalized)
+    for symbol in values:
+        normalized = _normalize_symbol(symbol)
+        if normalized in remaining:
+            ordered.append(normalized)
+            remaining.remove(normalized)
+    return ordered

@@ -39,5 +39,7 @@ def build_local_ml_config(payload: Dict[str, Any] | None = None) -> Dict[str, An
         "min_full_snapshot_count": int(payload.get("min_full_snapshot_count") or 5000),
         "history_retry_count": int(payload.get("history_retry_count") or 2),
         "history_retry_sleep_seconds": float(payload.get("history_retry_sleep_seconds") or 1.5),
-        "history_fetch_workers": int(payload.get("history_fetch_workers") or 2),
+        "history_inter_request_sleep_seconds": float(payload.get("history_inter_request_sleep_seconds") or 0.12),
+        "history_circuit_sleep_seconds": float(payload.get("history_circuit_sleep_seconds") or 65.0),
+        "history_fetch_workers": int(payload.get("history_fetch_workers") or 1),
     }

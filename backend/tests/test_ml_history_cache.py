@@ -21,6 +21,17 @@ class FakeHistorySource:
         return self.frame.copy()
 
 
+class FlakyEmptyHistorySource:
+    def __init__(self):
+        self.calls = []
+
+    def get_history_data_range(self, symbol, start_date, end_date):
+        self.calls.append((symbol, start_date, end_date))
+        if len(self.calls) == 1:
+            return pd.DataFrame()
+        return make_history()
+
+
 def make_history():
     return pd.DataFrame(
         [
@@ -84,6 +95,33 @@ class MLHistoryCacheTests(unittest.TestCase):
             result = cache.get_history_data_range("002415", "2026-06-02", "2026-06-03")
 
             self.assertEqual(result["date"].tolist(), ["2026-06-02", "2026-06-03"])
+
+    def test_fetch_many_preserves_requested_symbol_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = MLHistoryCache(FakeHistorySource(make_history()), cache_root=tmp, retry_count=0, prefer_parquet=False)
+
+            result = cache.fetch_many(["600003", "600001", "600002"], "2026-06-01", "2026-06-03", workers=1)
+
+            self.assertEqual(result["valid_symbols"], ["600003", "600001", "600002"])
+
+    def test_empty_history_is_retried_before_recording_failure(self):
+        sleeps = []
+        with tempfile.TemporaryDirectory() as tmp:
+            source = FlakyEmptyHistorySource()
+            cache = MLHistoryCache(
+                source,
+                cache_root=tmp,
+                retry_count=1,
+                sleep_seconds=0.5,
+                sleep_func=sleeps.append,
+                prefer_parquet=False,
+            )
+
+            result = cache.get_history_data_range("002415", "2026-06-01", "2026-06-03")
+
+            self.assertEqual(len(source.calls), 2)
+            self.assertEqual(sleeps, [0.5])
+            self.assertEqual(len(result), 3)
 
 
 if __name__ == "__main__":

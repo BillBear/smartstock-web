@@ -142,6 +142,8 @@ def run_experiment(cfg: Dict[str, Any], run_dir: Path) -> Dict[str, Any]:
         cache_root=run_dir / "history_cache",
         retry_count=int(cfg["history_retry_count"]),
         sleep_seconds=float(cfg["history_retry_sleep_seconds"]),
+        inter_request_sleep_seconds=float(cfg.get("history_inter_request_sleep_seconds") or 0.0),
+        circuit_sleep_seconds=float(cfg.get("history_circuit_sleep_seconds") or 0.0),
     )
     history_start, history_end = history_window_for_config(cfg)
     cache_result = history_cache.fetch_many(
