@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 
@@ -70,6 +72,28 @@ class LocalMLTrainerTests(unittest.TestCase):
         self.assertIn("ece", metrics)
         self.assertIn("topk_return", metrics)
         self.assertTrue(metrics["bucket_hit_rates"])
+
+    def test_trainer_writes_versioned_best_model_artifact_when_requested(self):
+        df = make_training_frame()
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "local_core_v1_test"
+
+            result = train_local_models(
+                df,
+                feature_names=["feature_strength", "feature_noise"],
+                label_col="label_top20_10d",
+                return_col="future_return_10d_pct",
+                split_plan=build_ml_split_plan(df, final_holdout_months=1, stock_holdout_ratio=0.25, walk_forward_splits=3),
+                artifact_dir=artifact_dir,
+                model_metadata={"run_id": "unit_test_run", "model_family": "local_core_v1"},
+            )
+
+            self.assertTrue((artifact_dir / "model.joblib").exists())
+            self.assertTrue((artifact_dir / "metadata.json").exists())
+            self.assertEqual(result["artifact"]["artifact_dir"], str(artifact_dir))
+            metadata = (artifact_dir / "metadata.json").read_text(encoding="utf-8")
+            self.assertIn("unit_test_run", metadata)
+            self.assertIn(result["best_model"], metadata)
 
 
 if __name__ == "__main__":

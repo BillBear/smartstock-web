@@ -12,6 +12,7 @@ def build_local_ml_config(payload: Dict[str, Any] | None = None) -> Dict[str, An
     now = datetime.now().strftime("%Y%m%d_%H%M%S")
     repo_root = Path(__file__).resolve().parents[3]
     output_root = Path(payload.get("output_root") or repo_root / "runtime" / "ml_runs" / model_family)
+    artifact_root = Path(payload.get("artifact_root") or repo_root / "backend" / "data" / "ml_models" / model_family)
 
     return {
         "model_family": model_family,
@@ -32,6 +33,7 @@ def build_local_ml_config(payload: Dict[str, Any] | None = None) -> Dict[str, An
         "status": "paper_only",
         "seed": int(payload.get("seed") or 20260704),
         "output_root": str(output_root),
+        "artifact_root": str(artifact_root),
         "min_disk_free_gb": int(payload.get("min_disk_free_gb") or 50),
         "min_memory_gb": int(payload.get("min_memory_gb") or 12),
         "min_full_snapshot_count": int(payload.get("min_full_snapshot_count") or 5000),

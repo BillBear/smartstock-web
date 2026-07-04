@@ -115,6 +115,7 @@ def run_experiment(cfg: Dict[str, Any], run_dir: Path) -> Dict[str, Any]:
     from app.evaluation.local_ml_environment import evaluate_environment_report
     from app.evaluation.ml_feature_audit import audit_features
     from app.evaluation.ml_history_cache import MLHistoryCache
+    from app.evaluation.local_ml_labels import add_local_core_labels
     from app.evaluation.ml_symbol_sampler import sample_training_symbols
     from app.evaluation.ml_training_reviewer import review_local_ml_run
     from app.evaluation.local_ml_trainer import train_local_models
@@ -172,15 +173,22 @@ def run_experiment(cfg: Dict[str, Any], run_dir: Path) -> Dict[str, Any]:
             "symbols": valid_symbols,
             "history_source": history_cache,
             "horizon_days": int(cfg["primary_horizon"]),
-            "sample_step": int(cfg["sample_step"]),
+            "sample_step": 1,
             "exclude_feature_names": excluded_features,
+            "include_raw_columns": True,
             "include_samples": False,
             "final_time_holdout_months": 3,
             "stock_holdout_ratio": 0.20,
             "walk_forward_splits": 5,
         }
     )
-    frame = _add_primary_cross_sectional_label(dataset["df"], primary_horizon=int(cfg["primary_horizon"]))
+    frame = _prepare_local_training_frame(
+        dataset["df"],
+        horizons=list(cfg.get("auxiliary_horizons") or []) + [int(cfg["primary_horizon"])],
+        primary_horizon=int(cfg["primary_horizon"]),
+        sample_step=int(cfg["sample_step"]),
+        labeler=add_local_core_labels,
+    )
     feature_names = list(dataset.get("feature_names") or [])
     dataset_meta = {
         **(dataset.get("meta") or {}),
@@ -188,6 +196,10 @@ def run_experiment(cfg: Dict[str, Any], run_dir: Path) -> Dict[str, Any]:
         "required_valid_symbol_count": int(cfg["min_formal_model_symbols"]),
         "sample_count": int(len(frame)),
         "excluded_features": excluded_features,
+        "sample_step": int(cfg["sample_step"]),
+        "label_columns": _label_columns(frame),
+        "primary_label": f"label_top20_{int(cfg['primary_horizon'])}d",
+        "auxiliary_horizons": list(cfg.get("auxiliary_horizons") or []),
     }
     _write_json(run_dir / "dataset_meta.json", dataset_meta)
 
@@ -203,29 +215,58 @@ def run_experiment(cfg: Dict[str, Any], run_dir: Path) -> Dict[str, Any]:
         label_col=label_col,
         return_col=return_col,
         split_plan=dataset_meta.get("split_plan"),
+        artifact_dir=Path(cfg.get("artifact_root") or run_dir / "artifact") / cfg["run_id"],
+        model_metadata={
+            "run_id": cfg["run_id"],
+            "model_family": cfg["model_family"],
+            "model_display_name": cfg["model_display_name"],
+            "train_start": cfg["train_start"],
+            "train_end": cfg["train_end"],
+            "target_valid_symbols": cfg["target_valid_symbols"],
+            "valid_symbol_count": dataset_meta["valid_symbol_count"],
+            "sample_count": dataset_meta["sample_count"],
+        },
     )
     _write_json(run_dir / "model_comparison.json", model_comparison)
     (run_dir / "training_report.md").write_text(_training_report_markdown(cfg, dataset_meta, model_comparison), encoding="utf-8")
     return review_local_ml_run(run_dir)
 
 
-def _add_primary_cross_sectional_label(df, primary_horizon: int):
-    import math
+def _prepare_local_training_frame(df, horizons: List[int], primary_horizon: int, sample_step: int, labeler):
+    import pandas as pd
 
-    frame = df.copy()
-    suffix = f"{primary_horizon}d"
-    frame[f"future_return_{suffix}_pct"] = frame["future_return_pct"]
-    frame[f"label_top20_{suffix}"] = 0
-    score_col = "label_risk_adjusted_return"
-    for _, index in frame.groupby("date").groups.items():
-        rows = frame.loc[index]
-        rows = rows[rows[score_col].notna()]
-        if rows.empty:
-            continue
-        cutoff = max(1, int(math.ceil(len(rows) * 0.20)))
-        top_index = rows.sort_values([score_col, "symbol"], ascending=[False, True]).head(cutoff).index
-        frame.loc[top_index, f"label_top20_{suffix}"] = 1
-    return frame
+    if df is None or df.empty:
+        return pd.DataFrame()
+    labeled = labeler(df, horizons=horizons, primary_horizon=primary_horizon)
+    suffix = f"{int(primary_horizon)}d"
+    primary_return = f"future_return_{suffix}_pct"
+    labeled = labeled[labeled["tradability_flag"] & labeled[primary_return].notna()].copy()
+    labeled = labeled.sort_values(["symbol", "date"]).reset_index(drop=True)
+    step = max(1, int(sample_step or 1))
+    if step <= 1:
+        return labeled.sort_values(["date", "symbol"]).reset_index(drop=True)
+    sampled = []
+    for _, group in labeled.groupby("symbol", sort=False):
+        sampled.append(group.iloc[::step].copy())
+    if not sampled:
+        return pd.DataFrame(columns=labeled.columns)
+    return pd.concat(sampled, ignore_index=True).sort_values(["date", "symbol"]).reset_index(drop=True)
+
+
+def _label_columns(frame) -> List[str]:
+    if frame is None or frame.empty:
+        return []
+    prefixes = (
+        "future_return_",
+        "future_max_gain_",
+        "future_max_drawdown_",
+        "future_risk_adjusted_return_",
+        "label_top20_",
+        "label_bottom20_",
+        "label_up_",
+        "label_tp_before_sl_",
+    )
+    return [column for column in frame.columns if column.startswith(prefixes)]
 
 
 def _excluded_features(cfg: Dict[str, Any]) -> List[str]:

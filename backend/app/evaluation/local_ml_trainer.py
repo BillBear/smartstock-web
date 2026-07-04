@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import importlib
 import warnings
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -17,6 +20,8 @@ def train_local_models(
     return_col: str,
     split_plan: Optional[Dict[str, Any]] = None,
     random_state: int = 20260704,
+    artifact_dir: str | Path | None = None,
+    model_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     if df is None or df.empty:
         raise ValueError("local ML training requires a non-empty dataset")
@@ -34,6 +39,7 @@ def train_local_models(
     candidates = _candidate_factories(random_state)
     models: Dict[str, Any] = {}
     best_model = None
+    best_model_obj = None
     best_score = (-1.0, -1.0)
     for name, factory in candidates.items():
         try:
@@ -59,6 +65,7 @@ def train_local_models(
             if score > best_score:
                 best_score = score
                 best_model = name
+                best_model_obj = model
         except Exception as exc:
             models[name] = {
                 "status": "skipped",
@@ -68,13 +75,31 @@ def train_local_models(
     if best_model is None:
         raise ValueError("no local ML model candidate could be trained")
 
-    return {
+    result = {
         "production_enabled": False,
         "status": "paper_only",
         "best_model": best_model,
         "models": models,
         "split_summary": _split_summary(split_plan),
     }
+    if artifact_dir:
+        result["artifact"] = _save_best_model_artifact(
+            artifact_dir=Path(artifact_dir),
+            model=best_model_obj,
+            metadata={
+                **(model_metadata or {}),
+                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "best_model": best_model,
+                "feature_names": feature_names,
+                "label_col": label_col,
+                "return_col": return_col,
+                "production_enabled": False,
+                "status": "paper_only",
+                "split_summary": result["split_summary"],
+                "metrics": models.get(best_model) or {},
+            },
+        )
+    return result
 
 
 def _candidate_factories(random_state: int) -> Dict[str, Callable[[np.ndarray], Any]]:
@@ -348,3 +373,37 @@ def _split_summary(split_plan: Dict[str, Any]) -> Dict[str, Any]:
         "final_holdout_dates": list((split_plan.get("final_holdout") or {}).get("dates") or []),
         "stock_holdout_symbols": list((split_plan.get("stock_holdout") or {}).get("symbols") or []),
     }
+
+
+def _save_best_model_artifact(artifact_dir: Path, model: Any, metadata: Dict[str, Any]) -> Dict[str, Any]:
+    if model is None:
+        raise ValueError("cannot save local ML artifact without a trained best model")
+    try:
+        import joblib
+    except Exception as exc:
+        raise RuntimeError("saving local ML artifacts requires joblib") from exc
+
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    model_path = artifact_dir / "model.joblib"
+    metadata_path = artifact_dir / "metadata.json"
+    joblib.dump(model, model_path)
+    metadata_path.write_text(json.dumps(_json_safe(metadata), ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "artifact_dir": str(artifact_dir),
+        "model_path": str(model_path),
+        "metadata_path": str(metadata_path),
+    }
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, (np.ndarray,)):
+        return [_json_safe(item) for item in value.tolist()]
+    return value

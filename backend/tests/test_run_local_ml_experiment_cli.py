@@ -5,7 +5,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.run_local_ml_experiment import build_config_from_args, history_window_for_config, parse_args
+import pandas as pd
+
+from app.evaluation.local_ml_labels import add_local_core_labels
+from scripts.run_local_ml_experiment import (
+    _prepare_local_training_frame,
+    build_config_from_args,
+    history_window_for_config,
+    parse_args,
+)
 
 
 class RunLocalMLExperimentCLITests(unittest.TestCase):
@@ -16,6 +24,7 @@ class RunLocalMLExperimentCLITests(unittest.TestCase):
         self.assertEqual(cfg["target_valid_symbols"], 700)
         self.assertEqual(cfg["oversample_symbols"], 760)
         self.assertIn("runtime/ml_runs/local_core_v1", cfg["output_root"])
+        self.assertIn("backend/data/ml_models/local_core_v1", cfg["artifact_root"])
         self.assertFalse(cfg["production_enabled"])
 
     def test_dry_run_writes_config_without_fetching_history(self):
@@ -54,6 +63,46 @@ class RunLocalMLExperimentCLITests(unittest.TestCase):
 
         self.assertEqual(start, "2024-01-02")
         self.assertEqual(end, "2026-09-01")
+
+    def test_prepare_training_frame_adds_multi_horizon_labels_before_sampling(self):
+        dates = pd.date_range("2026-01-01", periods=8, freq="D").strftime("%Y-%m-%d")
+        rows = []
+        for symbol, start_price in [("600001", 10.0), ("600002", 20.0)]:
+            for idx, date in enumerate(dates):
+                close = start_price + idx
+                rows.append(
+                    {
+                        "date": date,
+                        "symbol": symbol,
+                        "name": symbol,
+                        "open": close,
+                        "high": close * 1.02,
+                        "low": close * 0.98,
+                        "close": close,
+                        "volume": 1000,
+                        "amount": 100000,
+                        "feature_a": float(idx),
+                        "future_return_pct": 1.0,
+                        "future_max_drawdown_pct": -1.0,
+                        "label_up": 1,
+                        "label_dd": 0,
+                        "label_risk_adjusted_return": 1.0,
+                    }
+                )
+
+        frame = _prepare_local_training_frame(
+            pd.DataFrame(rows),
+            horizons=[2, 3],
+            primary_horizon=3,
+            sample_step=2,
+            labeler=add_local_core_labels,
+        )
+
+        self.assertIn("future_return_2d_pct", frame.columns)
+        self.assertIn("future_return_3d_pct", frame.columns)
+        self.assertIn("label_tp_before_sl_3d", frame.columns)
+        self.assertEqual(frame["symbol"].nunique(), 2)
+        self.assertLess(len(frame), len(rows))
 
 
 if __name__ == "__main__":

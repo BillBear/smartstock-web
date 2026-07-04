@@ -103,6 +103,12 @@ class MLLocalFeatureBuilderStub:
         return pd.DataFrame(
             {
                 "date": history["date"],
+                "open": history.get("open", history["close"]),
+                "high": history.get("high", history["close"]),
+                "low": history.get("low", history["close"]),
+                "close": history["close"],
+                "volume": history.get("volume", 1000),
+                "amount": history.get("amount", 100000),
                 "feature": range(len(history)),
                 "news_total_score": 50.0,
                 "market_state_score": 50.0,
@@ -256,6 +262,26 @@ class MLDatasetBuilderTests(unittest.TestCase):
 
         self.assertEqual(dataset["samples"], [])
         self.assertGreater(dataset["meta"]["sample_count"], 0)
+
+    def test_dataset_can_keep_raw_ohlcv_columns_for_local_training_labels(self):
+        builder = MLDatasetBuilder(MLExplicitRangeDataSourceStub(), feature_builder=MLLocalFeatureBuilderStub())
+
+        dataset = builder.build_dataset(
+            {
+                "train_start": "2024-03-01",
+                "train_end": "2024-04-30",
+                "symbols": ["600001"],
+                "include_raw_columns": True,
+                "include_samples": False,
+                "sample_step": 10,
+                "feature_warmup_calendar_days": 30,
+                "label_lookahead_calendar_days": 20,
+            }
+        )
+
+        for column in ["open", "high", "low", "close", "volume", "amount"]:
+            self.assertIn(column, dataset["df"].columns)
+        self.assertTrue(dataset["meta"]["include_raw_columns"])
 
 
 if __name__ == "__main__":

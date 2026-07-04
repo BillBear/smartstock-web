@@ -96,6 +96,7 @@ class MLDatasetBuilder:
         excluded_features = {str(item) for item in (payload.get("exclude_feature_names") or [])}
         feature_names = [name for name in self.feature_builder.FEATURE_NAMES if name not in excluded_features]
         include_samples = bool(payload.get("include_samples", True))
+        include_raw_columns = bool(payload.get("include_raw_columns", False))
 
         symbols = self.select_symbols(max_symbols=max_symbols, explicit_symbols=payload.get("symbols"))
         frames: List[pd.DataFrame] = []
@@ -158,8 +159,16 @@ class MLDatasetBuilder:
 
         dataset = pd.concat(frames, ignore_index=True)
         dataset = dataset.sort_values(["date", "symbol"]).reset_index(drop=True)
+        raw_cols = []
+        if include_raw_columns:
+            raw_cols = [
+                column
+                for column in ["open", "high", "low", "close", "volume", "amount", "pct_change"]
+                if column in dataset.columns
+            ]
         keep_cols = [
             "date", "symbol", "name",
+            *raw_cols,
             *feature_names,
             "future_return_pct", "future_max_drawdown_pct",
             "label_up", "label_dd", "label_risk_adjusted_return",
@@ -183,6 +192,7 @@ class MLDatasetBuilder:
             "label_lookahead_calendar_days": label_lookahead_days,
             "feature_names": feature_names,
             "include_samples": include_samples,
+            "include_raw_columns": include_raw_columns,
             "errors": errors[:20],
         }
         try:
