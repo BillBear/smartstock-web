@@ -7,6 +7,7 @@ they do not change production strategy logic.
 Current readiness summary:
 
 - [Recall experiment readiness](current-readiness.md)
+- [2026-07-04 offline recall full experiment](2026-07-04-offline-recall-full-experiment.md)
 
 ## Experiment Matrix
 
