@@ -51,6 +51,30 @@ class MLHistoryDataSourceStub(MLDataSourceStub):
         )
 
 
+class MLExplicitRangeDataSourceStub(MLDataSourceStub):
+    def __init__(self):
+        self.range_calls = []
+
+    def get_a_share_snapshot(self):
+        return [
+            {"symbol": "600001", "name": "样本1", "price": 10.0, "amount": 1000},
+            {"symbol": "600002", "name": "样本2", "price": 10.0, "amount": 900},
+        ]
+
+    def get_history_data_range(self, symbol, start_date, end_date):
+        self.range_calls.append((symbol, start_date, end_date))
+        dates = pd.date_range(start=start_date, end=end_date, freq="D")
+        return pd.DataFrame(
+            {
+                "date": dates.strftime("%Y-%m-%d"),
+                "close": [10.0 + idx * 0.01 for idx in range(len(dates))],
+            }
+        )
+
+    def get_history_data(self, symbol, days=260):
+        raise AssertionError("ML dataset builder must prefer explicit history ranges when available")
+
+
 class MLFeatureBuilderStub:
     FEATURE_NAMES = ["feature"]
 
@@ -110,6 +134,33 @@ class MLDatasetBuilderTests(unittest.TestCase):
         self.assertTrue(set(split_plan["training_dates"]).isdisjoint(split_plan["final_holdout"]["dates"]))
         self.assertTrue(set(split_plan["training_symbols"]).isdisjoint(split_plan["stock_holdout"]["symbols"]))
         self.assertGreaterEqual(split_plan["walk_forward"]["split_count"], 1)
+
+    def test_dataset_uses_explicit_history_range_for_train_window(self):
+        source = MLExplicitRangeDataSourceStub()
+        builder = MLDatasetBuilder(source, feature_builder=MLFeatureBuilderStub())
+
+        dataset = builder.build_dataset(
+            {
+                "train_start": "2024-03-01",
+                "train_end": "2024-04-30",
+                "max_symbols": 2,
+                "horizon_days": 5,
+                "sample_step": 10,
+                "feature_warmup_calendar_days": 30,
+                "label_lookahead_calendar_days": 20,
+            }
+        )
+
+        self.assertEqual(
+            source.range_calls,
+            [
+                ("600001", "2024-01-31", "2024-05-20"),
+                ("600002", "2024-01-31", "2024-05-20"),
+            ],
+        )
+        self.assertEqual(dataset["meta"]["history_source"], "explicit_history_range")
+        self.assertEqual(dataset["meta"]["history_start"], "2024-01-31")
+        self.assertEqual(dataset["meta"]["history_end"], "2024-05-20")
 
 
 if __name__ == "__main__":

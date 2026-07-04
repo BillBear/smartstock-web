@@ -83,4 +83,6 @@ market_state_coverage_incomplete
 
 后续补充的训练数据切分基础：`MLDatasetBuilder` 成功构建样本后会在 `meta.split_plan` 中输出三层切分计划，包括最终时间 holdout、股票 holdout 和 walk-forward 窗口。该计划用于审计训练/验证边界，仍不等于已经训练出新模型；真正模型准入仍必须提供 final holdout、stock holdout、walk-forward 和分桶命中率的样本外指标。
 
+2026-07-04 后进一步补充的训练窗口边界：`MLDatasetBuilder` 在数据源支持时会优先调用显式 `get_history_data_range(symbol, start_date, end_date)`，历史窗口由 `train_start - feature_warmup_calendar_days` 到 `train_end + label_lookahead_calendar_days` 派生，避免训练数据隐式落到“最近 N 天/今天”。这仍只影响离线训练数据构建，不训练新模型、不改变生产推荐。
+
 在新模型通过样本外证据前，前端和 API 必须继续把模型概率标记为 `弱模型参考`。

@@ -83,6 +83,11 @@ class MLDatasetBuilder:
         if start_dt >= end_dt:
             start_dt = end_dt - timedelta(days=360)
         fetch_days = max(260, min(1200, (end_dt - start_dt).days + 260))
+        feature_warmup_days = max(30, min(730, int(payload.get("feature_warmup_calendar_days") or 365)))
+        label_lookahead_days = max(7, min(365, int(payload.get("label_lookahead_calendar_days") or max(30, horizon_days * 4 + 20))))
+        history_start_text = (start_dt - timedelta(days=feature_warmup_days)).strftime("%Y-%m-%d")
+        history_end_text = (end_dt + timedelta(days=label_lookahead_days)).strftime("%Y-%m-%d")
+        history_source = "explicit_history_range" if hasattr(self.data_source_manager, "get_history_data_range") else "rolling_days"
 
         symbols = self.select_symbols(max_symbols=max_symbols, explicit_symbols=payload.get("symbols"))
         frames: List[pd.DataFrame] = []
@@ -98,7 +103,7 @@ class MLDatasetBuilder:
             if not symbol:
                 continue
             try:
-                history = self.data_source_manager.get_history_data(symbol, days=fetch_days)
+                history = self._fetch_history(symbol, fetch_days, history_start_text, history_end_text)
                 if history is None or history.empty or len(history) < 100:
                     continue
                 features = self.feature_builder.build_feature_frame(
@@ -132,6 +137,11 @@ class MLDatasetBuilder:
                     "symbol_count": len(symbols),
                     "valid_symbol_count": 0,
                     "sample_count": 0,
+                    "history_source": history_source,
+                    "history_start": history_start_text,
+                    "history_end": history_end_text,
+                    "feature_warmup_calendar_days": feature_warmup_days,
+                    "label_lookahead_calendar_days": label_lookahead_days,
                     "errors": errors[:20],
                 },
             }
@@ -157,6 +167,11 @@ class MLDatasetBuilder:
             "target_return_pct": target_return_pct,
             "drawdown_pct": drawdown_pct,
             "sample_step": sample_step,
+            "history_source": history_source,
+            "history_start": history_start_text,
+            "history_end": history_end_text,
+            "feature_warmup_calendar_days": feature_warmup_days,
+            "label_lookahead_calendar_days": label_lookahead_days,
             "errors": errors[:20],
         }
         try:
@@ -173,3 +188,12 @@ class MLDatasetBuilder:
             "samples": samples,
             "meta": meta,
         }
+
+    def _fetch_history(self, symbol: str, fetch_days: int, start_date: str, end_date: str) -> pd.DataFrame:
+        if hasattr(self.data_source_manager, "get_history_data_range"):
+            return self.data_source_manager.get_history_data_range(
+                symbol,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        return self.data_source_manager.get_history_data(symbol, days=fetch_days)
