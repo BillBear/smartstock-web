@@ -65,6 +65,34 @@ class MLTrainingReviewerTests(unittest.TestCase):
             self.assertEqual(review["recommendation"], "blocked")
             self.assertIn("valid_symbols_below_20", review["blocking_reasons"])
 
+    def test_reviewer_uses_run_primary_label_in_next_recommendations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            write_json(
+                run_dir / "dataset_meta.json",
+                {
+                    "valid_symbol_count": 700,
+                    "required_valid_symbol_count": 700,
+                    "sample_count": 120000,
+                    "primary_label": "label_rank_top10_10d",
+                },
+            )
+            write_json(run_dir / "feature_audit.json", {"leakage_violations": [], "features": {}})
+            write_json(
+                run_dir / "model_comparison.json",
+                {
+                    "best_model": "logistic_baseline",
+                    "models": {"logistic_baseline": {"final_holdout": {"precision_at_5": 0.4}, "stock_holdout": {"precision_at_5": 0.3}}},
+                },
+            )
+
+            review = review_local_ml_run(run_dir)
+
+            self.assertEqual(
+                review["next_run_recommendations"]["label_adjustments"][0]["current_label"],
+                "label_rank_top10_10d",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -78,7 +78,13 @@ def build_training_review(
         },
         "top_feature_findings": _feature_findings(feature_audit, "core_candidate"),
         "weak_feature_findings": _feature_findings(feature_audit, "weak_or_unstable"),
-        "next_run_recommendations": _next_run_recommendations(recommendation, blocking, warnings, feature_audit),
+        "next_run_recommendations": _next_run_recommendations(
+            recommendation,
+            blocking,
+            warnings,
+            feature_audit,
+            primary_label=str(dataset_meta.get("primary_label") or "label_top20_10d"),
+        ),
         "production_status": "paper_only",
     }
 
@@ -88,6 +94,7 @@ def _next_run_recommendations(
     blocking: List[str],
     warnings: List[str],
     feature_audit: Dict[str, Any],
+    primary_label: str = "label_top20_10d",
 ) -> Dict[str, Any]:
     return {
         "decision": recommendation,
@@ -95,8 +102,8 @@ def _next_run_recommendations(
         "feature_adjustments": _feature_adjustments(feature_audit),
         "label_adjustments": [
             {
-                "current_label": "label_top20_10d",
-                "next_test": "compare label_top15_10d and label_tp_before_sl_10d only in a new explicit run config",
+                "current_label": str(primary_label),
+                "next_test": "compare stricter rank, excess-return, tp-before-sl, and drawdown-safe labels only in a new explicit run config",
             }
         ],
         "model_adjustments": [

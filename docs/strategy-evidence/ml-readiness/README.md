@@ -9,6 +9,8 @@ Current readiness summary:
 - [ML current readiness](current-readiness.md)
 - [2026-07-04 training dataset audit](2026-07-04-training-dataset-audit.md)
 - [Local Core v1 label and feature diagnostics](local-core-v1-label-feature-diagnostics.md)
+- [Local Core v2 formal 700 training report](local-core-v2-formal-700-v4-training-report.md)
+- [Local Core v2 formal 700 diagnostics](local-core-v2-formal-700-v4-diagnostics.md)
 
 ## Production Minimums
 

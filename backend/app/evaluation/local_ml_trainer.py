@@ -23,6 +23,7 @@ def train_local_models(
     artifact_dir: str | Path | None = None,
     model_metadata: Optional[Dict[str, Any]] = None,
     prediction_output_path: str | Path | None = None,
+    candidate_set: str = "default",
 ) -> Dict[str, Any]:
     if df is None or df.empty:
         raise ValueError("local ML training requires a non-empty dataset")
@@ -37,7 +38,7 @@ def train_local_models(
     if train_df.empty:
         raise ValueError("local ML split produced an empty training set")
 
-    candidates = _candidate_factories(random_state)
+    candidates = _candidate_factories(random_state, candidate_set=candidate_set)
     models: Dict[str, Any] = {}
     best_model = None
     best_model_obj = None
@@ -61,8 +62,14 @@ def train_local_models(
                 "final_holdout": final_metrics,
                 "stock_holdout": stock_metrics,
                 "walk_forward": walk_metrics,
+                "feature_importance": _extract_feature_importance(model, feature_names),
             }
-            score = (float(final_metrics.get("precision_at_5") or 0.0), float(final_metrics.get("ndcg_at_10") or 0.0))
+            score = (
+                float(final_metrics.get("precision_at_5") or 0.0),
+                float(stock_metrics.get("precision_at_5") or 0.0),
+                float(walk_metrics.get("precision_at_5") or 0.0),
+                float(final_metrics.get("ndcg_at_10") or 0.0),
+            )
             if score > best_score:
                 best_score = score
                 best_model = name
@@ -114,13 +121,18 @@ def train_local_models(
     return result
 
 
-def _candidate_factories(random_state: int) -> Dict[str, Callable[[np.ndarray], Any]]:
+def _candidate_factories(random_state: int, candidate_set: str = "default") -> Dict[str, Callable[[np.ndarray], Any]]:
     factories: Dict[str, Callable[[np.ndarray], Any]] = {
         "logistic_baseline": lambda y: _make_logistic(y, random_state),
+        "decision_tree_shallow": lambda y: _make_decision_tree(y, random_state),
+        "scorecard_baseline": lambda y: _make_scorecard(y, random_state),
+    }
+    if str(candidate_set or "default") != "core_v2":
+        factories.update({
         "sklearn_hist_gradient_boosting": lambda y: _make_hist_gradient_boosting(y, random_state),
         "xgboost_classifier": lambda y: _make_xgboost(y, random_state),
         "lightgbm_classifier": lambda y: _make_lightgbm(y, random_state),
-    }
+        })
     return factories
 
 
@@ -150,6 +162,28 @@ def _make_hist_gradient_boosting(y: np.ndarray, random_state: int):
         max_leaf_nodes=31,
         random_state=random_state,
     )
+
+
+def _make_decision_tree(y: np.ndarray, random_state: int):
+    from sklearn.dummy import DummyClassifier
+    from sklearn.tree import DecisionTreeClassifier
+
+    if len(set(y.tolist())) < 2:
+        return DummyClassifier(strategy="prior")
+    return DecisionTreeClassifier(
+        max_depth=4,
+        min_samples_leaf=max(20, int(len(y) * 0.01)),
+        class_weight="balanced",
+        random_state=random_state,
+    )
+
+
+def _make_scorecard(y: np.ndarray, random_state: int):
+    if len(set(y.tolist())) < 2:
+        from sklearn.dummy import DummyClassifier
+
+        return DummyClassifier(strategy="prior")
+    return SimpleScorecardClassifier(random_state=random_state)
 
 
 def _make_xgboost(y: np.ndarray, random_state: int):
@@ -218,15 +252,18 @@ def _walk_forward_metrics(
         model = factory(train[label_col].astype(int).to_numpy())
         _fit_model(model, _x(train, feature_names), train[label_col].astype(int))
         scored = validation[[label_col, return_col]].copy()
+        scored["date"] = validation["date"].astype(str)
         scored["_prob"] = _predict_class1(model, _x(validation, feature_names))
         frames.append(scored)
     if not frames:
         return _empty_metrics()
     combined = pd.concat(frames, ignore_index=True)
-    return _ranking_metrics(
-        combined[label_col].astype(int).to_numpy(),
-        combined["_prob"].to_numpy(dtype=float),
-        combined[return_col].to_numpy(dtype=float),
+    return daily_ranking_metrics(
+        combined,
+        label_col=label_col,
+        score_col="_prob",
+        return_col=return_col,
+        date_col="date",
     )
 
 
@@ -242,7 +279,21 @@ def _evaluate_model(
     y_true = df[label_col].astype(int).to_numpy()
     returns = df[return_col].astype(float).to_numpy()
     prob = _predict_class1(model, _x(df, feature_names))
-    return _ranking_metrics(y_true, prob, returns)
+    metrics = daily_ranking_metrics(
+        df.assign(_prob=prob),
+        label_col=label_col,
+        score_col="_prob",
+        return_col=return_col,
+        date_col="date",
+    )
+    metrics.update(
+        {
+            "brier": _brier(y_true, prob),
+            "ece": _ece(y_true, prob),
+            "bucket_hit_rates": _bucket_hit_rates(y_true, prob),
+        }
+    )
+    return metrics
 
 
 def _ranking_metrics(y_true: np.ndarray, y_prob: np.ndarray, returns: np.ndarray) -> Dict[str, Any]:
@@ -263,9 +314,65 @@ def _ranking_metrics(y_true: np.ndarray, y_prob: np.ndarray, returns: np.ndarray
     }
 
 
+def daily_ranking_metrics(
+    df: pd.DataFrame,
+    label_col: str,
+    score_col: str,
+    return_col: str,
+    date_col: str = "date",
+) -> Dict[str, Any]:
+    if df is None or df.empty:
+        return _empty_metrics()
+    local = df[[date_col, label_col, score_col, return_col]].copy()
+    local[date_col] = pd.to_datetime(local[date_col], errors="coerce").dt.strftime("%Y-%m-%d")
+    local[label_col] = pd.to_numeric(local[label_col], errors="coerce")
+    local[score_col] = pd.to_numeric(local[score_col], errors="coerce")
+    local[return_col] = pd.to_numeric(local[return_col], errors="coerce")
+    local = local.dropna(subset=[date_col, label_col, score_col, return_col])
+    if local.empty:
+        return _empty_metrics()
+    daily_values: Dict[str, List[float]] = {
+        "precision_at_1": [],
+        "precision_at_3": [],
+        "precision_at_5": [],
+        "precision_at_10": [],
+        "ndcg_at_10": [],
+        "mrr": [],
+        "topk_return": [],
+    }
+    for _, rows in local.groupby(date_col):
+        ordered = rows.sort_values(score_col, ascending=False)
+        y_true = ordered[label_col].astype(int).to_numpy()
+        returns = ordered[return_col].astype(float).to_numpy()
+        scores = ordered[score_col].astype(float).to_numpy()
+        for key, k in (("precision_at_1", 1), ("precision_at_3", 3), ("precision_at_5", 5), ("precision_at_10", 10)):
+            daily_values[key].append(_precision_at_k(y_true, scores, k))
+        daily_values["ndcg_at_10"].append(_ndcg_at_k(y_true, scores, 10))
+        daily_values["mrr"].append(_mrr(y_true, scores))
+        daily_values["topk_return"].append(_topk_return(returns, scores, 5))
+    return {
+        "sample_count": int(len(local)),
+        "date_count": int(local[date_col].nunique()),
+        "label_rate": round(float(local[label_col].mean()), 6),
+        "precision_at_1": _mean(daily_values["precision_at_1"]),
+        "precision_at_3": _mean(daily_values["precision_at_3"]),
+        "precision_at_5": _mean(daily_values["precision_at_5"]),
+        "precision_at_10": _mean(daily_values["precision_at_10"]),
+        "ndcg_at_10": _mean(daily_values["ndcg_at_10"]),
+        "mrr": _mean(daily_values["mrr"]),
+        "topk_return": _mean(daily_values["topk_return"]),
+        "brier": None,
+        "ece": None,
+        "bucket_hit_rates": [],
+    }
+
+
 def _empty_metrics() -> Dict[str, Any]:
     return {
         "sample_count": 0,
+        "date_count": 0,
+        "label_rate": 0.0,
+        "precision_at_1": 0.0,
         "precision_at_3": 0.0,
         "precision_at_5": 0.0,
         "precision_at_10": 0.0,
@@ -376,6 +483,72 @@ def _bucket_hit_rates(y_true: np.ndarray, y_prob: np.ndarray) -> List[Dict[str, 
             }
         )
     return result
+
+
+def _mean(values: List[float]) -> float:
+    if not values:
+        return 0.0
+    return round(float(np.mean(values)), 6)
+
+
+def _extract_feature_importance(model: Any, feature_names: List[str]) -> List[Dict[str, Any]]:
+    estimator = model
+    if hasattr(model, "named_steps"):
+        estimator = model.named_steps.get("model") or model
+    values = None
+    if hasattr(estimator, "feature_importances_"):
+        values = getattr(estimator, "feature_importances_")
+    elif hasattr(estimator, "coef_"):
+        values = np.ravel(getattr(estimator, "coef_"))
+    elif hasattr(estimator, "feature_scores_"):
+        values = getattr(estimator, "feature_scores_")
+    if values is None:
+        return []
+    rows = []
+    for feature, value in zip(feature_names, values):
+        rows.append({"feature": feature, "importance": round(float(abs(value)), 6)})
+    return sorted(rows, key=lambda item: item["importance"], reverse=True)
+
+
+class SimpleScorecardClassifier:
+    """Small interpretable scorecard baseline for offline local ML experiments."""
+
+    def __init__(self, random_state: int = 0):
+        self.random_state = random_state
+        self.feature_names_in_: List[str] = []
+        self.feature_scores_: np.ndarray = np.array([])
+        self.medians_: np.ndarray = np.array([])
+        self.scales_: np.ndarray = np.array([])
+        self.intercept_: float = 0.0
+        self.classes_ = np.array([0, 1])
+
+    def fit(self, x: pd.DataFrame, y: pd.Series):
+        local = pd.DataFrame(x).astype(float)
+        target = pd.Series(y).astype(int).reset_index(drop=True)
+        self.feature_names_in_ = [str(column) for column in local.columns]
+        self.medians_ = local.median().fillna(0.0).to_numpy(dtype=float)
+        q75 = local.quantile(0.75)
+        q25 = local.quantile(0.25)
+        self.scales_ = (q75 - q25).replace(0, np.nan).fillna(local.std().replace(0, np.nan)).fillna(1.0).to_numpy(dtype=float)
+        weights = []
+        for column in local.columns:
+            corr = local[column].corr(target, method="spearman")
+            weights.append(0.0 if pd.isna(corr) else float(corr))
+        weights_array = np.asarray(weights, dtype=float)
+        if np.sum(np.abs(weights_array)) > 0:
+            weights_array = weights_array / np.sum(np.abs(weights_array))
+        self.feature_scores_ = weights_array
+        positive_rate = min(0.99, max(0.01, float(target.mean())))
+        self.intercept_ = float(np.log(positive_rate / (1.0 - positive_rate)))
+        return self
+
+    def predict_proba(self, x: pd.DataFrame) -> np.ndarray:
+        local = pd.DataFrame(x).astype(float)
+        values = local.to_numpy(dtype=float)
+        z = (values - self.medians_) / self.scales_
+        score = self.intercept_ + np.dot(z, self.feature_scores_) * 2.5
+        prob = 1.0 / (1.0 + np.exp(-np.clip(score, -20, 20)))
+        return np.column_stack([1.0 - prob, prob])
 
 
 def _split_summary(split_plan: Dict[str, Any]) -> Dict[str, Any]:

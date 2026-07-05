@@ -16,6 +16,7 @@ def build_ml_split_plan(
     final_holdout_months: int = 3,
     stock_holdout_ratio: float = 0.20,
     walk_forward_splits: int = 5,
+    label_horizon_days: int = 0,
 ) -> Dict[str, Any]:
     """Build non-overlapping ML split metadata from a dated symbol panel."""
     if df is None or df.empty:
@@ -32,7 +33,10 @@ def build_ml_split_plan(
     max_date = pd.Timestamp(dates[-1])
     cutoff = max_date - pd.DateOffset(months=holdout_months)
     final_dates = [date for date in dates if pd.Timestamp(date) > cutoff]
-    training_dates = [date for date in dates if date not in set(final_dates)]
+    final_start_index = dates.index(final_dates[0]) if final_dates else len(dates)
+    embargo_count = max(0, int(label_horizon_days or 0))
+    final_embargo_dates = dates[max(0, final_start_index - embargo_count) : final_start_index]
+    training_dates = [date for date in dates if date not in set(final_dates) and date not in set(final_embargo_dates)]
     if not final_dates or not training_dates:
         raise ValueError("final holdout leaves no training or holdout dates")
 
@@ -41,7 +45,7 @@ def build_ml_split_plan(
     if not holdout_symbols or not training_symbols:
         raise ValueError("stock holdout leaves no training or holdout symbols")
 
-    windows = _walk_forward_windows(training_dates, int(walk_forward_splits or 5))
+    windows = _walk_forward_windows(training_dates, int(walk_forward_splits or 5), embargo_count)
     return {
         "method": "walk_forward_plus_final_time_and_stock_holdout",
         "training_dates": training_dates,
@@ -61,6 +65,10 @@ def build_ml_split_plan(
             "split_count": len(windows),
             "windows": windows,
         },
+        "embargo": {
+            "label_horizon_days": embargo_count,
+            "final_holdout_embargo_dates": final_embargo_dates,
+        },
     }
 
 
@@ -78,7 +86,7 @@ def _stock_holdout_symbols(symbols: List[str], ratio: float) -> List[str]:
     return sorted(ranked[:count])
 
 
-def _walk_forward_windows(training_dates: List[str], split_count: int) -> List[Dict[str, Any]]:
+def _walk_forward_windows(training_dates: List[str], split_count: int, embargo_count: int = 0) -> List[Dict[str, Any]]:
     if len(training_dates) < 3:
         raise ValueError("walk-forward planning requires at least 3 training dates")
     bounded_splits = max(1, min(split_count, len(training_dates) - 2))
@@ -87,7 +95,9 @@ def _walk_forward_windows(training_dates: List[str], split_count: int) -> List[D
     for index in range(bounded_splits):
         validation_start = len(training_dates) - validation_count * (bounded_splits - index)
         validation_end = validation_start + validation_count
-        train_dates = training_dates[:validation_start]
+        embargo_start = max(0, validation_start - max(0, int(embargo_count or 0)))
+        embargo_dates = training_dates[embargo_start:validation_start]
+        train_dates = training_dates[:embargo_start]
         validation_dates = training_dates[validation_start:validation_end]
         if not train_dates or not validation_dates:
             continue
@@ -102,6 +112,7 @@ def _walk_forward_windows(training_dates: List[str], split_count: int) -> List[D
                 "validation_date_count": len(validation_dates),
                 "train_dates": train_dates,
                 "validation_dates": validation_dates,
+                "embargo_dates": embargo_dates,
             }
         )
     if not windows:
