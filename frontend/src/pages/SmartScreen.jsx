@@ -221,7 +221,7 @@ const SmartScreen = () => {
         refreshAttemptedForDateRef.current = refreshKey
         coachApi.refreshTodayPicks({
           user_id: 'default',
-          max_count: 30,
+          max_count: SMART_SCREEN_CACHED_PICK_LIMIT,
           risk_level: effectiveRisk,
         }).then(() => {
           if (mountedRef.current && reqId === latestLoadReqRef.current) {
@@ -340,7 +340,7 @@ const SmartScreen = () => {
     try {
       const response = await coachApi.refreshTodayPicks({
         user_id: 'default',
-        max_count: 30,
+        max_count: SMART_SCREEN_CACHED_PICK_LIMIT,
         risk_level: riskLevel,
       })
       if (response?.accepted === false) {

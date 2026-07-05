@@ -183,6 +183,216 @@ class CoachServiceObservabilityTests(unittest.TestCase):
         self.assertEqual(CoachService._clamp(float("inf"), 0, 100), clamp(float("inf"), 0, 100))
         self.assertEqual(CoachService._clamp(float("-inf"), 0, 100), clamp(float("-inf"), 0, 100))
 
+    def test_dynamic_candidate_pool_softens_legacy_hard_filter_thresholds(self):
+        class DataSourceStub:
+            def __init__(self, entries):
+                self.entries = entries
+
+            def get_a_share_snapshot(self):
+                return self.entries
+
+            def get_stock_industry_map(self):
+                return {item["symbol"]: item.get("industry", "未知行业") for item in self.entries}
+
+            def get_realtime_quotes_batch(self, symbols):
+                return {}
+
+        entries = [
+            {
+                "symbol": "000101",
+                "name": "低成交额样本",
+                "price": 12.0,
+                "open": 11.5,
+                "high": 12.6,
+                "low": 11.3,
+                "pct_change": 3.2,
+                "amount": 60_000_000,
+                "turnover_rate": 2.4,
+                "industry": "行业A",
+            },
+            {
+                "symbol": "000102",
+                "name": "低换手样本",
+                "price": 10.0,
+                "open": 9.8,
+                "high": 10.5,
+                "low": 9.7,
+                "pct_change": 2.6,
+                "amount": 500_000_000,
+                "turnover_rate": 0.3,
+                "industry": "行业B",
+            },
+            {
+                "symbol": "000103",
+                "name": "高换手样本",
+                "price": 20.0,
+                "open": 18.8,
+                "high": 21.0,
+                "low": 18.6,
+                "pct_change": 5.5,
+                "amount": 1_200_000_000,
+                "turnover_rate": 30.0,
+                "industry": "行业C",
+            },
+            {
+                "symbol": "000104",
+                "name": "强波动样本",
+                "price": 18.0,
+                "open": 15.2,
+                "high": 18.5,
+                "low": 15.1,
+                "pct_change": 18.0,
+                "amount": 800_000_000,
+                "turnover_rate": 6.0,
+                "industry": "行业D",
+            },
+            {
+                "symbol": "000105",
+                "name": "低价样本",
+                "price": 1.2,
+                "open": 1.1,
+                "high": 1.25,
+                "low": 1.08,
+                "pct_change": 4.0,
+                "amount": 700_000_000,
+                "turnover_rate": 4.0,
+                "industry": "行业E",
+            },
+            {
+                "symbol": "000106",
+                "name": "ST风险样本",
+                "price": 8.0,
+                "amount": 900_000_000,
+                "turnover_rate": 4.0,
+                "pct_change": 2.0,
+                "industry": "行业F",
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = CoachService(
+                data_source_manager=DataSourceStub(entries),
+                store=CoachStore(str(Path(tmpdir) / "coach.db")),
+                news_service=None,
+                universe_min_amount_yi=2.0,
+                universe_min_price=2.0,
+                universe_max_analyze_count=120,
+                universe_industry_cap=4,
+            )
+
+            result = service._build_dynamic_candidates(
+                risk_level="medium",
+                target_size=120,
+                strategy_code="trend_breakout",
+            )
+
+        symbols = {item["symbol"] for item in result["candidates"]}
+        self.assertTrue({"000101", "000102", "000103", "000104", "000105"}.issubset(symbols))
+        self.assertNotIn("000106", symbols)
+        rules = result["meta"]["rules"]
+        self.assertEqual(rules["filter_policy"], "softened_recall_filters")
+        self.assertLessEqual(rules["min_amount_yi"], 0.6)
+        self.assertLessEqual(rules["min_turnover_rate"], 0.3)
+        self.assertGreaterEqual(rules["max_turnover_rate"], 30.0)
+        self.assertGreaterEqual(rules["max_abs_pct_change"], 18.0)
+        self.assertLessEqual(rules["min_price"], 1.2)
+
+    def test_today_picks_refresh_can_return_more_than_legacy_thirty_candidate_cap(self):
+        class DataSourceStub:
+            def get_stock_industry_map(self):
+                return {}
+
+            def get_realtime_quotes_batch(self, symbols):
+                return {}
+
+        def fake_pick(symbol, risk_profile, market_state, row, strategy_code):
+            score = 90.0 - (int(symbol[-2:]) * 0.1)
+            return {
+                "pick_id": f"2026-07-05-{symbol}-S1",
+                "symbol": symbol,
+                "name": row.get("name") or symbol,
+                "action": "watch",
+                "up_prob": 0.55,
+                "dd_prob": 0.25,
+                "confidence_level": "medium",
+                "horizon_days": 15,
+                "expected_return_pct": 3.0,
+                "expected_edge_pct": 1.2,
+                "profit_factor_proxy": 1.2,
+                "entry_range": [10.0, 10.2],
+                "take_profit": 11.0,
+                "stop_loss": 9.2,
+                "position_pct": 0.0,
+                "reasons": ["测试候选"],
+                "risks": ["测试风险"],
+                "invalid_conditions": [],
+                "market_metrics": {"turnover_rate": 3.0, "main_net_inflow_yi": 0.5},
+                "score_breakdown": {
+                    "trend": score,
+                    "money_flow": 70.0,
+                    "turnover_liquidity": 70.0,
+                    "quality": 70.0,
+                    "risk_adjusted": 70.0,
+                    "news": 50.0,
+                    "total": score,
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = CoachStore(str(Path(tmpdir) / "coach.db"))
+            service = CoachService(
+                data_source_manager=DataSourceStub(),
+                store=store,
+                news_service=None,
+                universe_max_analyze_count=120,
+            )
+            candidate_rows = [
+                {"symbol": f"000{i:03d}", "name": f"样本{i}", "pre_score": 100 - i * 0.1}
+                for i in range(1, 81)
+            ]
+            service.resolve_pick_calendar_context = lambda **kwargs: {
+                "mode": "trading",
+                "requested_date": "2026-07-05",
+                "effective_trade_date": "2026-07-05",
+                "is_trading_day": True,
+                "actions": {"can_refresh": True, "can_paper_buy": False, "can_add_watch": True},
+            }
+            service.get_active_strategy_config = lambda user_id="default": {
+                "strategy_code": "trend_breakout",
+                "profile_key": "test",
+                "config": {
+                    "risk_level": "medium",
+                    "universe_size": 120,
+                    "score_threshold": 0,
+                    "max_positions": 10,
+                    "max_position_pct": 10,
+                },
+            }
+            service.get_risk_profile = lambda user_id="default": {
+                "risk_level": "medium",
+                "max_position_pct": 10,
+                "max_industry_pct": 30,
+            }
+            service.get_market_state_today = lambda: {
+                "state_tag": "neutral",
+                "state_score": 55.0,
+                "drivers": {},
+                "reasons": [],
+            }
+            service._build_dynamic_candidates = lambda level, target_size=None, strategy_code="trend_breakout": {
+                "candidates": candidate_rows,
+                "meta": {"source": "test", "candidate_count": len(candidate_rows)},
+            }
+            service._build_pick = fake_pick
+
+            result = service.get_today_picks(max_count=60, user_id="default", risk_level="medium")
+
+        self.assertEqual(len(result["picks"]), 60)
+        self.assertEqual(result["universe_meta"]["analyzed_count"], 80)
+        self.assertEqual(result["universe_meta"]["display_cap"], 60)
+        self.assertEqual(result["picks"][0]["rank_no"], 1)
+        self.assertEqual(result["picks"][-1]["rank_no"], 60)
+
     def test_market_news_exception_is_logged_and_marked_unavailable(self):
         class DataSourceStub:
             def get_realtime_quote(self, symbol):
@@ -398,15 +608,15 @@ class CoachServiceObservabilityTests(unittest.TestCase):
         self.assertIn("进入最终候选输出", report["items_by_symbol"]["000001"]["reasons"])
         self.assertEqual(report["items_by_symbol"]["000002"]["last_layer"], "basic_filter")
         self.assertIn("ST/退市名称过滤", report["items_by_symbol"]["000002"]["reasons"])
-        self.assertIn("成交额低于阈值", "；".join(report["items_by_symbol"]["000003"]["reasons"]))
+        self.assertIn("成交额低于最低安全阈值", "；".join(report["items_by_symbol"]["000003"]["reasons"]))
         self.assertEqual(report["items_by_symbol"]["900001"]["last_layer"], "full_market")
         self.assertEqual(report["rejection_summary"]["ST/退市名称过滤"], 1)
-        self.assertEqual(report["rejection_summary"]["成交额低于阈值"], 1)
+        self.assertEqual(report["rejection_summary"]["成交额低于最低安全阈值"], 1)
         self.assertEqual(report["rejection_summary"]["非A股股票代码过滤"], 1)
-        self.assertEqual(report["filter_policy"]["status"], "legacy_hard_filter")
+        self.assertEqual(report["filter_policy"]["status"], "softened_recall_filters")
         self.assertFalse(report["filter_policy"]["evidence_validated"])
-        self.assertIn("不代表已通过样本外验证的最优过滤", report["filter_policy"]["message"])
-        self.assertIn("成交额低于阈值", report["filter_policy"]["hard_filter_reasons"])
+        self.assertIn("已放宽历史硬过滤", report["filter_policy"]["message"])
+        self.assertIn("成交额低于最低安全阈值", report["filter_policy"]["hard_filter_reasons"])
         self.assertIn("价格低于阈值", report["filter_policy"]["hard_filter_reasons"])
 
     def test_universe_funnel_defaults_to_previous_trading_snapshot_on_weekend(self):

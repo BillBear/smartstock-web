@@ -250,11 +250,24 @@ def _experiment_config(experiment_key: str) -> Dict[str, Any]:
 
 def _risk_rules(risk_level: str) -> Dict[str, Any]:
     level = str(risk_level or "medium").lower()
-    base = {"min_amount_yi": 2.0, "min_turnover_rate": 0.8, "max_turnover_rate": 20.0, "max_abs_pct_change": 12.0, "min_price": 2.0}
+    base = {
+        "min_amount_yi": 0.5,
+        "min_turnover_rate": 0.2,
+        "max_turnover_rate": 45.0,
+        "max_abs_pct_change": 30.0,
+        "min_price": 1.0,
+    }
     if level == "low":
-        return {**base, "min_amount_yi": 4.0, "max_turnover_rate": 12.0, "max_abs_pct_change": 8.0}
+        return {**base, "min_amount_yi": 1.0, "max_turnover_rate": 35.0, "max_abs_pct_change": 20.0}
     if level == "high":
-        return {**base, "min_amount_yi": 1.0, "min_turnover_rate": 0.5, "max_turnover_rate": 35.0, "max_abs_pct_change": 15.0, "min_price": 1.6}
+        return {
+            **base,
+            "min_amount_yi": 0.3,
+            "min_turnover_rate": 0.1,
+            "max_turnover_rate": 60.0,
+            "max_abs_pct_change": 40.0,
+            "min_price": 0.8,
+        }
     return base
 
 

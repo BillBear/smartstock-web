@@ -209,10 +209,10 @@ class CoachService:
         today_picks_cache_ttl_seconds: int = 0,
         universe_refresh_seconds: int = 1200,
         universe_intraday_refresh_seconds: int = 90,
-        universe_min_amount_yi: float = 2.0,
-        universe_max_analyze_count: int = 60,
-        universe_industry_cap: int = 3,
-        universe_min_price: float = 2.0,
+        universe_min_amount_yi: float = 0.5,
+        universe_max_analyze_count: int = 240,
+        universe_industry_cap: int = 8,
+        universe_min_price: float = 1.0,
     ):
         self.data_source_manager = data_source_manager
         self.store = store
@@ -226,10 +226,10 @@ class CoachService:
         self._today_picks_cache_ttl_seconds = max(0, int(today_picks_cache_ttl_seconds or 0))
         self._universe_refresh_seconds = max(60, int(universe_refresh_seconds or 1200))
         self._universe_intraday_refresh_seconds = max(15, int(universe_intraday_refresh_seconds or 90))
-        self._universe_min_amount_yi = max(0.1, float(universe_min_amount_yi or 2.0))
-        self._universe_max_analyze_count = max(20, min(int(universe_max_analyze_count or 60), 200))
-        self._universe_industry_cap = max(1, min(int(universe_industry_cap or 3), 8))
-        self._universe_min_price = max(0.1, float(universe_min_price or 2.0))
+        self._universe_min_amount_yi = max(0.1, float(universe_min_amount_yi or 0.5))
+        self._universe_max_analyze_count = max(60, min(int(universe_max_analyze_count or 240), 500))
+        self._universe_industry_cap = max(2, min(int(universe_industry_cap or 8), 30))
+        self._universe_min_price = max(0.1, float(universe_min_price or 1.0))
         self._universe_lock = RLock()
         self._universe_state: Dict[str, Any] = {
             "entries": [],
@@ -531,34 +531,43 @@ class CoachService:
         return "未知行业"
 
     def _get_universe_rules(self, risk_level: str) -> Dict[str, Any]:
+        configured = {
+            "configured_min_amount_yi": round(self._universe_min_amount_yi, 4),
+            "configured_min_price": round(self._universe_min_price, 4),
+            "filter_policy": "softened_recall_filters",
+            "policy_note": "硬过滤只保留基础可交易安全约束，成交额、换手率和波动更多交给评分与风控处理。",
+        }
         if risk_level == "low":
             return {
-                "min_amount_yi": max(self._universe_min_amount_yi, 4.0),
-                "min_turnover_rate": 0.8,
-                "max_turnover_rate": 12.0,
-                "max_abs_pct_change": 8.0,
-                "max_analyze_count": min(max(self._universe_max_analyze_count, 90), 120),
-                "industry_cap": self._universe_industry_cap,
-                "min_price": self._universe_min_price,
+                **configured,
+                "min_amount_yi": min(self._universe_min_amount_yi, 1.0),
+                "min_turnover_rate": 0.2,
+                "max_turnover_rate": 35.0,
+                "max_abs_pct_change": 20.0,
+                "max_analyze_count": max(self._universe_max_analyze_count, 180),
+                "industry_cap": max(self._universe_industry_cap, 6),
+                "min_price": min(self._universe_min_price, 1.0),
             }
         if risk_level == "high":
             return {
-                "min_amount_yi": max(self._universe_min_amount_yi * 0.5, 1.0),
-                "min_turnover_rate": 0.5,
-                "max_turnover_rate": 35.0,
-                "max_abs_pct_change": 15.0,
-                "max_analyze_count": min(max(self._universe_max_analyze_count + 60, 140), 200),
-                "industry_cap": min(self._universe_industry_cap + 1, 8),
-                "min_price": max(self._universe_min_price * 0.8, 1.0),
+                **configured,
+                "min_amount_yi": min(self._universe_min_amount_yi, 0.3),
+                "min_turnover_rate": 0.1,
+                "max_turnover_rate": 60.0,
+                "max_abs_pct_change": 40.0,
+                "max_analyze_count": max(self._universe_max_analyze_count, 320),
+                "industry_cap": max(self._universe_industry_cap, 12),
+                "min_price": min(self._universe_min_price, 0.8),
             }
         return {
-            "min_amount_yi": self._universe_min_amount_yi,
-            "min_turnover_rate": 0.8,
-            "max_turnover_rate": 20.0,
-            "max_abs_pct_change": 12.0,
-            "max_analyze_count": max(self._universe_max_analyze_count, 120),
-            "industry_cap": self._universe_industry_cap,
-            "min_price": self._universe_min_price,
+            **configured,
+            "min_amount_yi": min(self._universe_min_amount_yi, 0.5),
+            "min_turnover_rate": 0.2,
+            "max_turnover_rate": 45.0,
+            "max_abs_pct_change": 30.0,
+            "max_analyze_count": max(self._universe_max_analyze_count, 240),
+            "industry_cap": max(self._universe_industry_cap, 8),
+            "min_price": min(self._universe_min_price, 1.0),
         }
 
     def _get_universe_snapshot(self, force: bool = False) -> List[Dict[str, Any]]:
@@ -687,7 +696,7 @@ class CoachService:
             }
 
         rules = self._get_universe_rules(risk_level)
-        target_candidate_size = max(30, min(int(target_size or rules["max_analyze_count"]), 220))
+        target_candidate_size = max(60, min(max(int(target_size or 0), int(rules["max_analyze_count"])), 500))
         strategy = self._normalize_strategy_code(strategy_code)
         filtered: List[Dict[str, Any]] = []
         industries = set()
@@ -758,7 +767,7 @@ class CoachService:
         for row in filtered:
             by_industry.setdefault(row.get("industry", "未知行业"), []).append(row)
         diversified: List[Dict[str, Any]] = []
-        dynamic_industry_cap = max(rules["industry_cap"], min(10, max(2, target_candidate_size // 28)))
+        dynamic_industry_cap = max(rules["industry_cap"], min(30, max(4, target_candidate_size // 15)))
         for industry_rows in by_industry.values():
             industry_rows.sort(key=lambda x: x.get("pre_score", 0), reverse=True)
             diversified.extend(industry_rows[: dynamic_industry_cap])
@@ -856,7 +865,7 @@ class CoachService:
                 fallback_meta.setdefault("data_coverage_status", snapshot_meta.get("data_coverage_status") or "cached_universe_snapshot")
                 snapshot_meta = fallback_meta
         rules = self._get_universe_rules(level)
-        target_candidate_size = max(30, min(int(rules.get("max_analyze_count") or 120), 220))
+        target_candidate_size = max(60, min(int(rules.get("max_analyze_count") or 240), 500))
         industry_map = self.data_source_manager.get_stock_industry_map()
         items_by_symbol: Dict[str, Dict[str, Any]] = {}
         filtered: List[Dict[str, Any]] = []
@@ -866,9 +875,9 @@ class CoachService:
             "非A股股票代码过滤",
             "ST/退市名称过滤",
             "价格低于阈值",
-            "成交额低于阈值",
-            "换手率不在阈值内",
-            "涨跌幅绝对值超过阈值",
+            "成交额低于最低安全阈值",
+            "换手率不在最低安全阈值内",
+            "涨跌幅绝对值超过数据质量阈值",
         ]
 
         def reject(item: Dict[str, Any], reason_key: str, detail: str) -> None:
@@ -911,7 +920,7 @@ class CoachService:
                 continue
             amount_yi = self._safe_float(row.get("amount"), 0) / 100000000
             if amount_yi < rules["min_amount_yi"]:
-                reject(item, "成交额低于阈值", f"成交额低于阈值 {rules['min_amount_yi']} 亿")
+                reject(item, "成交额低于最低安全阈值", f"成交额低于最低安全阈值 {rules['min_amount_yi']} 亿")
                 continue
             turnover_rate = self._safe_float(row.get("turnover_rate"), 0)
             if turnover_rate <= 0:
@@ -924,13 +933,13 @@ class CoachService:
             if turnover_rate < rules["min_turnover_rate"] or turnover_rate > rules["max_turnover_rate"]:
                 reject(
                     item,
-                    "换手率不在阈值内",
-                    f"换手率不在阈值 {rules['min_turnover_rate']} - {rules['max_turnover_rate']} 内",
+                    "换手率不在最低安全阈值内",
+                    f"换手率不在最低安全阈值 {rules['min_turnover_rate']} - {rules['max_turnover_rate']} 内",
                 )
                 continue
             pct_change = self._safe_float(row.get("pct_change"), 0)
             if abs(pct_change) > rules["max_abs_pct_change"]:
-                reject(item, "涨跌幅绝对值超过阈值", f"涨跌幅绝对值超过阈值 {rules['max_abs_pct_change']}%")
+                reject(item, "涨跌幅绝对值超过数据质量阈值", f"涨跌幅绝对值超过数据质量阈值 {rules['max_abs_pct_change']}%")
                 continue
 
             if turnover_rate <= 2:
@@ -969,7 +978,7 @@ class CoachService:
         for row in filtered:
             by_industry.setdefault(row.get("industry", "未知行业"), []).append(row)
         diversified: List[Dict[str, Any]] = []
-        dynamic_industry_cap = max(rules["industry_cap"], min(10, max(2, target_candidate_size // 28)))
+        dynamic_industry_cap = max(rules["industry_cap"], min(30, max(4, target_candidate_size // 15)))
         for industry_rows in by_industry.values():
             industry_rows.sort(key=lambda x: x.get("pre_score", 0), reverse=True)
             diversified.extend(industry_rows[: dynamic_industry_cap])
@@ -1060,12 +1069,12 @@ class CoachService:
             "rules": {**rules, "strategy_target_size": target_candidate_size, "industry_cap_effective": dynamic_industry_cap},
             "rejection_summary": dict(sorted(rejection_summary.items(), key=lambda item: (-item[1], item[0]))),
             "filter_policy": {
-                "status": "legacy_hard_filter",
+                "status": "softened_recall_filters",
                 "evidence_validated": False,
-                "message": "当前漏斗包含历史硬过滤门槛，不代表已通过样本外验证的最优过滤；放宽或移除这些门槛会改变生产候选，必须先完成 ranking evaluation 和 baseline 回测。",
+                "message": "当前漏斗已放宽历史硬过滤，更多依赖评分排序和交易门禁；该策略仍未通过样本外生产准入。",
                 "hard_filter_reasons": hard_filter_reasons,
                 "selection_reasons": ["行业分散上限", "未进入Top召回池", "最终输出来自已保存 pick_snapshots"],
-                "final_output_note": "最终输出数量来自后端刷新时保存的候选快照，不是前端展示上限；当前只读诊断不会补生成更多股票。",
+                "final_output_note": "最终输出数量来自后端刷新时保存的候选快照；当前只读诊断不会补生成更多股票。",
             },
             "industry_count": len(industries),
             "items": items[:capped_limit],
@@ -2877,7 +2886,7 @@ class CoachService:
                 requested_date=requested_date,
                 trade_date=trade_date,
             )
-        max_count = max(1, min(max_count, 40))
+        max_count = max(1, min(max_count, 120))
 
         active_strategy = self.get_active_strategy_config(user_id=user_id)
         strategy_code = self._normalize_strategy_code((active_strategy or {}).get("strategy_code"))
@@ -2945,15 +2954,20 @@ class CoachService:
 
         # 根据策略配置扩大深度分析池，避免只分析过小样本导致高分不够可靠。
         if level == "high":
-            analyze_budget = max(max_count * 4, int(target_universe_size * 0.45), 60)
+            analyze_budget = max(max_count * 2, int(target_universe_size * 0.70), 80)
+            analyze_cap = 140
         elif level == "low":
-            analyze_budget = max(max_count * 3, int(target_universe_size * 0.35), 36)
+            analyze_budget = max(max_count * 2, int(target_universe_size * 0.55), 60)
+            analyze_cap = 100
         else:
-            analyze_budget = max(max_count * 4, int(target_universe_size * 0.40), 48)
-        analyze_budget = min(len(candidate_rows), max(24, min(analyze_budget, 72)))
+            analyze_budget = max(max_count * 2, int(target_universe_size * 0.65), 72)
+            analyze_cap = 120
+        analyze_budget = min(len(candidate_rows), max(24, min(analyze_budget, analyze_cap)))
         candidate_rows = candidate_rows[: analyze_budget]
         if isinstance(universe_meta, dict):
             universe_meta["analyzed_count"] = len(candidate_rows)
+            universe_meta["analysis_budget"] = analyze_budget
+            universe_meta["analysis_cap"] = analyze_cap
 
         max_workers = min(6, max(1, len(candidate_rows)))
         futures = []
@@ -3015,6 +3029,7 @@ class CoachService:
 
         self._calibrate_pick_scores(picks, market_state)
         picks = self._apply_risk_specific_selection(picks, level)
+        display_pool = list(picks)
         effective_score_threshold: Optional[float] = None
         if 50 <= score_threshold <= 95:
             risk_threshold_adjust = 4.0 if level == "low" else (-6.0 if level == "high" else 0.0)
@@ -3034,16 +3049,31 @@ class CoachService:
                 if len(relaxed_picks) > len(threshold_picks):
                     threshold_picks = relaxed_picks
                     effective_score_threshold = relaxed_threshold
-            picks = threshold_picks
+            threshold_ids = {id(p) for p in threshold_picks}
+            for pick in display_pool:
+                if id(pick) in threshold_ids:
+                    continue
+                pick["action"] = "watch"
+                pick["position_pct"] = 0.0
+                pick["score_gate_status"] = "below_effective_threshold"
+                pick.setdefault("risks", [])
+                if "未达到当前策略分数阈值，仅展示为观察候选" not in pick["risks"]:
+                    pick["risks"].insert(0, "未达到当前策略分数阈值，仅展示为观察候选")
+                pick.setdefault("reasons", [])
+                if effective_score_threshold is not None:
+                    pick["reasons"].append(f"低于生效阈值 {round(effective_score_threshold, 2)}，不进入交易计划")
+            picks = display_pool
 
         # 保留更宽的排序结果，智能选股页可展示更完整候选池。
         max_positions = int(self._safe_float(strategy_config.get("max_positions"), 5))
         if level == "low":
-            display_cap = max(8, min(18, max_positions * 4))
+            display_cap = max(20, min(max_count, 80, max_positions * 8))
         elif level == "high":
-            display_cap = max(20, min(40, max_positions * 8))
+            display_cap = max(40, min(max_count, 120, max_positions * 12))
         else:
-            display_cap = max(12, min(30, max_positions * 6))
+            display_cap = max(30, min(max_count, 100, max_positions * 10))
+        if isinstance(universe_meta, dict):
+            universe_meta["display_cap"] = display_cap
         all_picks = picks[:display_cap]
         if pending_rows and len(all_picks) < display_cap:
             existing_symbols = {str(item.get("symbol") or "") for item in all_picks}

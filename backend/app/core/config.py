@@ -59,10 +59,10 @@ class Settings(BaseSettings):
     COACH_PICKS_CACHE_TTL_SECONDS: int = 30
     COACH_UNIVERSE_REFRESH_SECONDS: int = 1200
     COACH_UNIVERSE_INTRADAY_REFRESH_SECONDS: int = 90
-    COACH_UNIVERSE_MIN_AMOUNT_YI: float = 2.0
-    COACH_UNIVERSE_MAX_ANALYZE_COUNT: int = 120
-    COACH_UNIVERSE_INDUSTRY_CAP: int = 4
-    COACH_UNIVERSE_MIN_PRICE: float = 2.0
+    COACH_UNIVERSE_MIN_AMOUNT_YI: float = 0.5
+    COACH_UNIVERSE_MAX_ANALYZE_COUNT: int = 240
+    COACH_UNIVERSE_INDUSTRY_CAP: int = 8
+    COACH_UNIVERSE_MIN_PRICE: float = 1.0
     MODEL_ARTIFACT_ROOT: str = str(Path(__file__).resolve().parents[2] / "data" / "ml_models")
     STRATEGY_EVIDENCE_ROOT: str = str(Path(__file__).resolve().parents[3] / "docs" / "strategy-evidence")
     LOG_DIR: str = str(Path(__file__).resolve().parents[3] / "runtime" / "logs")
