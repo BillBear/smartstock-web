@@ -233,6 +233,29 @@ class AShareMLEffectivenessTests(unittest.TestCase):
         self.assertIn("label_profit_quality_10d", decision["allowed_primary_labels"])
         self.assertIn("ma_gap_ablation", decision["feature_groups_blocked"])
 
+    def test_summary_requires_feature_margin_over_simple_baseline_before_training(self):
+        from app.evaluation.a_share_ml_effectiveness import summarize_audit_decision
+
+        decision = summarize_audit_decision(
+            {
+                "baseline_comparison": {
+                    "random_daily_rank": {"top5_return_after_cost": 0.9, "precision_at_5": 0.1},
+                    "return_60d_rank_desc": {"top5_return_after_cost": 1.67, "precision_at_5": 0.27},
+                },
+                "feature_group_quality": {
+                    "turnover_activity": {"best_top5_return_after_cost": 0.76, "accepted": True},
+                    "trend_momentum": {"best_top5_return_after_cost": 1.72, "accepted": True},
+                },
+                "label_quality": {
+                    "label_profit_quality_10d": {"accepted": True, "primary_allowed": True},
+                    "label_tp_before_sl_10d": {"accepted": False, "primary_allowed": False},
+                },
+            }
+        )
+
+        self.assertEqual(decision["outcome"], "prefer_rule_baseline_over_ml_for_now")
+        self.assertFalse(decision["v2_2_training_allowed"])
+
     def test_cli_writes_audit_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

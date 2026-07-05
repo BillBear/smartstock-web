@@ -492,13 +492,23 @@ def summarize_audit_decision(summary: Dict[str, Any]) -> Dict[str, Any]:
         if value > best_baseline_return:
             best_baseline_return = value
             best_baseline_name = name
-    if allowed_labels and len(accepted_groups) >= 2 and best_baseline_return > random_return:
+    best_group_return = max(
+        [float(item.get("best_top5_return_after_cost") or 0.0) for item in groups.values()],
+        default=-999999.0,
+    )
+    feature_margin_over_baseline = best_group_return - best_baseline_return
+    required_margin_pct = 0.30
+    simple_baseline_is_sufficient = (
+        best_baseline_return > max(0.0, random_return)
+        and feature_margin_over_baseline < required_margin_pct
+    )
+    if allowed_labels and len(accepted_groups) >= 2 and not simple_baseline_is_sufficient and feature_margin_over_baseline >= required_margin_pct:
         outcome = "proceed_to_v2_2_profit_quality_training"
     elif accepted_groups and not allowed_labels:
         outcome = "revise_labels_before_training"
     elif allowed_labels and not accepted_groups:
         outcome = "revise_features_before_training"
-    elif best_baseline_return > max(0.0, random_return):
+    elif simple_baseline_is_sufficient or best_baseline_return > max(0.0, random_return):
         outcome = "prefer_rule_baseline_over_ml_for_now"
     else:
         outcome = "insufficient_evidence_for_price_volume_ml"
@@ -513,6 +523,9 @@ def summarize_audit_decision(summary: Dict[str, Any]) -> Dict[str, Any]:
         "best_baseline": best_baseline_name,
         "best_baseline_top5_return_after_cost": _round(best_baseline_return),
         "random_top5_return_after_cost": _round(random_return),
+        "best_feature_group_top5_return_after_cost": _round(best_group_return),
+        "feature_margin_over_best_baseline": _round(feature_margin_over_baseline),
+        "required_feature_margin_pct": required_margin_pct,
     }
 
 
@@ -627,18 +640,27 @@ def _prepare_metric_frame(
     date_col: str,
     require_numeric_features: bool = True,
 ) -> pd.DataFrame:
-    local = _normalize_frame(df)
-    required = [date_col, label_col, return_col]
-    if any(column not in local.columns for column in required):
+    if df is None or df.empty:
         return pd.DataFrame()
+    feature_list = [str(feature) for feature in features or []]
+    required = [date_col, label_col, return_col]
+    if any(column not in df.columns for column in required):
+        return pd.DataFrame()
+    if require_numeric_features and any(feature not in df.columns for feature in feature_list):
+        return pd.DataFrame()
+    optional = ["symbol", "future_max_drawdown_10d_pct", "market_regime", "liquidity_regime"]
+    columns = list(dict.fromkeys([*required, *feature_list, *[column for column in optional if column in df.columns]]))
+    local = df.loc[:, columns].copy()
+    local[date_col] = pd.to_datetime(local[date_col], errors="coerce").dt.strftime("%Y-%m-%d")
+    local = local[local[date_col].notna()].copy()
+    if "symbol" in local.columns:
+        local["symbol"] = local["symbol"].astype(str).str.zfill(6)
     for column in [label_col, return_col]:
         local[column] = _num(local[column])
     if require_numeric_features:
-        for feature in features:
-            if feature not in local.columns:
-                return pd.DataFrame()
+        for feature in feature_list:
             local[feature] = _num(local[feature])
-        local = local.dropna(subset=[date_col, label_col, return_col, *features])
+        local = local.dropna(subset=[date_col, label_col, return_col, *feature_list])
     return local.dropna(subset=[date_col, label_col, return_col])
 
 
