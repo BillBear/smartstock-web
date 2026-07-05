@@ -110,3 +110,25 @@ docs/strategy-evidence/ml-readiness/2026-07-04-training-dataset-audit.md
 ```text
 docs/strategy-evidence/ml-readiness/local-core-v2-1-formal-700-v1-report.md
 ```
+
+2026-07-06 A 股 ML 有效性审查结论：
+
+- 运行样本：`238237` 行、`700` 只股票、`342` 个交易日期。
+- 结论：`prefer_rule_baseline_over_ml_for_now`。
+- 生产模型状态：`paper_only`。
+- V2.2 训练允许：`false`。
+- 允许作为后续候选标签：`label_rank_top10_10d`、`label_alpha_top20_10d`、`label_profit_quality_10d`、`label_wave_quality_20d`。
+- 明确拒绝主标签：`label_tp_before_sl_10d`，只能作为 timing/risk 辅助。
+- 暂时允许继续观察的特征组：`turnover_activity`、`trend_momentum`。
+- 暂时阻塞的特征组：`amount_liquidity`、`technical_basic`、`ma_gap_ablation`、`risk_reversal`、`regime_interaction`。
+- 最强简单 baseline：`return_60d_rank_desc`，after-cost Top5 return `1.670838`。
+- 最强特征组：`trend_momentum`，after-cost Top5 return `1.717467`。
+- 二者差距：`0.046629`，低于继续训练所需的 `0.30` 门槛。
+
+因此当前不继续做 V2.2 训练。下一步应先把 `return_60d_rank_desc` 作为硬 baseline，并补齐主题/行业相对强度和市场状态特征证据。
+
+详见：
+
+```text
+docs/strategy-evidence/ml-readiness/a-share-ml-effectiveness-audit.md
+```

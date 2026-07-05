@@ -12,6 +12,7 @@ Current readiness summary:
 - [Local Core v2 formal 700 training report](local-core-v2-formal-700-v4-training-report.md)
 - [Local Core v2 formal 700 diagnostics](local-core-v2-formal-700-v4-diagnostics.md)
 - [Local Core v2.1 formal 700 report](local-core-v2-1-formal-700-v1-report.md)
+- [A-share ML effectiveness audit](a-share-ml-effectiveness-audit.md)
 
 ## Production Minimums
 
@@ -61,6 +62,11 @@ The latest offline V2.1 matrix also remains `paper_only`: it found that
 best return-positive candidate still missed the consistent Precision@5 gate.
 The next run should change the objective toward profit-quality labeling rather
 than adding model complexity.
+
+The 2026-07-06 A-share ML effectiveness audit blocks immediate V2.2 training:
+the simple `return_60d_rank_desc` baseline is too strong relative to the best
+feature-group margin. Future ML runs must beat that rule baseline after explicit
+cost assumptions before promotion.
 
 ## Training Dataset Audit
 
