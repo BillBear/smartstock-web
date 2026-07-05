@@ -96,3 +96,17 @@ docs/strategy-evidence/ml-readiness/2026-07-04-training-dataset-audit.md
 最新审计结果显示：当前最新全 A 快照为 `2026-07-03`，数量 `5210`，股票数、板块和行业覆盖已经达标；但满足全市场阈值的历史快照日期只有 `18` 个，按 `sample_step=3` 估算样本数 `31260`，低于 `100000` 最低要求。因此 `dataset_build_ready=false`，还不能训练新的生产候选模型。
 
 在新模型通过样本外证据前，前端和 API 必须继续把模型概率标记为 `弱模型参考`。
+
+2026-07-05 离线 V2.1 矩阵补充结论：
+
+- 运行 `72` 个 label / feature group / sample weight / stock-holdout seed 组合。
+- `label_tp_before_sl_10d` 的 Precision@5 最高，但股票 holdout 和 walk-forward Top-K 收益经常为负，不能作为主训练目标。
+- 收益对齐后的最佳组合为 `label_rank_top10_10d__v2_no_redundant__date_stock_balanced__seed20260704`，模型为 `decision_tree_shallow`。
+- 该组合股票 holdout P@5 为 `0.198519`，walk-forward P@5 为 `0.199111`，仍低于一致性准入门槛。
+- 结论仍为 `paper_only`，不替换生产模型、不改变智能选股策略。
+
+详见：
+
+```text
+docs/strategy-evidence/ml-readiness/local-core-v2-1-formal-700-v1-report.md
+```

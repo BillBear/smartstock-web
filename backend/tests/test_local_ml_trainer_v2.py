@@ -2,7 +2,7 @@ import unittest
 
 import pandas as pd
 
-from app.evaluation.local_ml_trainer import daily_ranking_metrics, train_local_models
+from app.evaluation.local_ml_trainer import compute_sample_weights, daily_ranking_metrics, train_local_models
 from app.evaluation.ml_splits import build_ml_split_plan
 
 
@@ -72,6 +72,46 @@ class LocalMLTrainerV2Tests(unittest.TestCase):
         self.assertIn("date_count", best["final_holdout"])
         self.assertIn("feature_importance", best)
         self.assertFalse(result["production_enabled"])
+
+    def test_date_stock_balanced_weights_reduce_panel_imbalance(self):
+        frame = pd.DataFrame(
+            [
+                {"date": "2026-01-01", "symbol": "600001"},
+                {"date": "2026-01-01", "symbol": "600001"},
+                {"date": "2026-01-01", "symbol": "600002"},
+                {"date": "2026-01-02", "symbol": "600001"},
+            ]
+        )
+
+        weights = compute_sample_weights(frame, mode="date_stock_balanced")
+
+        self.assertEqual(len(weights), len(frame))
+        self.assertAlmostEqual(float(weights.mean()), 1.0, places=6)
+        self.assertLess(weights.iloc[0], weights.iloc[-1])
+
+    def test_trainer_accepts_balanced_sample_weights(self):
+        df = make_training_frame()
+        split_plan = build_ml_split_plan(
+            df,
+            final_holdout_months=1,
+            stock_holdout_ratio=0.2,
+            walk_forward_splits=2,
+            label_horizon_days=5,
+            stock_holdout_seed=11,
+        )
+
+        result = train_local_models(
+            df,
+            feature_names=["feature_strength", "feature_noise"],
+            label_col="label_rank_top10_10d",
+            return_col="future_return_10d_pct",
+            split_plan=split_plan,
+            candidate_set="core_v2",
+            sample_weight_mode="date_stock_balanced",
+        )
+
+        self.assertEqual(result["sample_weight_mode"], "date_stock_balanced")
+        self.assertEqual(result["models"]["decision_tree_shallow"]["status"], "trained")
 
 
 if __name__ == "__main__":

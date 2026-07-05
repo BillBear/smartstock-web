@@ -33,6 +33,19 @@ class MLSplitEmbargoTests(unittest.TestCase):
             self.assertLessEqual(max_window_train_index, first_validation_index - 6)
             self.assertTrue(window["embargo_dates"])
 
+    def test_stock_holdout_seed_changes_symbol_holdout_deterministically(self):
+        dates = pd.date_range("2026-01-01", periods=140, freq="D").strftime("%Y-%m-%d")
+        symbols = [f"600{idx:03d}" for idx in range(40)]
+        rows = [{"date": date, "symbol": symbol} for date in dates for symbol in symbols]
+        df = pd.DataFrame(rows)
+
+        plan_a = build_ml_split_plan(df, stock_holdout_ratio=0.2, stock_holdout_seed=1)
+        plan_b = build_ml_split_plan(df, stock_holdout_ratio=0.2, stock_holdout_seed=2)
+        plan_a2 = build_ml_split_plan(df, stock_holdout_ratio=0.2, stock_holdout_seed=1)
+
+        self.assertEqual(plan_a["stock_holdout"]["symbols"], plan_a2["stock_holdout"]["symbols"])
+        self.assertNotEqual(plan_a["stock_holdout"]["symbols"], plan_b["stock_holdout"]["symbols"])
+
 
 if __name__ == "__main__":
     unittest.main()

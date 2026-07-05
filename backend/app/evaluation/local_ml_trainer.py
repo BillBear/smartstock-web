@@ -24,6 +24,7 @@ def train_local_models(
     model_metadata: Optional[Dict[str, Any]] = None,
     prediction_output_path: str | Path | None = None,
     candidate_set: str = "default",
+    sample_weight_mode: str = "none",
 ) -> Dict[str, Any]:
     if df is None or df.empty:
         raise ValueError("local ML training requires a non-empty dataset")
@@ -46,7 +47,8 @@ def train_local_models(
     for name, factory in candidates.items():
         try:
             model = factory(train_df[label_col].astype(int).to_numpy())
-            _fit_model(model, _x(train_df, feature_names), train_df[label_col].astype(int))
+            train_weights = compute_sample_weights(train_df, mode=sample_weight_mode)
+            _fit_model(model, _x(train_df, feature_names), train_df[label_col].astype(int), sample_weight=train_weights)
             final_metrics = _evaluate_model(model, final_holdout_df, feature_names, label_col, return_col)
             stock_metrics = _evaluate_model(model, stock_holdout_df, feature_names, label_col, return_col)
             walk_metrics = _walk_forward_metrics(
@@ -56,6 +58,7 @@ def train_local_models(
                 feature_names,
                 label_col,
                 return_col,
+                sample_weight_mode,
             )
             models[name] = {
                 "status": "trained",
@@ -97,6 +100,7 @@ def train_local_models(
     result = {
         "production_enabled": False,
         "status": "paper_only",
+        "sample_weight_mode": sample_weight_mode,
         "best_model": best_model,
         "models": models,
         "split_summary": _split_summary(split_plan),
@@ -238,6 +242,7 @@ def _walk_forward_metrics(
     feature_names: List[str],
     label_col: str,
     return_col: str,
+    sample_weight_mode: str = "none",
 ) -> Dict[str, Any]:
     windows = (split_plan.get("walk_forward") or {}).get("windows") or []
     frames = []
@@ -250,7 +255,8 @@ def _walk_forward_metrics(
         if train.empty or validation.empty:
             continue
         model = factory(train[label_col].astype(int).to_numpy())
-        _fit_model(model, _x(train, feature_names), train[label_col].astype(int))
+        weights = compute_sample_weights(train, mode=sample_weight_mode)
+        _fit_model(model, _x(train, feature_names), train[label_col].astype(int), sample_weight=weights)
         scored = validation[[label_col, return_col]].copy()
         scored["date"] = validation["date"].astype(str)
         scored["_prob"] = _predict_class1(model, _x(validation, feature_names))
@@ -389,10 +395,22 @@ def _x(df: pd.DataFrame, feature_names: List[str]) -> pd.DataFrame:
     return df[feature_names].replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(float)
 
 
-def _fit_model(model: Any, x: pd.DataFrame, y: pd.Series) -> None:
+def _fit_model(model: Any, x: pd.DataFrame, y: pd.Series, sample_weight: Optional[pd.Series] = None) -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
-        model.fit(x, y)
+        if sample_weight is None:
+            model.fit(x, y)
+            return
+        if hasattr(model, "named_steps"):
+            try:
+                model.fit(x, y, model__sample_weight=np.asarray(sample_weight, dtype=float))
+                return
+            except TypeError:
+                pass
+        try:
+            model.fit(x, y, sample_weight=np.asarray(sample_weight, dtype=float))
+        except TypeError:
+            model.fit(x, y)
 
 
 def _predict_class1(model: Any, x: pd.DataFrame) -> np.ndarray:
@@ -491,6 +509,24 @@ def _mean(values: List[float]) -> float:
     return round(float(np.mean(values)), 6)
 
 
+def compute_sample_weights(df: pd.DataFrame, mode: str = "none") -> Optional[pd.Series]:
+    if df is None or df.empty or str(mode or "none") == "none":
+        return None
+    local = df.copy()
+    weights = pd.Series(1.0, index=local.index, dtype=float)
+    mode_text = str(mode)
+    if "date" in mode_text:
+        date_counts = local["date"].astype(str).map(local["date"].astype(str).value_counts()).astype(float)
+        weights = weights / date_counts.replace(0, np.nan).fillna(1.0)
+    if "stock" in mode_text or "symbol" in mode_text:
+        symbol_counts = local["symbol"].astype(str).map(local["symbol"].astype(str).value_counts()).astype(float)
+        weights = weights / symbol_counts.replace(0, np.nan).fillna(1.0)
+    mean = float(weights.mean()) if len(weights) else 1.0
+    if mean <= 0 or not np.isfinite(mean):
+        return pd.Series(1.0, index=local.index, dtype=float)
+    return weights / mean
+
+
 def _extract_feature_importance(model: Any, feature_names: List[str]) -> List[Dict[str, Any]]:
     estimator = model
     if hasattr(model, "named_steps"):
@@ -522,23 +558,26 @@ class SimpleScorecardClassifier:
         self.intercept_: float = 0.0
         self.classes_ = np.array([0, 1])
 
-    def fit(self, x: pd.DataFrame, y: pd.Series):
-        local = pd.DataFrame(x).astype(float)
+    def fit(self, x: pd.DataFrame, y: pd.Series, sample_weight: Optional[np.ndarray] = None):
+        local = pd.DataFrame(x).astype(float).reset_index(drop=True)
         target = pd.Series(y).astype(int).reset_index(drop=True)
+        row_weights = pd.Series(sample_weight, dtype=float).reset_index(drop=True) if sample_weight is not None else pd.Series(1.0, index=target.index)
         self.feature_names_in_ = [str(column) for column in local.columns]
         self.medians_ = local.median().fillna(0.0).to_numpy(dtype=float)
         q75 = local.quantile(0.75)
         q25 = local.quantile(0.25)
         self.scales_ = (q75 - q25).replace(0, np.nan).fillna(local.std().replace(0, np.nan)).fillna(1.0).to_numpy(dtype=float)
-        weights = []
+        feature_weights = []
         for column in local.columns:
-            corr = local[column].corr(target, method="spearman")
-            weights.append(0.0 if pd.isna(corr) else float(corr))
-        weights_array = np.asarray(weights, dtype=float)
+            values = local[column].rank(pct=True).fillna(0.5)
+            pos_mean = _weighted_mean(values[target == 1], row_weights[target == 1])
+            neg_mean = _weighted_mean(values[target == 0], row_weights[target == 0])
+            feature_weights.append(float(pos_mean - neg_mean))
+        weights_array = np.asarray(feature_weights, dtype=float)
         if np.sum(np.abs(weights_array)) > 0:
             weights_array = weights_array / np.sum(np.abs(weights_array))
         self.feature_scores_ = weights_array
-        positive_rate = min(0.99, max(0.01, float(target.mean())))
+        positive_rate = min(0.99, max(0.01, _weighted_mean(target.astype(float), row_weights)))
         self.intercept_ = float(np.log(positive_rate / (1.0 - positive_rate)))
         return self
 
@@ -549,6 +588,16 @@ class SimpleScorecardClassifier:
         score = self.intercept_ + np.dot(z, self.feature_scores_) * 2.5
         prob = 1.0 / (1.0 + np.exp(-np.clip(score, -20, 20)))
         return np.column_stack([1.0 - prob, prob])
+
+
+def _weighted_mean(values: pd.Series, weights: pd.Series) -> float:
+    if values is None or len(values) == 0:
+        return 0.0
+    aligned_weights = weights.reindex(values.index).fillna(1.0)
+    total = float(aligned_weights.sum())
+    if total <= 0:
+        return float(values.mean())
+    return float((values.astype(float) * aligned_weights).sum() / total)
 
 
 def _split_summary(split_plan: Dict[str, Any]) -> Dict[str, Any]:

@@ -17,6 +17,7 @@ def build_ml_split_plan(
     stock_holdout_ratio: float = 0.20,
     walk_forward_splits: int = 5,
     label_horizon_days: int = 0,
+    stock_holdout_seed: int | str = 0,
 ) -> Dict[str, Any]:
     """Build non-overlapping ML split metadata from a dated symbol panel."""
     if df is None or df.empty:
@@ -40,7 +41,7 @@ def build_ml_split_plan(
     if not final_dates or not training_dates:
         raise ValueError("final holdout leaves no training or holdout dates")
 
-    holdout_symbols = _stock_holdout_symbols(symbols, stock_holdout_ratio)
+    holdout_symbols = _stock_holdout_symbols(symbols, stock_holdout_ratio, stock_holdout_seed)
     training_symbols = [symbol for symbol in symbols if symbol not in set(holdout_symbols)]
     if not holdout_symbols or not training_symbols:
         raise ValueError("stock holdout leaves no training or holdout symbols")
@@ -59,6 +60,7 @@ def build_ml_split_plan(
         "stock_holdout": {
             "ratio": round(len(holdout_symbols) / len(symbols), 6),
             "symbol_count": len(holdout_symbols),
+            "seed": str(stock_holdout_seed),
             "symbols": holdout_symbols,
         },
         "walk_forward": {
@@ -78,11 +80,12 @@ def _normalized_dates(values: List[Any]) -> List[str]:
     return dates
 
 
-def _stock_holdout_symbols(symbols: List[str], ratio: float) -> List[str]:
+def _stock_holdout_symbols(symbols: List[str], ratio: float, seed: int | str = 0) -> List[str]:
     bounded_ratio = min(0.8, max(0.0, float(ratio or 0.0)))
     count = max(1, int(round(len(symbols) * bounded_ratio)))
     count = min(count, len(symbols) - 1)
-    ranked = sorted(symbols, key=lambda item: hashlib.sha256(item.encode("utf-8")).hexdigest())
+    salt = str(seed or 0)
+    ranked = sorted(symbols, key=lambda item: hashlib.sha256(f"{salt}:{item}".encode("utf-8")).hexdigest())
     return sorted(ranked[:count])
 
 

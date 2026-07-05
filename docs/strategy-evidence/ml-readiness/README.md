@@ -11,6 +11,7 @@ Current readiness summary:
 - [Local Core v1 label and feature diagnostics](local-core-v1-label-feature-diagnostics.md)
 - [Local Core v2 formal 700 training report](local-core-v2-formal-700-v4-training-report.md)
 - [Local Core v2 formal 700 diagnostics](local-core-v2-formal-700-v4-diagnostics.md)
+- [Local Core v2.1 formal 700 report](local-core-v2-1-formal-700-v1-report.md)
 
 ## Production Minimums
 
@@ -54,6 +55,12 @@ Historical small models, including models trained on tens or hundreds of stocks
 with a short date range, fail this gate. They remain useful for debugging the
 feature pipeline, but they are not reliable enough to present as calibrated
 stock-selection probabilities.
+
+The latest offline V2.1 matrix also remains `paper_only`: it found that
+`label_tp_before_sl_10d` is easy to predict but not profit-aligned, while the
+best return-positive candidate still missed the consistent Precision@5 gate.
+The next run should change the objective toward profit-quality labeling rather
+than adding model complexity.
 
 ## Training Dataset Audit
 
