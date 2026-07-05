@@ -30,6 +30,19 @@ External research anchors:
 - Wu, Wei, and Zhang, [Are Stock Returns Predictable in China? A Machine Learning Approach](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3971419): A-share return predictability must be tested out of sample rather than assumed.
 - Jensen, Kelly, Malamud, and Pedersen, [Machine Learning and the Implementable Efficient Frontier](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4187217): economic objectives and transaction costs can matter more than pure prediction metrics.
 
+## Adversarial Review Corrections
+
+The first version of this plan had directionally correct intent, but several execution assumptions were too loose. These corrections are binding for implementation:
+
+- External papers are hypothesis sources only. They must not be cited as proof that SmartStock's current A-share model works.
+- The V2/V2.1 700-symbol sample is a medium local training panel, not a full-market proof. The audit may decide whether another local training run is justified, but cannot certify production-grade full-market ML.
+- Theme and industry relative strength can only be audited if the sample contains industry/theme columns. If those columns are absent, the report must say `not_available_in_sample` instead of inferring results.
+- Turnover features can only be evaluated when `turnover_rate` or equivalent columns exist. Missing turnover is an evidence gap, not a zero-valued signal.
+- "After costs" must be explicit. The audit uses `round_trip_cost_pct` as a reporting assumption and writes both gross and after-cost Top-K return. It does not change production cost assumptions.
+- "Stock holdout" and "walk-forward" claims require a `split` column or derived walk-forward windows. If a split is missing, the audit must mark split-specific conclusions as `unverified`.
+- A feature group is not "accepted" merely because one bucket or one split looks good. Acceptance requires positive after-cost Top-K return in at least two split views, or a clear statement that available evidence is insufficient.
+- The audit must produce one of the allowed decision outcomes. It cannot end with vague wording such as "promising" without a gate result.
+
 ## Non-Negotiable Rules
 
 - Do not train a new production model in this plan.
@@ -212,6 +225,7 @@ label_rate
 avg_future_return
 median_future_return
 top5_return_when_sorted_by_feature
+top5_return_after_cost_when_sorted_by_feature
 precision_at_5_when_sorted_by_feature
 ndcg_at_10_when_sorted_by_feature
 drawdown_avg
@@ -752,6 +766,7 @@ For each baseline, compute daily top-5 average:
 precision_at_5
 ndcg_at_10
 top5_return
+top5_return_after_cost
 date_count
 covered_date_count
 missing_reason
@@ -888,11 +903,12 @@ The Markdown report must explicitly answer:
 
 ```text
 Do simple price/volume baselines beat random?
-Which feature group has positive stock/walk-forward Top-K return?
+Which feature group has positive available-split Top-K return after explicit cost assumptions?
 Do amount and turnover interval features add lift?
 Do MACD/RSI add lift outside offensive regimes?
 Are MA gap features useful or mostly noisy?
 Which labels are profit-aligned?
+Which claims are unverified because the current sample lacks required columns?
 Does any evidence justify V2.2 training?
 ```
 
@@ -983,7 +999,7 @@ OK
 
 ```bash
 git diff --name-only ml/local-core-v2.1...HEAD | \
-  rg 'coach_service|scoring_service|risk_gate_service|advice_service|ai_decision_service|universe_service|backtest_engine|SmartScreen|api.js' || true
+  rg 'coach_service|scoring_service|risk_gate_service|advice_service|ai_decision_service|universe_service|backtest_engine|SmartScreen|api.js' && exit 1 || true
 ```
 
 Expected: no output, unless the user explicitly approved UI/API display changes in a later task.
@@ -1048,4 +1064,3 @@ The audit may legitimately end with any of these conclusions:
 - It tests whether historical price/volume ML is worth using before spending another night training.
 - It allows an extreme conclusion, but only if the data supports it.
 - It preserves project governance by keeping all production strategy logic unchanged.
-
