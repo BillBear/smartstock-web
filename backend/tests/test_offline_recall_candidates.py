@@ -153,6 +153,41 @@ class OfflineRecallCandidateTests(unittest.TestCase):
         recalled = next(row for row in union["rows"] if row["symbol"] == "000003")
         self.assertIn("pullback_repair", recalled["recall_channels"])
 
+    def test_medium_recall_keeps_formerly_hard_filtered_boundary_candidates(self):
+        items = [
+            _row("000101", amount=60_000_000, turnover=2.4, pct_change=3.2, price=12.0, industry="低成交"),
+            _row("000102", amount=500_000_000, turnover=0.3, pct_change=2.6, price=10.0, industry="低换手"),
+            _row("000103", amount=1_200_000_000, turnover=30.0, pct_change=5.5, price=20.0, industry="高换手"),
+            _row("000104", amount=800_000_000, turnover=6.0, pct_change=18.0, price=18.0, industry="强波动"),
+            _row("000105", amount=700_000_000, turnover=4.0, pct_change=4.0, price=1.2, industry="低价"),
+            _row("000106", name="ST风险样本", amount=900_000_000, turnover=4.0, pct_change=2.0, price=8.0),
+        ]
+        store = SnapshotStoreStub(
+            {
+                "2026-07-02": {
+                    "trade_date": "2026-07-02",
+                    "source": "a_share_snapshot",
+                    "snapshot_count": len(items),
+                    "quality_status": "ok",
+                    "items": items,
+                }
+            }
+        )
+
+        result = generate_offline_recall_rows(
+            store=store,
+            experiment_key="recall_220_deep_150",
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            start_date="2026-07-02",
+            end_date="2026-07-02",
+            max_rows_per_day=10,
+        )
+
+        symbols = {row["symbol"] for row in result["rows"]}
+        self.assertTrue({"000101", "000102", "000103", "000104", "000105"}.issubset(symbols))
+        self.assertNotIn("000106", symbols)
+
     def test_offline_recall_coverage_requires_same_day_market_snapshot(self):
         coverage = offline_recall_coverage(
             requested_dates=["2026-07-02", "2026-07-03"],
