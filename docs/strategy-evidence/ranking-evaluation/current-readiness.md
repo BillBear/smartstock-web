@@ -2,6 +2,10 @@
 
 生成时间：2026-07-03
 
+## Current Blocking Decision
+
+Do not change production ranking yet. The current evidence proves there is ranking weakness, but not yet a safe production replacement.
+
 ## 结论
 
 当前已有真实历史快照 ranking evaluation，不再只是 smoke fixture。但它仍不能作为生产策略准入证据：
