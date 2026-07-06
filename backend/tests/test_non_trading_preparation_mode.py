@@ -187,7 +187,8 @@ class NonTradingPreparationModeTests(unittest.TestCase):
     def test_cached_watch_only_snapshot_summary_does_not_suggest_paper_buy(self):
         trade_date = "2026-07-03"
         watch_pick = sample_pick(trade_date=trade_date, symbol="002294", rank_no=1)
-        watch_pick["action"] = "watch"
+        watch_pick["action"] = "buy"
+        watch_pick["position_pct"] = 10.0
         watch_pick["decision"] = {
             "grade": "C",
             "mode": "watch_only",
@@ -214,6 +215,8 @@ class NonTradingPreparationModeTests(unittest.TestCase):
         self.assertFalse(decision["executable"])
         self.assertNotIn("模拟验证", decision["summary"])
         self.assertIn("加入观察", decision["summary"])
+        self.assertEqual(result["picks"][0]["action"], "watch")
+        self.assertEqual(result["picks"][0]["position_pct"], 0.0)
 
     def test_sparse_risk_snapshot_keeps_complete_same_day_observation_pool(self):
         trade_date = "2026-06-29"
@@ -337,6 +340,49 @@ class NonTradingPreparationModeTests(unittest.TestCase):
         self.assertEqual(result["calendar_context"]["mode"], "preparation")
         self.assertEqual(result["snapshot_dates"], ["2026-06-18"])
         self.assertEqual(result["top_picks"][0]["symbol"], "000001")
+
+    def test_smart_screen_summary_counts_full_cached_pool_not_top_picks_only(self):
+        trade_date = "2026-07-06"
+        picks = []
+        for rank_no, (symbol, grade) in enumerate(
+            [
+                ("000001", "B"),
+                ("000002", "B"),
+                ("000003", "B"),
+                ("000004", "C"),
+                ("000005", "C"),
+                ("000006", "B"),
+            ],
+            start=1,
+        ):
+            pick = sample_pick(trade_date=trade_date, symbol=symbol, rank_no=rank_no)
+            pick["decision"] = {
+                "grade": grade,
+                "mode": "paper_only" if grade == "B" else "watch_only",
+                "executable": grade == "B",
+                "summary": "小仓试错" if grade == "B" else "观察等待",
+            }
+            pick["action"] = "buy" if grade == "B" else "watch"
+            picks.append(pick)
+
+        self.store.upsert_pick_snapshots(
+            user_id="default",
+            trade_date=trade_date,
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            picks=picks,
+        )
+
+        result = self.service.get_smart_screen_summary(
+            user_id="default",
+            risk_level="medium",
+            requested_date=trade_date,
+        )
+
+        self.assertEqual(result["pick_count"], 6)
+        self.assertEqual(len(result["top_picks"]), 5)
+        self.assertEqual(result["trade_plan"]["trial_count"], 4)
+        self.assertEqual(result["trade_plan"]["watch_count"], 2)
 
     def test_cached_only_exposes_same_day_market_snapshot_diagnostics(self):
         self.save_snapshot("2026-07-01")

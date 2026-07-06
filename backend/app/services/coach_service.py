@@ -2720,10 +2720,20 @@ class CoachService:
             decision = pick.get("decision")
             if not isinstance(decision, dict):
                 continue
-            if str(decision.get("mode") or "") != "watch_only":
+            grade = str(decision.get("grade") or "")
+            mode = str(decision.get("mode") or "")
+            is_watch_only = (
+                mode == "watch_only"
+                or decision.get("executable") is False
+                or grade in {"C", "D"}
+            )
+            if not is_watch_only:
                 continue
 
+            decision["mode"] = "watch_only"
             decision["executable"] = False
+            pick["action"] = "pass" if grade == "D" else "watch"
+            pick["position_pct"] = 0.0
             summary = str(decision.get("summary") or "")
             if "模拟验证" in summary or "模拟买入验证" in summary:
                 summary = summary.replace(
@@ -2833,13 +2843,15 @@ class CoachService:
         requested_date: Optional[str] = None,
         trade_date: Optional[str] = None,
     ) -> Dict[str, Any]:
+        summary_pick_limit = 80
         data = self.get_cached_today_picks(
-            max_count=5,
+            max_count=summary_pick_limit,
             user_id=user_id,
             risk_level=risk_level,
             requested_date=requested_date,
             trade_date=trade_date,
         )
+        picks = data.get("picks") or []
         return {
             "status": data.get("status"),
             "trade_date": data.get("trade_date"),
@@ -2850,8 +2862,8 @@ class CoachService:
             "universe_meta": data.get("universe_meta") or {},
             "strategy_context": data.get("strategy_context") or {},
             "trade_plan": data.get("trade_plan") or {},
-            "top_picks": data.get("picks") or [],
-            "pick_count": len(data.get("picks") or []),
+            "top_picks": picks[:5],
+            "pick_count": len(picks),
             "no_trade": data.get("no_trade"),
             "no_trade_reason": data.get("no_trade_reason"),
         }
