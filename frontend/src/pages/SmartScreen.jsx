@@ -27,6 +27,7 @@ import {
   getSmartScreenDiagnostic,
   getUniverseFunnelSummary,
   shouldRefreshCurrentTradingPicks,
+  sortPicksByStrategyScore,
 } from './smartScreenData.mjs'
 import {
   getPickActionPresentation,
@@ -255,6 +256,7 @@ const SmartScreen = () => {
   }, [])
 
   const pickList = useMemo(() => result?.picks || [], [result])
+  const displayPickList = useMemo(() => sortPicksByStrategyScore(pickList), [pickList])
   const marketNews = result?.market_state?.news_context || {}
   const tradePlan = result?.trade_plan || {}
   const coreCandidateCount = Number(tradePlan.core_count || 0)
@@ -273,8 +275,8 @@ const SmartScreen = () => {
     [rankingEvidence, result]
   )
   const tradePlanPickList = useMemo(
-    () => pickList.filter((item) => ['A', 'B'].includes(item?.decision?.grade)),
-    [pickList]
+    () => displayPickList.filter((item) => ['A', 'B'].includes(item?.decision?.grade)),
+    [displayPickList]
   )
   const corePicks = useMemo(() => tradePlanPickList.slice(0, 6), [tradePlanPickList])
   const hiddenCorePickCount = Math.max(0, tradePlanPickList.length - corePicks.length)
@@ -426,7 +428,7 @@ const SmartScreen = () => {
 
   const columns = [
     {
-      title: '排名',
+      title: '原始排名',
       dataIndex: 'rank_no',
       key: 'rank_no',
       width: 72,
@@ -492,6 +494,8 @@ const SmartScreen = () => {
       title: '策略综合分',
       key: 'strategy_score',
       width: 140,
+      defaultSortOrder: 'descend',
+      sorter: (left, right) => Number(left?.score_breakdown?.total || 0) - Number(right?.score_breakdown?.total || 0),
       render: (_, row) => (
         <Progress
           percent={Number(row?.score_breakdown?.total || 0)}
@@ -896,7 +900,7 @@ const SmartScreen = () => {
       <Card className="ranking-card" variant="borderless">
         <div className="ranking-card-title">
           <h3>完整候选池</h3>
-          <span>当前列表 {pickList.length} 只；A/B 级 {tradePlanCandidateCount} 只进入模拟验证口径，C 级 {watchCandidateCount} 只用于观察学习。</span>
+          <span>当前列表 {displayPickList.length} 只，按策略综合分倒序展示；A/B 级 {tradePlanCandidateCount} 只进入模拟验证口径，C 级 {watchCandidateCount} 只用于观察学习。</span>
         </div>
         {result?.no_trade ? (
           <Alert
@@ -909,7 +913,7 @@ const SmartScreen = () => {
             className="ranking-table"
             loading={loading}
             columns={columns}
-            dataSource={pickList}
+            dataSource={displayPickList}
             rowKey="pick_id"
             scroll={{ x: 1500, y: 480 }}
             pagination={{ pageSize: 10, showSizeChanger: false }}
