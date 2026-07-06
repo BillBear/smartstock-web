@@ -132,6 +132,36 @@ skipped_incomplete_metric_row_count: 30
 4. 近期日期标签不完整：2026-07-01 至 2026-07-03 的未来行情窗口尚未完全发生；当前指标已排除这些不完整 horizon，但覆盖不足的问题仍然存在。
 5. 同区间 baseline 回测已能运行，但本次结果为 `closed_roundtrips=0`，不能作为策略通过证据；仍缺少足够长区间的闭环交易 baseline 和 walk-forward 分段结论。
 
+## 2026-07-06 规则 baseline 对照
+
+新增只读规则 baseline 对照工具，用于把当前历史 SmartStock 排名和简单规则排序放到同一样本上比较。首次对照报告：
+
+```text
+docs/strategy-evidence/ranking-evaluation/rule-baseline-comparison-2026-07-06.md
+```
+
+本次对照只覆盖历史 ranking 候选与 V2 700 股训练样本的交集：
+
+```text
+candidate_row_count: 635
+joined_row_count: 46
+joined_date_count: 9
+joined_row_coverage: 0.072441
+joined_date_range: 2026-04-28 to 2026-06-04
+```
+
+公平口径下，所有 baseline 都只在 `trade_date + symbol` 成功 join 的同一批 `46` 行样本上计算。结果：
+
+```text
+current_smartstock_rank top5_return_after_cost: -9.194150
+return_60d_rank_desc top5_return_after_cost:   -9.386594
+return_60d_minus_current_pct:                  -0.192444
+decision: inconclusive_small_margin
+production_evidence: false
+```
+
+这说明 `return_60d_rank_desc` 在当前小交集里没有显著胜过现有 SmartStock 排名，但该结论不能外推到全市场或 2026-07 最新候选池。下一步需要为所有历史候选行补齐同日特征，或从全市场历史快照生成完整候选特征表后再比较。
+
 ## 覆盖诊断
 
 新增只读 coverage audit，用于解释 ranking evaluation 为什么仍被阻塞。该命令只读取已保存快照，不重跑策略、不回填候选池、不改变生产输出：

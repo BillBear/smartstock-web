@@ -46,11 +46,33 @@ same-day versus prior full-market snapshots, and estimated incomplete
 forward-label windows. It must not backfill, regenerate, or alter production
 strategy outputs.
 
+To compare current historical SmartStock ranking against simple read-only rule
+baselines on the same labeled rows:
+
+```bash
+python3 scripts/run_rule_baseline_comparison.py \
+  --candidate-csv /path/to/ranking_item_labels.csv \
+  --feature-sample-path /path/to/training_samples_labeled.parquet \
+  --output-dir /tmp/smartstock-rule-baseline-comparison \
+  --horizon 10 \
+  --round-trip-cost-pct 0.13 \
+  --min-margin-pct 0.30
+```
+
+This comparison is only valid on the joined `trade_date + symbol` overlap. If a
+feature sample covers only a small subset of historical candidates, the output
+must be treated as partial diagnostic evidence, not production strategy
+evidence.
+
 Generated CSV/JSON files under `ranking-evaluation/runs/` are local
 reproducibility artifacts and are ignored by default. Do not commit generated
 report directories unless a reviewer explicitly requests evidence artifacts for
 a specific strategy review; prefer a concise Markdown evidence summary for
 normal PR review.
+
+## Read-Only Rule Baseline Reports
+
+- [2026-07-06 SmartStock rank vs return_60d_rank_desc](./rule-baseline-comparison-2026-07-06.md)
 
 ## Production Evidence Gate
 
