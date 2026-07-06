@@ -169,6 +169,39 @@ production_evidence: false
 
 这说明当前历史候选池内部排序存在明显改进空间，尤其是 20/60 日相对强度和 MACD 动量确认。但它仍不是生产策略准入证据：历史候选覆盖不足 30 个交易日、完整标签窗口只有 13 个日期，且本次 rank scope 是候选池内部而不是全 A 横截面。下一步应做离线重排实验和完整闭环回测，而不是直接改生产排序参数。
 
+## 2026-07-06 离线候选池重排实验
+
+新增只读离线 rerank 实验，用已经补齐的历史候选特征做 walk-forward 对照。最终报告：
+
+```text
+docs/strategy-evidence/ranking-evaluation/offline-rerank-experiment-2026-07-06.md
+```
+
+实验输入为候选特征表 `candidate_features.csv`，只使用候选当日及以前可得的特征列，不使用 `strong_10d`、`return_10d_pct`、`return_20d_pct` 等未来标签列。完整 10 日标签窗口覆盖：
+
+```text
+input_row_count: 635
+eligible_row_count: 408
+eligible_date_count: 13
+eligible_symbol_count: 254
+train_dates: 7
+test_dates: 6
+```
+
+按训练段选择出的固定规则为 `macd_hist_desc`。测试段结果：
+
+```text
+current_smartstock_rank test top5_return_after_cost: 2.138334
+macd_hist_desc test top5_return_after_cost:          11.975306
+selected_minus_current_test_pct:                    9.836972
+decision: fixed_rerank_beats_current_on_holdout
+production_evidence: false
+```
+
+同时，`return_60d_rank_desc` 在测试段的 Top5 after cost 为 `18.894447`，高于当前排序和训练段选中规则，说明 60 日相对强度需要进入下一轮更长样本的重点验证。
+
+这进一步支持“当前候选池内部排序有明显改进空间”的判断，但仍不能直接改生产排序参数。限制包括：训练/测试日期都太少、样本只来自历史候选池而不是全 A 横截面、没有验证买入触发/止盈止损/仓位/滑点下的闭环表现。
+
 ## 覆盖诊断
 
 新增只读 coverage audit，用于解释 ranking evaluation 为什么仍被阻塞。该命令只读取已保存快照，不重跑策略、不回填候选池、不改变生产输出：

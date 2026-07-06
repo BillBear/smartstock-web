@@ -85,6 +85,25 @@ overlap. If a feature sample covers only a small subset of historical
 candidates, the output must be treated as partial diagnostic evidence, not
 production strategy evidence.
 
+To run a read-only walk-forward rerank experiment on enriched historical
+candidate features:
+
+```bash
+python3 scripts/run_offline_rerank_experiment.py \
+  --candidate-features-csv /path/to/candidate_features.csv \
+  --output-dir /tmp/smartstock-offline-rerank-experiment \
+  --horizon 10 \
+  --train-ratio 0.6 \
+  --round-trip-cost-pct 0.13 \
+  --min-margin-pct 0.30
+```
+
+This experiment uses fixed rerank rules only. It selects the best rule on the
+train dates, reports the holdout test dates separately, and marks
+`production_evidence=false`. It must not be wired into production ranking
+without longer history, full-market cross-sectional features, and closed-loop
+baseline backtest evidence.
+
 Generated CSV/JSON files under `ranking-evaluation/runs/` are local
 reproducibility artifacts and are ignored by default. Do not commit generated
 report directories unless a reviewer explicitly requests evidence artifacts for
@@ -94,6 +113,7 @@ normal PR review.
 ## Read-Only Rule Baseline Reports
 
 - [2026-07-06 SmartStock rank vs return_60d_rank_desc](./rule-baseline-comparison-2026-07-06.md)
+- [2026-07-06 offline fixed-rule rerank walk-forward](./offline-rerank-experiment-2026-07-06.md)
 
 ## Production Evidence Gate
 
