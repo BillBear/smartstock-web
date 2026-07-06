@@ -125,6 +125,26 @@ class RuleBaselineComparisonTests(unittest.TestCase):
         self.assertEqual(current["row_count"], return_60d["row_count"])
         self.assertEqual(current["covered_date_count"], return_60d["covered_date_count"])
 
+    def test_comparison_excludes_rows_without_valid_60d_lookback(self):
+        from app.evaluation.rule_baseline_comparison import run_rule_baseline_comparison
+
+        features = _feature_rows()
+        for row in features:
+            if row["symbol"] == "600009":
+                row["return_60d_rank"] = None
+
+        summary = run_rule_baseline_comparison(
+            pd.DataFrame(_candidate_rows()),
+            pd.DataFrame(features),
+            horizon=10,
+        )
+
+        current = summary["baseline_comparison"]["current_smartstock_rank"]
+        return_60d = summary["baseline_comparison"]["return_60d_rank_desc"]
+        self.assertEqual(summary["coverage"]["joined_row_count"], 20)
+        self.assertEqual(current["row_count"], return_60d["row_count"])
+        self.assertEqual(return_60d["row_count"], 18)
+
     def test_artifact_writer_outputs_json_csv_and_markdown(self):
         from app.evaluation.rule_baseline_comparison import run_rule_baseline_comparison, write_rule_comparison_artifacts
 

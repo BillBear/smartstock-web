@@ -274,6 +274,8 @@ def _comparison_frame(joined: pd.DataFrame) -> pd.DataFrame:
     if joined is None or joined.empty or "__feature_join_status" not in joined.columns:
         return joined
     overlap = joined[joined["__feature_join_status"] == "both"].copy()
+    if "return_60d_rank" in overlap.columns:
+        overlap = overlap[pd.to_numeric(overlap["return_60d_rank"], errors="coerce").notna()].copy()
     return overlap if not overlap.empty else joined.iloc[0:0].copy()
 
 

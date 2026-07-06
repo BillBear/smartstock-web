@@ -46,8 +46,29 @@ same-day versus prior full-market snapshots, and estimated incomplete
 forward-label windows. It must not backfill, regenerate, or alter production
 strategy outputs.
 
-To compare current historical SmartStock ranking against simple read-only rule
-baselines on the same labeled rows:
+To enrich every historical candidate row with read-only price/volume/technical
+features and then compare current SmartStock ranking against simple rule
+baselines:
+
+```bash
+python3 scripts/run_candidate_feature_enrichment.py \
+  --candidate-csv /path/to/ranking_item_labels.csv \
+  --output-dir /tmp/smartstock-candidate-feature-enrichment \
+  --history-cache-root /tmp/smartstock-candidate-history-cache \
+  --lookback-calendar-days 240 \
+  --min-history-rows 61 \
+  --workers 4 \
+  --horizon 10 \
+  --round-trip-cost-pct 0.13 \
+  --min-margin-pct 0.30
+```
+
+This command uses explicit historical date ranges. It must not fall back to
+recent rolling history, regenerate picks, or modify production strategy output.
+The generated feature ranks are scoped to the candidate-symbol panel unless a
+full-market feature panel is supplied.
+
+To compare against a prebuilt feature sample instead:
 
 ```bash
 python3 scripts/run_rule_baseline_comparison.py \
@@ -59,10 +80,10 @@ python3 scripts/run_rule_baseline_comparison.py \
   --min-margin-pct 0.30
 ```
 
-This comparison is only valid on the joined `trade_date + symbol` overlap. If a
-feature sample covers only a small subset of historical candidates, the output
-must be treated as partial diagnostic evidence, not production strategy
-evidence.
+Both comparison modes are only valid on the joined `trade_date + symbol`
+overlap. If a feature sample covers only a small subset of historical
+candidates, the output must be treated as partial diagnostic evidence, not
+production strategy evidence.
 
 Generated CSV/JSON files under `ranking-evaluation/runs/` are local
 reproducibility artifacts and are ignored by default. Do not commit generated

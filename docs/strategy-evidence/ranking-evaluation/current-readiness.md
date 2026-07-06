@@ -132,35 +132,42 @@ skipped_incomplete_metric_row_count: 30
 4. 近期日期标签不完整：2026-07-01 至 2026-07-03 的未来行情窗口尚未完全发生；当前指标已排除这些不完整 horizon，但覆盖不足的问题仍然存在。
 5. 同区间 baseline 回测已能运行，但本次结果为 `closed_roundtrips=0`，不能作为策略通过证据；仍缺少足够长区间的闭环交易 baseline 和 walk-forward 分段结论。
 
-## 2026-07-06 规则 baseline 对照
+## 2026-07-06 候选特征补齐与规则 baseline 对照
 
-新增只读规则 baseline 对照工具，用于把当前历史 SmartStock 排名和简单规则排序放到同一样本上比较。首次对照报告：
+新增只读候选特征补齐与规则 baseline 对照工具，用于把当前历史 SmartStock 排名和简单规则排序放到同一样本上比较。最终对照报告：
 
 ```text
 docs/strategy-evidence/ranking-evaluation/rule-baseline-comparison-2026-07-06.md
 ```
 
-本次对照只覆盖历史 ranking 候选与 V2 700 股训练样本的交集：
+本次已经为历史候选池拉取显式日期范围历史行情，并补齐候选同日特征：
 
 ```text
 candidate_row_count: 635
-joined_row_count: 46
-joined_date_count: 9
-joined_row_coverage: 0.072441
-joined_date_range: 2026-04-28 to 2026-06-04
+candidate_symbol_count: 358
+candidate_date_count: 22
+history_start_date: 2025-08-31
+history_end_date: 2026-07-03
+history_symbol_count: 358
+history_row_count: 71700
+feature_joined_row_count: 635
+feature_complete_row_count: 634
+feature_complete_row_rate: 0.998425
+feature_rank_scope: candidate_symbol_panel
 ```
 
-公平口径下，所有 baseline 都只在 `trade_date + symbol` 成功 join 的同一批 `46` 行样本上计算。结果：
+公平口径下，所有 baseline 都只在 `trade_date + symbol` 成功 join 且 60 日回看有效的同一批样本上计算。完整 10 日标签窗口实际覆盖 `13` 个日期、`408` 行。结果：
 
 ```text
-current_smartstock_rank top5_return_after_cost: -9.194150
-return_60d_rank_desc top5_return_after_cost:   -9.386594
-return_60d_minus_current_pct:                  -0.192444
-decision: inconclusive_small_margin
+current_smartstock_rank top5_return_after_cost: -0.371373
+return_60d_rank_desc top5_return_after_cost:    7.981233
+return_60d_minus_current_pct:                   8.352606
+macd_hist_desc top5_return_after_cost:          8.985154
+decision: current_rank_lags_return_60d_baseline
 production_evidence: false
 ```
 
-这说明 `return_60d_rank_desc` 在当前小交集里没有显著胜过现有 SmartStock 排名，但该结论不能外推到全市场或 2026-07 最新候选池。下一步需要为所有历史候选行补齐同日特征，或从全市场历史快照生成完整候选特征表后再比较。
+这说明当前历史候选池内部排序存在明显改进空间，尤其是 20/60 日相对强度和 MACD 动量确认。但它仍不是生产策略准入证据：历史候选覆盖不足 30 个交易日、完整标签窗口只有 13 个日期，且本次 rank scope 是候选池内部而不是全 A 横截面。下一步应做离线重排实验和完整闭环回测，而不是直接改生产排序参数。
 
 ## 覆盖诊断
 
