@@ -257,6 +257,10 @@ const SmartScreen = () => {
   const pickList = useMemo(() => result?.picks || [], [result])
   const marketNews = result?.market_state?.news_context || {}
   const tradePlan = result?.trade_plan || {}
+  const coreCandidateCount = Number(tradePlan.core_count || 0)
+  const trialCandidateCount = Number(tradePlan.trial_count || 0)
+  const watchCandidateCount = Number(tradePlan.watch_count || 0)
+  const tradePlanCandidateCount = coreCandidateCount + trialCandidateCount
   const probabilityPresentation = getProbabilityModelPresentation(tradePlan?.probability_model || {})
   const planMeta = PLAN_ACTION_META[tradePlan.primary_action] || PLAN_ACTION_META.watch
   const diagnostic = useMemo(() => getSmartScreenDiagnostic(result), [result])
@@ -268,10 +272,12 @@ const SmartScreen = () => {
     () => getRankingEvidenceStatus(rankingEvidence || result?.ranking_evidence || {}),
     [rankingEvidence, result]
   )
-  const corePicks = useMemo(
-    () => pickList.filter((item) => ['A', 'B'].includes(item?.decision?.grade)).slice(0, 3),
+  const tradePlanPickList = useMemo(
+    () => pickList.filter((item) => ['A', 'B'].includes(item?.decision?.grade)),
     [pickList]
   )
+  const corePicks = useMemo(() => tradePlanPickList.slice(0, 6), [tradePlanPickList])
+  const hiddenCorePickCount = Math.max(0, tradePlanPickList.length - corePicks.length)
 
   const stateTag = result?.market_state?.state_tag
   const stateMeta = STATE_META[stateTag] || STATE_META.neutral
@@ -590,10 +596,10 @@ const SmartScreen = () => {
         </div>
         <Row gutter={[12, 12]} className="plan-metrics">
           <Col xs={12} md={6}>
-            <Statistic title="核心候选" value={tradePlan.core_count || 0} suffix="只" />
+            <Statistic title="A 级核心候选" value={coreCandidateCount} suffix="只" />
           </Col>
           <Col xs={12} md={6}>
-            <Statistic title="试错候选" value={tradePlan.trial_count || 0} suffix="只" />
+            <Statistic title="B 级试错候选" value={trialCandidateCount} suffix="只" />
           </Col>
           <Col xs={12} md={6}>
             <Statistic title="建议实盘仓位" value={tradePlan.suggested_total_exposure_pct || 0} suffix="%" precision={1} />
@@ -612,57 +618,63 @@ const SmartScreen = () => {
       </Card>
 
       {corePicks.length > 0 && (
-        <Row gutter={[16, 16]} className="core-plan-row">
-          {corePicks.map((pick) => {
-            const meta = DECISION_META[pick?.decision?.grade] || DECISION_META.C
-            const actionMeta = getPickActionPresentation(pick, canPaperBuy)
-            return (
-              <Col xs={24} lg={8} key={pick.pick_id}>
-                <Card className="core-pick-card" variant="borderless">
-                  <div className="core-pick-head">
-                    <div>
-                      <strong>{pick.name}</strong>
-                      <span>{pick.symbol}</span>
+        <>
+          <div style={{ color: 'rgba(255,255,255,0.62)', margin: '-4px 0 12px' }}>
+            重点展示 A/B 级候选：共 {tradePlanPickList.length} 只，当前展示 {corePicks.length} 只
+            {hiddenCorePickCount > 0 ? `，其余 ${hiddenCorePickCount} 只见完整候选池` : ''}
+          </div>
+          <Row gutter={[16, 16]} className="core-plan-row">
+            {corePicks.map((pick) => {
+              const meta = DECISION_META[pick?.decision?.grade] || DECISION_META.C
+              const actionMeta = getPickActionPresentation(pick, canPaperBuy)
+              return (
+                <Col xs={24} lg={8} key={pick.pick_id}>
+                  <Card className="core-pick-card" variant="borderless">
+                    <div className="core-pick-head">
+                      <div>
+                        <strong>{pick.name}</strong>
+                        <span>{pick.symbol}</span>
+                      </div>
+                      <Tag color={meta.color}>{meta.text}</Tag>
                     </div>
-                    <Tag color={meta.color}>{meta.text}</Tag>
-                  </div>
-                  <div className="core-pick-score">{Number(pick?.score_breakdown?.total || 0).toFixed(2)}</div>
-                  <div className="core-pick-grid">
-                    <span>入场 {pick.entry_range?.join(' - ') || '-'}</span>
-                    <span>止损 {pick.stop_loss || '-'}</span>
-                    <span>止盈 {pick.take_profit || '-'}</span>
-                    <span>仓位 {Number(pick.position_pct || 0).toFixed(1)}%</span>
-                  </div>
-                  <p>{pick?.decision?.summary}</p>
-                  <Space wrap>
-                    <Button size="small" onClick={() => openDetail(pick.pick_id)}>查看计划</Button>
-                    {actionMeta.canAddWatch && (
-                      <Button
-                        size="small"
-                        type="primary"
-                        ghost
-                        loading={actionLoading === `${pick.pick_id}-added_watchlist`}
-                        onClick={() => reportAction(pick, 'added_watchlist')}
-                      >
-                        加入观察
-                      </Button>
-                    )}
-                    {actionMeta.canShowPaperAction && (
-                      <Button
-                        size="small"
-                        type="primary"
-                        loading={actionLoading === `${pick.pick_id}-paper_buy`}
-                        onClick={() => reportAction(pick, 'paper_buy')}
-                      >
-                        {actionMeta.paperActionLabel}
-                      </Button>
-                    )}
-                  </Space>
-                </Card>
-              </Col>
-            )
-          })}
-        </Row>
+                    <div className="core-pick-score">{Number(pick?.score_breakdown?.total || 0).toFixed(2)}</div>
+                    <div className="core-pick-grid">
+                      <span>入场 {pick.entry_range?.join(' - ') || '-'}</span>
+                      <span>止损 {pick.stop_loss || '-'}</span>
+                      <span>止盈 {pick.take_profit || '-'}</span>
+                      <span>仓位 {Number(pick.position_pct || 0).toFixed(1)}%</span>
+                    </div>
+                    <p>{pick?.decision?.summary}</p>
+                    <Space wrap>
+                      <Button size="small" onClick={() => openDetail(pick.pick_id)}>查看计划</Button>
+                      {actionMeta.canAddWatch && (
+                        <Button
+                          size="small"
+                          type="primary"
+                          ghost
+                          loading={actionLoading === `${pick.pick_id}-added_watchlist`}
+                          onClick={() => reportAction(pick, 'added_watchlist')}
+                        >
+                          加入观察
+                        </Button>
+                      )}
+                      {actionMeta.canShowPaperAction && (
+                        <Button
+                          size="small"
+                          type="primary"
+                          loading={actionLoading === `${pick.pick_id}-paper_buy`}
+                          onClick={() => reportAction(pick, 'paper_buy')}
+                        >
+                          {actionMeta.paperActionLabel}
+                        </Button>
+                      )}
+                    </Space>
+                  </Card>
+                </Col>
+              )
+            })}
+          </Row>
+        </>
       )}
 
       <Row gutter={16} className="stats-row">
@@ -675,7 +687,8 @@ const SmartScreen = () => {
         </Col>
         <Col xs={24} sm={6}>
           <Card className="stat-card">
-            <Statistic title="可投数量" value={pickList.length} suffix="只" />
+            <Statistic title="候选总数" value={pickList.length} suffix="只" />
+            <div className="stat-extra">A/B：{tradePlanCandidateCount} 只，C：{watchCandidateCount} 只</div>
           </Card>
         </Col>
         <Col xs={24} sm={6}>
@@ -883,7 +896,7 @@ const SmartScreen = () => {
       <Card className="ranking-card" variant="borderless">
         <div className="ranking-card-title">
           <h3>完整候选池</h3>
-          <span>只有 A/B 级才进入交易计划，C 级用于观察学习。</span>
+          <span>当前列表 {pickList.length} 只；A/B 级 {tradePlanCandidateCount} 只进入模拟验证口径，C 级 {watchCandidateCount} 只用于观察学习。</span>
         </div>
         {result?.no_trade ? (
           <Alert
