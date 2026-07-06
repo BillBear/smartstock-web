@@ -7,6 +7,27 @@ export function shouldRefreshCurrentTradingPicks({
   return Boolean(canRefresh && !isRefreshing && hasStaleTradingSnapshot)
 }
 
+function getStrategyScore(pick) {
+  const value = Number(pick?.score_breakdown?.total)
+  return Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY
+}
+
+function getRankNo(pick) {
+  const value = Number(pick?.rank_no)
+  return Number.isFinite(value) && value > 0 ? value : Number.POSITIVE_INFINITY
+}
+
+export function sortPicksByStrategyScore(picks = []) {
+  if (!Array.isArray(picks)) return []
+  return [...picks].sort((left, right) => {
+    const scoreDiff = getStrategyScore(right) - getStrategyScore(left)
+    if (scoreDiff !== 0) return scoreDiff
+    const rankDiff = getRankNo(left) - getRankNo(right)
+    if (rankDiff !== 0) return rankDiff
+    return String(left?.symbol || '').localeCompare(String(right?.symbol || ''))
+  })
+}
+
 export function getCalendarDisplayContext(calendarContext = {}, tradePlan = {}) {
   const mode = calendarContext?.mode || 'trading'
   const requestedDate = calendarContext?.requested_date || '-'
