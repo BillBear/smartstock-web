@@ -40,6 +40,31 @@ DEFAULT_EXPERIMENTS: List[Dict[str, Any]] = [
         "recall_method": "production_pre_score",
     },
     {
+        "key": "production_cap_240",
+        "label": "funnel ablation: production-style industry cap, recall 240",
+        "recall_size": 240,
+        "deep_analysis_size": 240,
+        "recall_method": "production_pre_score",
+        "industry_cap_mode": "pre_recall",
+        "industry_cap": 16,
+    },
+    {
+        "key": "no_industry_cap_240",
+        "label": "funnel ablation: no industry cap, recall 240",
+        "recall_size": 240,
+        "deep_analysis_size": 240,
+        "recall_method": "production_pre_score",
+        "industry_cap_mode": "none",
+    },
+    {
+        "key": "no_industry_cap_500",
+        "label": "funnel ablation: no industry cap, recall 500",
+        "recall_size": 500,
+        "deep_analysis_size": 500,
+        "recall_method": "production_pre_score",
+        "industry_cap_mode": "none",
+    },
+    {
         "key": "multi_channel_union",
         "label": "experiment D: multi-channel recall union",
         "recall_size": 500,
@@ -165,6 +190,7 @@ def _build_row(experiment: Dict[str, Any], summary: Optional[Dict[str, Any]]) ->
     row["production_evidence"] = production_evidence
     row["candidate_row_count"] = int(summary.get("candidate_row_count") or 0)
     row["coverage"] = summary.get("coverage") or {}
+    row["funnel_summary"] = row["coverage"].get("funnel_summary") or {}
     metrics = summary.get("metrics") or {}
     row["metrics"] = {field: _metric_value(metrics, field) for field in METRIC_FIELDS}
     return row

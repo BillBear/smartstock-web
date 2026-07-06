@@ -68,6 +68,9 @@ class RecallExperimentReportTests(unittest.TestCase):
                 "recall_220_deep_150",
                 "recall_300_deep_300",
                 "recall_500_deep_500",
+                "production_cap_240",
+                "no_industry_cap_240",
+                "no_industry_cap_500",
                 "multi_channel_union",
             ],
         )
@@ -101,6 +104,9 @@ class RecallExperimentReportTests(unittest.TestCase):
             _write_summary(root, "recall_220_deep_150")
             _write_summary(root, "recall_300_deep_300")
             _write_summary(root, "recall_500_deep_500")
+            _write_summary(root, "production_cap_240")
+            _write_summary(root, "no_industry_cap_240")
+            _write_summary(root, "no_industry_cap_500")
             _write_summary(
                 root,
                 "multi_channel_union",

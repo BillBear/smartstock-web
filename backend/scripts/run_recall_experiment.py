@@ -44,20 +44,23 @@ def write_markdown_report(report: dict, output_path: Path) -> Path:
         f"- production_switch_ready: `{str(report.get('production_switch_ready')).lower()}`",
         f"- blocking_reasons: `{', '.join(report.get('blocking_reasons') or []) or '-'}`",
         "",
-        "| experiment | evidence | compatibility | Precision@3 | Precision@5 | NDCG@10 | Top5 Avg Return | Max Drawdown |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        "| experiment | evidence | compatibility | cap rejected | topn rejected | Precision@3 | Precision@5 | NDCG@10 | Top5 Avg Return | Max Drawdown |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in report.get("experiments") or []:
         metrics = row.get("metrics") or {}
+        funnel = row.get("funnel_summary") or {}
         compatibility = row.get("compatibility_status") or "-"
         issues = row.get("compatibility_issues") or []
         if issues:
             compatibility = f"{compatibility}: {', '.join(str(item) for item in issues)}"
         lines.append(
-            "| {key} | {evidence} | {compatibility} | {p3:.4f} | {p5:.4f} | {ndcg:.4f} | {ret:.4f} | {dd:.4f} |".format(
+            "| {key} | {evidence} | {compatibility} | {cap} | {topn} | {p3:.4f} | {p5:.4f} | {ndcg:.4f} | {ret:.4f} | {dd:.4f} |".format(
                 key=row.get("key"),
                 evidence=row.get("evidence_status"),
                 compatibility=compatibility,
+                cap=int(funnel.get("industry_cap_rejected_count") or 0),
+                topn=int(funnel.get("topn_rejected_count") or 0),
                 p3=float(metrics.get("precision_at_3") or 0.0),
                 p5=float(metrics.get("precision_at_5") or 0.0),
                 ndcg=float(metrics.get("ndcg_at_10") or 0.0),
