@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
@@ -237,6 +238,30 @@ def run_tushare_enhanced_feature_audit(
     }
     summary["report_markdown"] = render_tushare_enhanced_feature_markdown(summary)
     return summary
+
+
+def write_tushare_enhanced_feature_artifacts(
+    summary: Dict[str, Any],
+    feature_panel: pd.DataFrame,
+    output_dir: str | Path,
+) -> Dict[str, str]:
+    root = Path(output_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    summary_path = root / "tushare_enhanced_feature_audit.json"
+    panel_path = root / "tushare_enhanced_feature_panel.csv"
+    rule_path = root / "tushare_enhanced_rule_summary.csv"
+    report_path = root / "tushare_enhanced_feature_audit.md"
+    serializable = {key: value for key, value in summary.items() if key != "report_markdown"}
+    summary_path.write_text(json.dumps(serializable, ensure_ascii=False, indent=2), encoding="utf-8")
+    feature_panel.to_csv(panel_path, index=False)
+    pd.DataFrame(_rule_summary_rows(summary)).to_csv(rule_path, index=False)
+    report_path.write_text(summary.get("report_markdown") or render_tushare_enhanced_feature_markdown(summary), encoding="utf-8")
+    return {
+        "summary": str(summary_path),
+        "feature_panel": str(panel_path),
+        "rule_summary": str(rule_path),
+        "report": str(report_path),
+    }
 
 
 def _normalize_date(value: Any) -> str:
@@ -522,6 +547,23 @@ def render_tushare_enhanced_feature_markdown(summary: Dict[str, Any]) -> str:
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+def _rule_summary_rows(summary: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for name, item in (summary.get("rules") or {}).items():
+        for subset in ["all", "train", "test"]:
+            metrics = item.get(subset) or {}
+            rows.append(
+                {
+                    "rule": name,
+                    "subset": subset,
+                    "status": item.get("status"),
+                    "missing_reason": item.get("missing_reason", ""),
+                    **metrics,
+                }
+            )
+    return rows
 
 
 def _round(value: Any, digits: int = 6) -> float:

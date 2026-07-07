@@ -1,6 +1,14 @@
+import json
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 import pandas as pd
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeTuShareClient:
@@ -112,9 +120,73 @@ class TuShareEnhancedFeatureAuditTests(unittest.TestCase):
         self.assertFalse(summary["ml_v2_2_gate"]["allowed"])
         self.assertIn("top5_after_cost_margin_below_required", summary["ml_v2_2_gate"]["blocking_reasons"])
 
+    def test_artifact_writer_outputs_json_csv_and_markdown(self):
+        from app.evaluation.tushare_enhanced_feature_audit import (
+            run_tushare_enhanced_feature_audit,
+            write_tushare_enhanced_feature_artifacts,
+        )
 
-if __name__ == "__main__":
-    unittest.main()
+        panel = make_labeled_enhanced_candidates(enhanced_signal="strong")
+        summary = run_tushare_enhanced_feature_audit(panel, horizon=10, train_ratio=0.5)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = write_tushare_enhanced_feature_artifacts(summary, panel, tmp)
+            self.assertTrue(Path(paths["summary"]).exists())
+            self.assertTrue(Path(paths["feature_panel"]).exists())
+            self.assertTrue(Path(paths["rule_summary"]).exists())
+            self.assertTrue(Path(paths["report"]).exists())
+            payload = json.loads(Path(paths["summary"]).read_text(encoding="utf-8"))
+            self.assertEqual(payload["audit_type"], "tushare_enhanced_feature_audit")
+            self.assertFalse(payload["production_evidence"])
+            self.assertIn("ml_v2_2_gate", payload)
+
+    def test_cli_runs_enhanced_feature_audit_from_csv_panels(self):
+        base, daily_basic, adj_factor, stk_limit, suspend, _ = make_tushare_feature_panels()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_path = root / "base.csv"
+            daily_basic_path = root / "daily_basic.csv"
+            adj_factor_path = root / "adj_factor.csv"
+            stk_limit_path = root / "stk_limit.csv"
+            suspend_path = root / "suspend.csv"
+            output_dir = root / "out"
+            base.to_csv(base_path, index=False)
+            daily_basic.to_csv(daily_basic_path, index=False)
+            adj_factor.to_csv(adj_factor_path, index=False)
+            stk_limit.to_csv(stk_limit_path, index=False)
+            suspend.to_csv(suspend_path, index=False)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(PROJECT_ROOT / "scripts" / "run_tushare_enhanced_feature_audit.py"),
+                    "--base-panel-csv",
+                    str(base_path),
+                    "--daily-basic-csv",
+                    str(daily_basic_path),
+                    "--adj-factor-csv",
+                    str(adj_factor_path),
+                    "--stk-limit-csv",
+                    str(stk_limit_path),
+                    "--suspend-csv",
+                    str(suspend_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--horizon",
+                    "10",
+                    "--train-ratio",
+                    "0.5",
+                ],
+                cwd=PROJECT_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((output_dir / "tushare_enhanced_feature_audit.json").exists())
+            self.assertTrue((output_dir / "tushare_enhanced_feature_panel.csv").exists())
+            self.assertIn("tushare_enhanced_feature_audit_completed", result.stdout)
 
 
 def make_tushare_feature_panels(date_count=65):
@@ -218,3 +290,7 @@ def make_labeled_enhanced_candidates(enhanced_signal):
                 }
             )
     return pd.DataFrame(rows)
+
+
+if __name__ == "__main__":
+    unittest.main()
