@@ -393,6 +393,110 @@ class CoachServiceObservabilityTests(unittest.TestCase):
         self.assertEqual(result["picks"][0]["rank_no"], 1)
         self.assertEqual(result["picks"][-1]["rank_no"], 60)
 
+    def test_defensive_market_gate_does_not_shrink_display_pool_to_trade_eligible_only(self):
+        class DataSourceStub:
+            def get_stock_industry_map(self):
+                return {}
+
+            def get_realtime_quotes_batch(self, symbols):
+                return {}
+
+        def fake_pick(symbol, risk_profile, market_state, row, strategy_code):
+            index = int(symbol[-2:])
+            tradable = index <= 2
+            score = 86.0 - index
+            return {
+                "pick_id": f"2026-07-07-{symbol}-S1",
+                "symbol": symbol,
+                "name": row.get("name") or symbol,
+                "action": "buy" if tradable else ("buy" if index <= 5 else "watch"),
+                "up_prob": 0.62,
+                "dd_prob": 0.24 if tradable else 0.36,
+                "confidence_level": "medium",
+                "horizon_days": 15,
+                "expected_return_pct": 3.0,
+                "expected_edge_pct": 1.8,
+                "profit_factor_proxy": 1.3,
+                "entry_range": [10.0, 10.2],
+                "take_profit": 11.0,
+                "stop_loss": 9.2,
+                "position_pct": 10.0 if tradable else 5.0,
+                "reasons": ["测试候选"],
+                "risks": [],
+                "invalid_conditions": [],
+                "market_metrics": {"turnover_rate": 4.0, "main_net_inflow_yi": 0.5},
+                "score_breakdown": {
+                    "trend": score,
+                    "money_flow": 76.0,
+                    "turnover_liquidity": 74.0,
+                    "quality": 78.0,
+                    "risk_adjusted": 70.0,
+                    "news": 50.0,
+                    "total": score,
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = CoachStore(str(Path(tmpdir) / "coach.db"))
+            service = CoachService(
+                data_source_manager=DataSourceStub(),
+                store=store,
+                news_service=None,
+                universe_max_analyze_count=120,
+            )
+            candidate_rows = [
+                {"symbol": f"000{i:03d}", "name": f"样本{i}", "pre_score": 100 - i}
+                for i in range(1, 11)
+            ]
+            service.resolve_pick_calendar_context = lambda **kwargs: {
+                "mode": "trading",
+                "requested_date": "2026-07-07",
+                "effective_trade_date": "2026-07-07",
+                "is_trading_day": True,
+                "actions": {"can_refresh": True, "can_paper_buy": True, "can_add_watch": True},
+            }
+            service.get_active_strategy_config = lambda user_id="default": {
+                "strategy_code": "trend_breakout",
+                "profile_key": "test",
+                "config": {
+                    "risk_level": "medium",
+                    "universe_size": 120,
+                    "score_threshold": 0,
+                    "max_positions": 5,
+                    "max_position_pct": 10,
+                },
+            }
+            service.get_risk_profile = lambda user_id="default": {
+                "risk_level": "medium",
+                "max_position_pct": 10,
+                "max_industry_pct": 30,
+            }
+            service.get_market_state_today = lambda: {
+                "state_tag": "defensive",
+                "state_score": 38.0,
+                "drivers": {},
+                "reasons": ["测试防守市场"],
+            }
+            service._build_dynamic_candidates = lambda level, target_size=None, strategy_code="trend_breakout": {
+                "candidates": candidate_rows,
+                "meta": {"source": "test", "candidate_count": len(candidate_rows)},
+            }
+            service._build_pick = fake_pick
+
+            result = service.get_today_picks(max_count=20, user_id="default", risk_level="medium")
+
+        self.assertEqual(len(result["picks"]), 10)
+        buy_symbols = {pick["symbol"] for pick in result["picks"] if pick["action"] == "buy"}
+        self.assertEqual(buy_symbols, {"000001", "000002"})
+        self.assertEqual(result["universe_meta"]["defensive_gate_watch_only_count"], 8)
+        self.assertTrue(
+            all(
+                pick["position_pct"] == 0.0
+                for pick in result["picks"]
+                if pick["symbol"] not in {"000001", "000002"}
+            )
+        )
+
     def test_market_news_exception_is_logged_and_marked_unavailable(self):
         class DataSourceStub:
             def get_realtime_quote(self, symbol):

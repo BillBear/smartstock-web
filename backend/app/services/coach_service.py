@@ -2226,6 +2226,37 @@ class CoachService:
         selected.sort(key=lambda x: self._risk_specific_pick_sort_key(x, "medium"), reverse=True)
         return selected
 
+    def _apply_defensive_market_display_gate(
+        self,
+        picks: List[Dict[str, Any]],
+        risk_level: str,
+    ) -> Dict[str, Any]:
+        """Keep the candidate display broad while making defensive-market trade gates explicit."""
+        output: List[Dict[str, Any]] = []
+        watch_only_count = 0
+        for pick in picks or []:
+            action = str(pick.get("action") or "watch")
+            dd_prob = self._safe_float(pick.get("dd_prob"), 1)
+            if risk_level == "high":
+                trade_gate_passed = action in {"buy", "watch"} and dd_prob <= 0.40
+            else:
+                trade_gate_passed = action == "buy" and dd_prob <= 0.30
+            if not trade_gate_passed:
+                pick["action"] = "watch"
+                pick["position_pct"] = 0.0
+                pick["defensive_gate_status"] = "watch_only"
+                pick.setdefault("risks", [])
+                if "防守市场未通过交易门禁，仅保留为观察候选" not in pick["risks"]:
+                    pick["risks"].insert(0, "防守市场未通过交易门禁，仅保留为观察候选")
+                pick.setdefault("reasons", [])
+                if "防守市场交易门禁未通过，不进入交易计划" not in pick["reasons"]:
+                    pick["reasons"].append("防守市场交易门禁未通过，不进入交易计划")
+                watch_only_count += 1
+            else:
+                pick["defensive_gate_status"] = "trade_gate_passed"
+            output.append(pick)
+        return {"picks": output, "watch_only_count": watch_only_count}
+
     def _calibrate_pick_scores(self, picks: List[Dict[str, Any]], market_state: Dict[str, Any]) -> None:
         """将原始总分映射为更可信的展示分，降低纯相对排名的误导。"""
         if not picks:
@@ -3025,10 +3056,11 @@ class CoachService:
         picks = self._apply_risk_specific_selection(picks, level)
 
         if market_state["state_tag"] == "defensive":
-            if level == "high":
-                picks = [p for p in picks if p["action"] in {"buy", "watch"} and p["dd_prob"] <= 0.40]
-            else:
-                picks = [p for p in picks if p["action"] == "buy" and p["dd_prob"] <= 0.30]
+            gate_result = self._apply_defensive_market_display_gate(picks, level)
+            picks = gate_result["picks"]
+            if isinstance(universe_meta, dict):
+                universe_meta["defensive_gate_policy"] = "trade_gate_only"
+                universe_meta["defensive_gate_watch_only_count"] = gate_result["watch_only_count"]
 
         # 忽略动作应真实生效：从当日候选中移除该推荐
         action_map = self._get_latest_action_map(user_id)
