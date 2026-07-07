@@ -79,6 +79,38 @@ DEFAULT_EXPERIMENTS: List[Dict[str, Any]] = [
             "low_drawdown_stability",
         ],
     },
+    {
+        "key": "rerank_channel_blend_balanced",
+        "label": "rerank experiment: balanced channel blend after multi-channel recall",
+        "recall_size": 500,
+        "deep_analysis_size": 500,
+        "recall_method": "multi_channel_union",
+        "rerank_method": "channel_weighted_blend",
+        "rerank_weights": {
+            "volume_price_acceleration": 0.24,
+            "money_flow_activity": 0.24,
+            "theme_strength": 0.22,
+            "trend_breakout": 0.12,
+            "low_drawdown_stability": 0.10,
+            "pullback_repair": 0.08,
+        },
+    },
+    {
+        "key": "rerank_top30_channel_focus",
+        "label": "rerank experiment: top-30 focus on volume, money flow, and theme",
+        "recall_size": 500,
+        "deep_analysis_size": 500,
+        "recall_method": "multi_channel_union",
+        "rerank_method": "channel_weighted_blend",
+        "rerank_weights": {
+            "volume_price_acceleration": 0.30,
+            "money_flow_activity": 0.28,
+            "theme_strength": 0.24,
+            "low_drawdown_stability": 0.10,
+            "trend_breakout": 0.05,
+            "pullback_repair": 0.03,
+        },
+    },
 ]
 
 METRIC_FIELDS = [

@@ -35,6 +35,8 @@ DEFAULT_VARIANT_KEYS = [
     "no_industry_cap_240",
     "no_industry_cap_500",
     "multi_channel_union",
+    "rerank_channel_blend_balanced",
+    "rerank_top30_channel_focus",
 ]
 
 
@@ -53,6 +55,11 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument("--include-baseline", action="store_true")
     parser.add_argument("--max-rows-per-day", type=int, default=None)
     parser.add_argument("--min-market-snapshot-count", type=int, default=1)
+    parser.add_argument(
+        "--skip-diagnostic-labels",
+        action="store_true",
+        help="Skip forward labels for funnel audit rows; candidate rows are still labeled.",
+    )
     parser.add_argument("--fixture", choices=("smoke",), default=None)
     args = parser.parse_args(argv)
     start = _parse_date(parser, "start-date", args.start_date)
@@ -66,11 +73,16 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     if args.slippage < 0:
         parser.error("slippage must be greater than or equal to 0")
     valid_keys = {item["key"] for item in DEFAULT_EXPERIMENTS}
-    keys = args.experiment_key or list(DEFAULT_VARIANT_KEYS)
+    explicit_keys = list(args.experiment_key or [])
+    keys = explicit_keys or list(DEFAULT_VARIANT_KEYS)
     unknown = [key for key in keys if key not in valid_keys or key == "baseline"]
     if unknown:
         parser.error(f"unknown or unsupported experiment-key: {', '.join(unknown)}")
     args.experiment_key = keys
+    if explicit_keys:
+        args.comparison_experiment_keys = (["baseline"] if args.include_baseline else []) + keys
+    else:
+        args.comparison_experiment_keys = [item["key"] for item in DEFAULT_EXPERIMENTS]
     return args
 
 
@@ -85,6 +97,7 @@ def run(argv: Optional[Iterable[str]] = None) -> int:
         "slippage": float(args.slippage),
         "fixture": args.fixture,
         "candidate_source": "offline_recall_market_snapshots" if args.fixture is None else "fixture_smoke",
+        "skip_diagnostic_labels": bool(args.skip_diagnostic_labels),
     }
 
     if args.fixture == "smoke":
@@ -111,7 +124,7 @@ def run(argv: Optional[Iterable[str]] = None) -> int:
             _write_offline_variant_report(args, key, output_root, label_config, execution_config, coach_store, history_manager)
             print(f"generated {key}: offline market snapshots")
 
-    comparison = build_recall_experiment_report(output_root)
+    comparison = build_recall_experiment_report(output_root, experiments=_experiments_for_keys(args.comparison_experiment_keys))
     write_recall_experiment_report(comparison, output_root / "recall_experiment_report.json")
     _write_markdown_report(comparison, output_root / "recall_experiment_report.md")
     print(f"comparison_status: {comparison.get('status')}")
@@ -297,7 +310,9 @@ def _write_offline_variant_report(
         min_market_snapshot_count=args.min_market_snapshot_count,
     )
     rows = attach_forward_labels(generated["rows"], data_source_manager, label_config=label_config)
-    diagnostic_rows = attach_forward_labels(generated.get("funnel_audit_rows") or generated["rows"], data_source_manager, label_config=label_config)
+    diagnostic_rows = None
+    if not getattr(args, "skip_diagnostic_labels", False):
+        diagnostic_rows = attach_forward_labels(generated.get("funnel_audit_rows") or generated["rows"], data_source_manager, label_config=label_config)
     coverage = {
         **generated["coverage"],
         "experiment_key": key,
@@ -391,6 +406,17 @@ def _experiment_by_key(key: str) -> dict:
         if item.get("key") == key:
             return dict(item)
     return {"key": key}
+
+
+def _experiments_for_keys(keys: List[str]) -> List[dict]:
+    seen = set()
+    experiments = []
+    for key in keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        experiments.append(_experiment_by_key(key))
+    return experiments
 
 
 def _parse_date(parser: argparse.ArgumentParser, name: str, value: str):

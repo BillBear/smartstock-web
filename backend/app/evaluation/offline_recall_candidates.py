@@ -135,6 +135,7 @@ def _daily_candidates(
     if max_rows_per_day is not None:
         deep_size = min(deep_size, max(1, int(max_rows_per_day)))
     recalled, diagnostics = _select_recall_pool(filtered, experiment, recall_size)
+    recalled = _apply_rerank_scores(recalled, experiment)
     candidates = sorted(recalled, key=lambda item: (-item["offline_scores"]["selected_score"], item["symbol"]))[:deep_size]
     audit_items = _funnel_audit_items(filtered, recalled, candidates)
     diagnostics.update(
@@ -144,6 +145,7 @@ def _daily_candidates(
             "recall_count": len(recalled),
             "deep_analysis_count": len(candidates),
             "funnel_audit_row_count": len(audit_items),
+            "rerank_method": experiment.get("rerank_method") or "selected_score",
         }
     )
     return {"candidates": candidates, "audit_items": audit_items, "diagnostics": diagnostics}
@@ -305,6 +307,29 @@ def _multi_channel_union(items: List[Dict[str, Any]], recall_size: int) -> List[
             if channel_score > float(current["offline_scores"].get("selected_score", 0.0)):
                 current["offline_scores"]["selected_score"] = round(channel_score, 6)
     return sorted(selected.values(), key=lambda item: (-item["offline_scores"]["selected_score"], item["symbol"]))[:recall_size]
+
+
+def _apply_rerank_scores(items: List[Dict[str, Any]], experiment: Dict[str, Any]) -> List[Dict[str, Any]]:
+    method = str(experiment.get("rerank_method") or "").strip()
+    if not method:
+        return items
+    if method == "channel_weighted_blend":
+        weights = {str(key): _safe_float(value, 0.0) for key, value in (experiment.get("rerank_weights") or {}).items()}
+        total_weight = sum(weight for weight in weights.values() if weight > 0)
+        if total_weight <= 0:
+            return items
+        reranked = []
+        for item in items:
+            current = copy.deepcopy(item)
+            scores = current.get("offline_scores") or {}
+            blended = sum(_safe_float(scores.get(channel), 0.0) * weight for channel, weight in weights.items() if weight > 0) / total_weight
+            current["offline_scores"]["selected_score"] = round(blended, 6)
+            current["offline_scores"]["rerank_score"] = round(blended, 6)
+            current["rerank_method"] = method
+            current["rerank_channels"] = [channel for channel, weight in weights.items() if weight > 0]
+            reranked.append(current)
+        return reranked
+    return items
 
 
 def _candidate_row(

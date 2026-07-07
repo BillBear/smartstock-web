@@ -68,6 +68,7 @@ class OfflineRecallEvaluationCliTests(unittest.TestCase):
                     "recall_220_deep_150",
                     "--experiment-key",
                     "multi_channel_union",
+                    "--include-baseline",
                     "--output-root",
                     str(root),
                     "--fixture",
@@ -89,7 +90,9 @@ class OfflineRecallEvaluationCliTests(unittest.TestCase):
             self.assertFalse(summary["production_evidence"])
             report = json.loads((root / "recall_experiment_report.json").read_text(encoding="utf-8"))
             self.assertFalse(report["production_switch_ready"])
-            self.assertIn("missing_experiment_reports", report["blocking_reasons"])
+            self.assertNotIn("missing_experiment_reports", report["blocking_reasons"])
+            self.assertEqual(report["summary"]["required_experiment_count"], 3)
+            self.assertEqual(report["summary"]["missing_experiment_keys"], [])
             self.assertIn("generated recall_220_deep_150", result.stdout)
 
     def test_build_report_accepts_funnel_audit_diagnostic_rows(self):
@@ -148,6 +151,62 @@ class OfflineRecallEvaluationCliTests(unittest.TestCase):
         self.assertEqual(summary["candidate_row_count"], 1)
         self.assertEqual(summary["diagnostic_row_count"], 2)
         self.assertEqual(summary["diagnostics"]["5"]["strong_candidate_funnel_retention"]["prefilter"]["strong_count"], 1)
+
+    def test_offline_variant_fast_mode_skips_funnel_audit_labeling(self):
+        module = _load_script_module()
+        calls = []
+        original_generate = module.generate_offline_recall_rows
+        original_attach = module.attach_forward_labels
+        original_build = module._build_and_annotate_report
+
+        def fake_generate(**kwargs):
+            return {
+                "rows": [{"symbol": "000001", "trade_date": "2026-07-02"}],
+                "funnel_audit_rows": [
+                    {"symbol": "000001", "trade_date": "2026-07-02", "funnel_layer": "prefilter"},
+                    {"symbol": "000002", "trade_date": "2026-07-02", "funnel_layer": "prefilter"},
+                ],
+                "coverage": {"coverage_status": "complete"},
+                "experiment": {"key": "rerank_channel_blend_balanced"},
+            }
+
+        def fake_attach(rows, data_source_manager, label_config=None):
+            calls.append(len(rows))
+            return [{**row, "strong_5d": False} for row in rows]
+
+        def fake_build(*args, **kwargs):
+            self.assertIsNone(kwargs.get("diagnostic_rows"))
+            return {"candidate_row_count": len(args[1])}
+
+        try:
+            module.generate_offline_recall_rows = fake_generate
+            module.attach_forward_labels = fake_attach
+            module._build_and_annotate_report = fake_build
+            args = argparse.Namespace(
+                strategy_code="trend_breakout",
+                risk_level="medium",
+                start_date="2026-07-02",
+                end_date="2026-07-02",
+                max_rows_per_day=None,
+                min_market_snapshot_count=1,
+                skip_diagnostic_labels=True,
+            )
+
+            module._write_offline_variant_report(
+                args=args,
+                key="rerank_channel_blend_balanced",
+                output_root=Path("/tmp/unused"),
+                label_config={"horizons": [5]},
+                execution_config={},
+                store=object(),
+                data_source_manager=object(),
+            )
+        finally:
+            module.generate_offline_recall_rows = original_generate
+            module.attach_forward_labels = original_attach
+            module._build_and_annotate_report = original_build
+
+        self.assertEqual(calls, [1])
 
     def test_cached_history_range_manager_fetches_each_symbol_once(self):
         module = _load_script_module()

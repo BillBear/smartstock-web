@@ -259,6 +259,49 @@ class OfflineRecallCandidateTests(unittest.TestCase):
         recalled = next(row for row in union["rows"] if row["symbol"] == "000003")
         self.assertIn("pullback_repair", recalled["recall_channels"])
 
+    def test_weighted_channel_rerank_promotes_multi_channel_strength_over_single_pre_score(self):
+        items = [
+            _row("000001", pct_change=2.5, amount=2_000_000_000, turnover=10.0, high=10.5, low=9.5, industry="高预评"),
+            _row("000002", pct_change=6.0, amount=1_500_000_000, turnover=8.0, high=10.5, low=9.5, industry="量价主题"),
+        ]
+        store = SnapshotStoreStub(
+            {
+                "2026-07-02": {
+                    "trade_date": "2026-07-02",
+                    "source": "a_share_snapshot",
+                    "snapshot_count": len(items),
+                    "quality_status": "ok",
+                    "items": items,
+                }
+            }
+        )
+
+        union = generate_offline_recall_rows(
+            store=store,
+            experiment_key="multi_channel_union",
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            start_date="2026-07-02",
+            end_date="2026-07-02",
+            max_rows_per_day=2,
+        )
+        reranked = generate_offline_recall_rows(
+            store=store,
+            experiment_key="rerank_channel_blend_balanced",
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            start_date="2026-07-02",
+            end_date="2026-07-02",
+            max_rows_per_day=2,
+        )
+
+        self.assertEqual([row["symbol"] for row in union["rows"]], ["000001", "000002"])
+        self.assertEqual([row["symbol"] for row in reranked["rows"]], ["000002", "000001"])
+        leader = reranked["rows"][0]
+        self.assertEqual(leader["experiment_key"], "rerank_channel_blend_balanced")
+        self.assertGreater(leader["factor_continuation_score"], reranked["rows"][1]["factor_continuation_score"])
+        self.assertGreater(leader["factor_theme_rank_score"], reranked["rows"][1]["factor_theme_rank_score"])
+
     def test_medium_recall_keeps_formerly_hard_filtered_boundary_candidates(self):
         items = [
             _row("000101", amount=60_000_000, turnover=2.4, pct_change=3.2, price=12.0, industry="低成交"),

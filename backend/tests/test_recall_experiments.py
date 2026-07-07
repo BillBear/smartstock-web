@@ -72,6 +72,8 @@ class RecallExperimentReportTests(unittest.TestCase):
                 "no_industry_cap_240",
                 "no_industry_cap_500",
                 "multi_channel_union",
+                "rerank_channel_blend_balanced",
+                "rerank_top30_channel_focus",
             ],
         )
 
@@ -107,6 +109,8 @@ class RecallExperimentReportTests(unittest.TestCase):
             _write_summary(root, "production_cap_240")
             _write_summary(root, "no_industry_cap_240")
             _write_summary(root, "no_industry_cap_500")
+            _write_summary(root, "rerank_channel_blend_balanced")
+            _write_summary(root, "rerank_top30_channel_focus")
             _write_summary(
                 root,
                 "multi_channel_union",
@@ -160,6 +164,8 @@ class RecallExperimentReportTests(unittest.TestCase):
                 execution_config={"commission": 0.0003, "slippage": 0.002},
             )
             _write_summary(root, "multi_channel_union")
+            _write_summary(root, "rerank_channel_blend_balanced")
+            _write_summary(root, "rerank_top30_channel_focus")
 
             report = build_recall_experiment_report(root)
 
