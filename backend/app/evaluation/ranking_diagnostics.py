@@ -67,6 +67,8 @@ def build_ranking_diagnostics(rows: List[Dict[str, Any]], horizon: int) -> Dict[
         "factor_correlations": factor_correlations(normalized, h),
         "market_state_breakdown": _market_state_breakdown(normalized, h),
         "buy_trigger_conservatism": _buy_trigger_conservatism(normalized, h),
+        "strong_candidate_funnel_retention": _strong_candidate_funnel_retention(normalized, h),
+        "recall_channel_contribution": _recall_channel_contribution(normalized, h),
     }
 
 
@@ -143,6 +145,97 @@ def _buy_trigger_conservatism(rows: List[Dict[str, Any]], horizon: int) -> Dict[
         "unbought_strong_avg_return_pct": _avg_return(unbought_strong, return_key),
         "bought_strong_avg_return_pct": _avg_return(bought_strong, return_key),
         "interpretation": "Diagnostic only; this does not change buy triggers or recommend parameter updates.",
+    }
+
+
+def _strong_candidate_funnel_retention(rows: List[Dict[str, Any]], horizon: int) -> Dict[str, Dict[str, Any]]:
+    h = int(horizon)
+    strong_key = f"strong_{h}d"
+    return_key = f"return_{h}d_pct"
+    grouped: Dict[str, List[Dict[str, Any]]] = {
+        "prefilter": [],
+        "recall": [],
+        "deep_analysis": [],
+        "top_30": [],
+    }
+    for row in rows or []:
+        layer = str(row.get("funnel_layer") or "deep_analysis")
+        grouped.setdefault(layer, []).append(row)
+        if layer in {"deep_analysis", "final_output"} and _rank_no(row) <= 30:
+            grouped["top_30"].append(row)
+    total_strong = _retention_denominator(grouped, strong_key)
+    return {
+        layer: _funnel_layer_summary(items, strong_key, return_key, total_strong)
+        for layer, items in grouped.items()
+    }
+
+
+def _retention_denominator(grouped: Dict[str, List[Dict[str, Any]]], strong_key: str) -> int:
+    prefilter_strong = sum(1 for row in grouped.get("prefilter") or [] if bool(row.get(strong_key)))
+    if prefilter_strong > 0:
+        return prefilter_strong
+    seen = set()
+    for rows in grouped.values():
+        for row in rows:
+            if bool(row.get(strong_key)):
+                seen.add((str(row.get("trade_date") or ""), str(row.get("symbol") or "")))
+    return len(seen)
+
+
+def _funnel_layer_summary(
+    rows: List[Dict[str, Any]],
+    strong_key: str,
+    return_key: str,
+    total_strong: int,
+) -> Dict[str, Any]:
+    strong_count = sum(1 for row in rows if bool(row.get(strong_key)))
+    return {
+        "row_count": len(rows),
+        "strong_count": strong_count,
+        "strong_retention_rate": round(strong_count / total_strong, 6) if total_strong > 0 else 0.0,
+        "avg_return_pct": _avg_return(rows, return_key),
+        "diagnostic_only": True,
+    }
+
+
+def _recall_channel_contribution(rows: List[Dict[str, Any]], horizon: int) -> Dict[str, Dict[str, Any]]:
+    h = int(horizon)
+    strong_key = f"strong_{h}d"
+    return_key = f"return_{h}d_pct"
+    recall_layer_rows = [row for row in rows or [] if str(row.get("funnel_layer") or "") == "recall"]
+    source_rows = recall_layer_rows or list(rows or [])
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for row in source_rows:
+        for channel in _channel_names(row.get("recall_channels")):
+            grouped.setdefault(channel, []).append(row)
+    return {
+        channel: _channel_summary(items, strong_key, return_key)
+        for channel, items in sorted(grouped.items())
+    }
+
+
+def _channel_names(value: Any) -> List[str]:
+    if isinstance(value, list):
+        names = [str(item) for item in value if str(item or "").strip()]
+    elif isinstance(value, tuple):
+        names = [str(item) for item in value if str(item or "").strip()]
+    elif value:
+        names = [str(value)]
+    else:
+        names = []
+    return names or ["unknown"]
+
+
+def _channel_summary(rows: List[Dict[str, Any]], strong_key: str, return_key: str) -> Dict[str, Any]:
+    strong_count = sum(1 for row in rows if bool(row.get(strong_key)))
+    top30_strong = sum(1 for row in rows if bool(row.get(strong_key)) and _rank_no(row) <= 30)
+    return {
+        "row_count": len(rows),
+        "strong_count": strong_count,
+        "precision": round(strong_count / len(rows), 6) if rows else 0.0,
+        "avg_return_pct": _avg_return(rows, return_key),
+        "top30_strong_count": top30_strong,
+        "diagnostic_only": True,
     }
 
 

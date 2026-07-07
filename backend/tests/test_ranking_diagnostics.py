@@ -94,6 +94,67 @@ class RankingDiagnosticTests(unittest.TestCase):
         self.assertEqual(conservatism["bought_strong_count"], 1)
         self.assertEqual(conservatism["diagnostic_only"], True)
 
+    def test_strong_candidate_funnel_retention_counts_layers(self):
+        rows = [
+            {"trade_date": "2026-07-03", "symbol": "000001", "rank_no": 1, "return_5d_pct": 11.0, "strong_5d": True, "funnel_layer": "prefilter", "market_state_tag": "neutral"},
+            {"trade_date": "2026-07-03", "symbol": "000002", "rank_no": 2, "return_5d_pct": 9.0, "strong_5d": True, "funnel_layer": "prefilter", "market_state_tag": "neutral"},
+            {"trade_date": "2026-07-03", "symbol": "000001", "rank_no": 1, "return_5d_pct": 11.0, "strong_5d": True, "funnel_layer": "recall", "market_state_tag": "neutral"},
+            {"trade_date": "2026-07-03", "symbol": "000001", "rank_no": 3, "return_5d_pct": 11.0, "strong_5d": True, "funnel_layer": "deep_analysis", "market_state_tag": "neutral"},
+            {"trade_date": "2026-07-03", "symbol": "000003", "rank_no": 5, "return_5d_pct": -1.0, "strong_5d": False, "funnel_layer": "deep_analysis", "market_state_tag": "neutral"},
+        ]
+
+        report = build_ranking_diagnostics(rows, horizon=5)
+
+        retention = report["strong_candidate_funnel_retention"]
+        self.assertEqual(retention["prefilter"]["row_count"], 2)
+        self.assertEqual(retention["prefilter"]["strong_count"], 2)
+        self.assertEqual(retention["prefilter"]["strong_retention_rate"], 1.0)
+        self.assertEqual(retention["recall"]["strong_count"], 1)
+        self.assertEqual(retention["recall"]["strong_retention_rate"], 0.5)
+        self.assertEqual(retention["deep_analysis"]["row_count"], 2)
+        self.assertEqual(retention["deep_analysis"]["strong_count"], 1)
+        self.assertEqual(retention["deep_analysis"]["strong_retention_rate"], 0.5)
+        self.assertEqual(retention["top_30"]["row_count"], 2)
+        self.assertEqual(retention["top_30"]["strong_count"], 1)
+        self.assertEqual(retention["top_30"]["strong_retention_rate"], 0.5)
+
+    def test_recall_channel_contribution_measures_signal_and_noise(self):
+        rows = [
+            {"symbol": "000001", "rank_no": 5, "return_5d_pct": 10.0, "strong_5d": True, "recall_channels": ["trend_breakout"], "market_state_tag": "neutral"},
+            {"symbol": "000002", "rank_no": 2, "return_5d_pct": -3.0, "strong_5d": False, "recall_channels": ["pullback_repair"], "market_state_tag": "neutral"},
+            {"symbol": "000003", "rank_no": 35, "return_5d_pct": 12.0, "strong_5d": True, "recall_channels": ["trend_breakout", "pullback_repair"], "market_state_tag": "neutral"},
+            {"symbol": "000004", "rank_no": 1, "return_5d_pct": 0.0, "strong_5d": False, "market_state_tag": "neutral"},
+        ]
+
+        report = build_ranking_diagnostics(rows, horizon=5)
+
+        contribution = report["recall_channel_contribution"]
+        self.assertEqual(contribution["trend_breakout"]["row_count"], 2)
+        self.assertEqual(contribution["trend_breakout"]["strong_count"], 2)
+        self.assertEqual(contribution["trend_breakout"]["precision"], 1.0)
+        self.assertEqual(contribution["trend_breakout"]["top30_strong_count"], 1)
+        self.assertEqual(contribution["pullback_repair"]["row_count"], 2)
+        self.assertEqual(contribution["pullback_repair"]["strong_count"], 1)
+        self.assertEqual(contribution["pullback_repair"]["precision"], 0.5)
+        self.assertEqual(contribution["pullback_repair"]["top30_strong_count"], 0)
+        self.assertEqual(contribution["unknown"]["row_count"], 1)
+        self.assertEqual(contribution["unknown"]["precision"], 0.0)
+
+    def test_recall_channel_contribution_prefers_recall_layer_audit_rows(self):
+        rows = [
+            {"symbol": "000001", "rank_no": 1, "return_5d_pct": 12.0, "strong_5d": True, "funnel_layer": "prefilter", "recall_channels": ["production_pre_score"], "market_state_tag": "neutral"},
+            {"symbol": "000002", "rank_no": 2, "return_5d_pct": -2.0, "strong_5d": False, "funnel_layer": "prefilter", "recall_channels": ["production_pre_score"], "market_state_tag": "neutral"},
+            {"symbol": "000001", "rank_no": 1, "return_5d_pct": 12.0, "strong_5d": True, "funnel_layer": "recall", "recall_channels": ["trend_breakout"], "market_state_tag": "neutral"},
+            {"symbol": "000001", "rank_no": 1, "return_5d_pct": 12.0, "strong_5d": True, "funnel_layer": "deep_analysis", "recall_channels": ["trend_breakout"], "market_state_tag": "neutral"},
+        ]
+
+        report = build_ranking_diagnostics(rows, horizon=5)
+
+        contribution = report["recall_channel_contribution"]
+        self.assertNotIn("production_pre_score", contribution)
+        self.assertEqual(contribution["trend_breakout"]["row_count"], 1)
+        self.assertEqual(contribution["trend_breakout"]["strong_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,6 @@
 import json
 import importlib.util
+import argparse
 import os
 import subprocess
 import sys
@@ -90,6 +91,63 @@ class OfflineRecallEvaluationCliTests(unittest.TestCase):
             self.assertFalse(report["production_switch_ready"])
             self.assertIn("missing_experiment_reports", report["blocking_reasons"])
             self.assertIn("generated recall_220_deep_150", result.stdout)
+
+    def test_build_report_accepts_funnel_audit_diagnostic_rows(self):
+        module = _load_script_module()
+        args = argparse.Namespace(
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            start_date="2026-07-03",
+            end_date="2026-07-03",
+            horizons=[5],
+            top_k=[3],
+        )
+        rows = [
+            {
+                "trade_date": "2026-07-03",
+                "symbol": "000003",
+                "rank_no": 1,
+                "tradability_status": "tradable",
+                "strong_5d": False,
+                "return_5d_pct": -1.0,
+                "funnel_layer": "deep_analysis",
+            }
+        ]
+        diagnostic_rows = [
+            {
+                "trade_date": "2026-07-03",
+                "symbol": "000001",
+                "rank_no": 1,
+                "tradability_status": "tradable",
+                "strong_5d": True,
+                "return_5d_pct": 12.0,
+                "funnel_layer": "prefilter",
+            },
+            {
+                "trade_date": "2026-07-03",
+                "symbol": "000001",
+                "rank_no": 1,
+                "tradability_status": "tradable",
+                "strong_5d": True,
+                "return_5d_pct": 12.0,
+                "funnel_layer": "deep_analysis",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = module._build_and_annotate_report(
+                key="multi_channel_union",
+                rows=rows,
+                coverage={"coverage_status": "complete", "covered_date_count": 1},
+                args=args,
+                output_root=Path(tmp),
+                label_config={"horizons": [5]},
+                execution_config={"fixture": "unit"},
+                diagnostic_rows=diagnostic_rows,
+            )
+
+        self.assertEqual(summary["candidate_row_count"], 1)
+        self.assertEqual(summary["diagnostic_row_count"], 2)
+        self.assertEqual(summary["diagnostics"]["5"]["strong_candidate_funnel_retention"]["prefilter"]["strong_count"], 1)
 
     def test_cached_history_range_manager_fetches_each_symbol_once(self):
         module = _load_script_module()

@@ -297,12 +297,13 @@ def _write_offline_variant_report(
         min_market_snapshot_count=args.min_market_snapshot_count,
     )
     rows = attach_forward_labels(generated["rows"], data_source_manager, label_config=label_config)
+    diagnostic_rows = attach_forward_labels(generated.get("funnel_audit_rows") or generated["rows"], data_source_manager, label_config=label_config)
     coverage = {
         **generated["coverage"],
         "experiment_key": key,
         "recall_experiment": generated["experiment"],
     }
-    _build_and_annotate_report(key, rows, coverage, args, output_root, label_config, execution_config)
+    _build_and_annotate_report(key, rows, coverage, args, output_root, label_config, execution_config, diagnostic_rows=diagnostic_rows)
 
 
 def _build_and_annotate_report(
@@ -313,6 +314,7 @@ def _build_and_annotate_report(
     output_root: Path,
     label_config: dict,
     execution_config: dict,
+    diagnostic_rows: Optional[List[dict]] = None,
 ) -> dict:
     summary = build_ranking_report(
         candidate_rows=rows,
@@ -326,6 +328,7 @@ def _build_and_annotate_report(
         label_config=label_config,
         coverage=coverage,
         execution_config=execution_config,
+        diagnostic_rows=diagnostic_rows,
     )
     experiment = _experiment_by_key(key)
     summary.update(
