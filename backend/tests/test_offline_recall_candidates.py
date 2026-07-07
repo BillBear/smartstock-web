@@ -111,6 +111,112 @@ class OfflineRecallCandidateTests(unittest.TestCase):
         self.assertEqual(small["experiment"]["recall_size"], 220)
         self.assertEqual(large["experiment"]["recall_size"], 500)
 
+    def test_offline_candidate_rows_include_funnel_layer(self):
+        store = SnapshotStoreStub(
+            {
+                "2026-07-02": {
+                    "trade_date": "2026-07-02",
+                    "source": "a_share_snapshot",
+                    "snapshot_count": 1,
+                    "quality_status": "ok",
+                    "items": [_row("000001", amount=900_000_000, turnover=5.0, industry="银行")],
+                }
+            }
+        )
+
+        result = generate_offline_recall_rows(
+            store=store,
+            experiment_key="recall_220_deep_150",
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            start_date="2026-07-02",
+            end_date="2026-07-02",
+        )
+
+        self.assertEqual(result["rows"][0]["funnel_layer"], "deep_analysis")
+        self.assertEqual(result["rows"][0]["recall_channels"], ["production_pre_score"])
+
+    def test_offline_generation_returns_funnel_audit_rows_for_layers(self):
+        items = [
+            _row("000001", amount=900_000_000, turnover=5.0, industry="银行"),
+            _row("000002", amount=800_000_000, turnover=4.0, industry="家电"),
+            _row("000003", amount=700_000_000, turnover=3.0, industry="医药"),
+        ]
+        store = SnapshotStoreStub(
+            {
+                "2026-07-02": {
+                    "trade_date": "2026-07-02",
+                    "source": "a_share_snapshot",
+                    "snapshot_count": len(items),
+                    "quality_status": "ok",
+                    "items": items,
+                }
+            }
+        )
+
+        result = generate_offline_recall_rows(
+            store=store,
+            experiment_key="recall_220_deep_150",
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            start_date="2026-07-02",
+            end_date="2026-07-02",
+            max_rows_per_day=2,
+        )
+
+        audit_rows = result["funnel_audit_rows"]
+        layer_counts = {}
+        for row in audit_rows:
+            layer_counts[row["funnel_layer"]] = layer_counts.get(row["funnel_layer"], 0) + 1
+        self.assertEqual(layer_counts["prefilter"], 3)
+        self.assertEqual(layer_counts["recall"], 3)
+        self.assertEqual(layer_counts["deep_analysis"], 2)
+        self.assertEqual(result["coverage"]["funnel_summary"]["funnel_audit_row_count"], 8)
+
+    def test_production_cap_recall_reports_industry_cap_losses(self):
+        chip_rows = [
+            _row(f"000{i:03d}", amount=(2_500_000_000 - i * 10_000_000), turnover=6.0, industry="芯片")
+            for i in range(1, 18)
+        ]
+        other_rows = [
+            _row("300101", amount=400_000_000, turnover=3.0, industry="医药"),
+            _row("600101", amount=350_000_000, turnover=3.0, industry="银行"),
+        ]
+        store = SnapshotStoreStub(
+            {
+                "2026-07-02": {
+                    "trade_date": "2026-07-02",
+                    "source": "a_share_snapshot",
+                    "snapshot_count": len(chip_rows) + len(other_rows),
+                    "quality_status": "ok",
+                    "items": chip_rows + other_rows,
+                }
+            }
+        )
+
+        capped = generate_offline_recall_rows(
+            store=store,
+            experiment_key="production_cap_240",
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            start_date="2026-07-02",
+            end_date="2026-07-02",
+        )
+        uncapped = generate_offline_recall_rows(
+            store=store,
+            experiment_key="no_industry_cap_240",
+            strategy_code="trend_breakout",
+            risk_level="medium",
+            start_date="2026-07-02",
+            end_date="2026-07-02",
+        )
+
+        self.assertNotIn("000017", {row["symbol"] for row in capped["rows"]})
+        self.assertIn("000017", {row["symbol"] for row in uncapped["rows"]})
+        self.assertEqual(capped["coverage"]["funnel_summary"]["industry_cap_rejected_count"], 1)
+        self.assertEqual(capped["coverage"]["funnel_summary"]["topn_rejected_count"], 0)
+        self.assertEqual(uncapped["coverage"]["funnel_summary"]["industry_cap_rejected_count"], 0)
+
     def test_multi_channel_union_can_recall_pullback_candidate_not_in_pre_score_top_slice(self):
         items = [
             _row("000001", pct_change=2.5, amount=900_000_000, turnover=7.0, high=10.9, low=9.7, industry="强势"),

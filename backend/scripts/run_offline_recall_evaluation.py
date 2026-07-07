@@ -31,6 +31,9 @@ DEFAULT_VARIANT_KEYS = [
     "recall_220_deep_150",
     "recall_300_deep_300",
     "recall_500_deep_500",
+    "production_cap_240",
+    "no_industry_cap_240",
+    "no_industry_cap_500",
     "multi_channel_union",
 ]
 
@@ -294,12 +297,13 @@ def _write_offline_variant_report(
         min_market_snapshot_count=args.min_market_snapshot_count,
     )
     rows = attach_forward_labels(generated["rows"], data_source_manager, label_config=label_config)
+    diagnostic_rows = attach_forward_labels(generated.get("funnel_audit_rows") or generated["rows"], data_source_manager, label_config=label_config)
     coverage = {
         **generated["coverage"],
         "experiment_key": key,
         "recall_experiment": generated["experiment"],
     }
-    _build_and_annotate_report(key, rows, coverage, args, output_root, label_config, execution_config)
+    _build_and_annotate_report(key, rows, coverage, args, output_root, label_config, execution_config, diagnostic_rows=diagnostic_rows)
 
 
 def _build_and_annotate_report(
@@ -310,6 +314,7 @@ def _build_and_annotate_report(
     output_root: Path,
     label_config: dict,
     execution_config: dict,
+    diagnostic_rows: Optional[List[dict]] = None,
 ) -> dict:
     summary = build_ranking_report(
         candidate_rows=rows,
@@ -323,6 +328,7 @@ def _build_and_annotate_report(
         label_config=label_config,
         coverage=coverage,
         execution_config=execution_config,
+        diagnostic_rows=diagnostic_rows,
     )
     experiment = _experiment_by_key(key)
     summary.update(
@@ -352,21 +358,24 @@ def _write_markdown_report(report: dict, output_path: Path) -> None:
         f"- production_switch_ready: `{str(report.get('production_switch_ready')).lower()}`",
         f"- blocking_reasons: `{', '.join(report.get('blocking_reasons') or []) or '-'}`",
         "",
-        "| experiment | available | evidence | compatibility | Precision@3 | Precision@5 | NDCG@10 | Top5 Avg Return |",
-        "| --- | ---: | --- | --- | ---: | ---: | ---: | ---: |",
+        "| experiment | available | evidence | compatibility | cap rejected | topn rejected | Precision@3 | Precision@5 | NDCG@10 | Top5 Avg Return |",
+        "| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in report.get("experiments") or []:
         metrics = row.get("metrics") or {}
+        funnel = row.get("funnel_summary") or {}
         issues = row.get("compatibility_issues") or []
         compatibility = row.get("compatibility_status") or "-"
         if issues:
             compatibility = f"{compatibility}: {', '.join(str(item) for item in issues)}"
         lines.append(
-            "| {key} | {available} | {evidence} | {compatibility} | {p3:.4f} | {p5:.4f} | {ndcg:.4f} | {ret:.4f} |".format(
+            "| {key} | {available} | {evidence} | {compatibility} | {cap} | {topn} | {p3:.4f} | {p5:.4f} | {ndcg:.4f} | {ret:.4f} |".format(
                 key=row.get("key"),
                 available=str(bool(row.get("available"))).lower(),
                 evidence=row.get("evidence_status"),
                 compatibility=compatibility,
+                cap=int(funnel.get("industry_cap_rejected_count") or 0),
+                topn=int(funnel.get("topn_rejected_count") or 0),
                 p3=float(metrics.get("precision_at_3") or 0.0),
                 p5=float(metrics.get("precision_at_5") or 0.0),
                 ndcg=float(metrics.get("ndcg_at_10") or 0.0),

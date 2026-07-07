@@ -39,15 +39,32 @@ def generate_offline_recall_rows(
     requested_dates = _date_range(start_date, end_date)
     available_dates: List[str] = []
     rows: List[Dict[str, Any]] = []
+    funnel_audit_rows: List[Dict[str, Any]] = []
+    funnel_daily: List[Dict[str, Any]] = []
     for trade_date in requested_dates:
         snapshot = _read_same_day_snapshot(store, trade_date, min_market_snapshot_count)
         items = list((snapshot or {}).get("items") or [])
         if not items:
             continue
-        candidates = _daily_candidates(items, experiment, risk_level, max_rows_per_day)
+        daily = _daily_candidates(items, experiment, risk_level, max_rows_per_day)
+        candidates = daily["candidates"]
         if not candidates:
             continue
         available_dates.append(trade_date)
+        funnel_daily.append({"trade_date": trade_date, **daily["diagnostics"]})
+        funnel_audit_rows.extend(
+            _candidate_row(
+                trade_date=trade_date,
+                item=audit_item["item"],
+                rank_no=audit_item["rank_no"],
+                experiment=experiment,
+                strategy_code=strategy_code,
+                risk_level=risk_level,
+                user_id=user_id,
+                funnel_layer=audit_item["funnel_layer"],
+            )
+            for audit_item in daily["audit_items"]
+        )
         rows.extend(
             _candidate_row(
                 trade_date=trade_date,
@@ -62,10 +79,13 @@ def generate_offline_recall_rows(
         )
     return {
         "rows": rows,
+        "funnel_audit_rows": funnel_audit_rows,
         "coverage": {
             **offline_recall_coverage(requested_dates, available_dates),
             "source": "persisted_market_snapshots",
             "same_day_market_snapshot_required": True,
+            "funnel_summary": _aggregate_funnel_diagnostics(funnel_daily),
+            "funnel_daily": funnel_daily,
         },
         "experiment": experiment,
     }
@@ -106,7 +126,7 @@ def _daily_candidates(
     experiment: Dict[str, Any],
     risk_level: str,
     max_rows_per_day: Optional[int],
-) -> List[Dict[str, Any]]:
+) -> Dict[str, Any]:
     rules = _risk_rules(risk_level)
     filtered = [_scored_item(item, rules) for item in items]
     filtered = [item for item in filtered if item]
@@ -114,11 +134,99 @@ def _daily_candidates(
     deep_size = max(1, int(experiment.get("deep_analysis_size") or recall_size))
     if max_rows_per_day is not None:
         deep_size = min(deep_size, max(1, int(max_rows_per_day)))
+    recalled, diagnostics = _select_recall_pool(filtered, experiment, recall_size)
+    candidates = sorted(recalled, key=lambda item: (-item["offline_scores"]["selected_score"], item["symbol"]))[:deep_size]
+    audit_items = _funnel_audit_items(filtered, recalled, candidates)
+    diagnostics.update(
+        {
+            "input_count": len(items),
+            "prefilter_count": len(filtered),
+            "recall_count": len(recalled),
+            "deep_analysis_count": len(candidates),
+            "funnel_audit_row_count": len(audit_items),
+        }
+    )
+    return {"candidates": candidates, "audit_items": audit_items, "diagnostics": diagnostics}
+
+
+def _funnel_audit_items(
+    filtered: List[Dict[str, Any]],
+    recalled: List[Dict[str, Any]],
+    candidates: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    audit_items: List[Dict[str, Any]] = []
+    layer_inputs = [
+        ("prefilter", sorted(filtered, key=lambda item: (-item["offline_scores"]["production_pre_score"], item["symbol"]))),
+        ("recall", sorted(recalled, key=lambda item: (-item["offline_scores"]["selected_score"], item["symbol"]))),
+        ("deep_analysis", sorted(candidates, key=lambda item: (-item["offline_scores"]["selected_score"], item["symbol"]))),
+    ]
+    for layer, items in layer_inputs:
+        audit_items.extend(
+            {"funnel_layer": layer, "rank_no": index, "item": item}
+            for index, item in enumerate(items, start=1)
+        )
+    return audit_items
+
+
+def _select_recall_pool(
+    filtered: List[Dict[str, Any]],
+    experiment: Dict[str, Any],
+    recall_size: int,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    cap_mode = str(experiment.get("industry_cap_mode") or "none")
+    industry_cap = experiment.get("industry_cap")
+    candidate_pool = list(filtered)
+    industry_cap_rejected = 0
+    if cap_mode == "pre_recall":
+        capped: List[Dict[str, Any]] = []
+        for industry_rows in _group_by_industry(filtered).values():
+            industry_rows.sort(key=lambda item: (-item["offline_scores"]["production_pre_score"], item["symbol"]))
+            capped.extend(industry_rows[: int(industry_cap or _default_industry_cap(recall_size))])
+            industry_cap_rejected += max(0, len(industry_rows) - int(industry_cap or _default_industry_cap(recall_size)))
+        candidate_pool = capped
+
     if experiment.get("recall_method") == "multi_channel_union":
-        recalled = _multi_channel_union(filtered, recall_size)
+        recalled = _multi_channel_union(candidate_pool, recall_size)
     else:
-        recalled = sorted(filtered, key=lambda item: (-item["offline_scores"]["production_pre_score"], item["symbol"]))[:recall_size]
-    return sorted(recalled, key=lambda item: (-item["offline_scores"]["selected_score"], item["symbol"]))[:deep_size]
+        recalled = sorted(candidate_pool, key=lambda item: (-item["offline_scores"]["production_pre_score"], item["symbol"]))[:recall_size]
+
+    recalled_symbols = {item["symbol"] for item in recalled}
+    topn_rejected = sum(1 for item in candidate_pool if item["symbol"] not in recalled_symbols)
+    return recalled, {
+        "industry_cap_mode": cap_mode,
+        "industry_cap": int(industry_cap or 0) if cap_mode == "pre_recall" else None,
+        "industry_count": len(_group_by_industry(filtered)),
+        "industry_cap_rejected_count": industry_cap_rejected,
+        "topn_rejected_count": topn_rejected,
+    }
+
+
+def _group_by_industry(items: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for item in items:
+        grouped.setdefault(str(item.get("industry") or "未知行业"), []).append(item)
+    return grouped
+
+
+def _default_industry_cap(recall_size: int) -> int:
+    return max(8, min(30, max(4, int(recall_size or 240) // 15)))
+
+
+def _aggregate_funnel_diagnostics(daily_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    numeric_keys = [
+        "input_count",
+        "prefilter_count",
+        "recall_count",
+        "deep_analysis_count",
+        "funnel_audit_row_count",
+        "industry_cap_rejected_count",
+        "topn_rejected_count",
+    ]
+    summary = {key: sum(int(row.get(key) or 0) for row in daily_rows) for key in numeric_keys}
+    summary["covered_date_count"] = len(daily_rows)
+    modes = sorted(set(str(row.get("industry_cap_mode") or "none") for row in daily_rows))
+    summary["industry_cap_modes"] = modes
+    return summary
 
 
 def _scored_item(item: Dict[str, Any], rules: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -207,6 +315,7 @@ def _candidate_row(
     strategy_code: str,
     risk_level: str,
     user_id: str,
+    funnel_layer: str = "deep_analysis",
 ) -> Dict[str, Any]:
     scores = item.get("offline_scores") or {}
     return {
@@ -224,6 +333,7 @@ def _candidate_row(
         "market_state_tag": "offline_research",
         "was_bought": False,
         "action_type": None,
+        "funnel_layer": str(funnel_layer or "deep_analysis"),
         "recall_channels": list(item.get("recall_channels") or []),
         "factor_total_score": round(_safe_float(scores.get("selected_score"), 0.0), 4),
         "factor_ranking_score": round(_safe_float(scores.get("production_pre_score"), 0.0), 4),

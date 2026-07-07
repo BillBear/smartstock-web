@@ -28,16 +28,21 @@ def build_ranking_report(
     label_config: Dict[str, Any],
     coverage: Dict[str, Any],
     execution_config: Dict[str, Any] | None = None,
+    diagnostic_rows: List[Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
     """Write ranking evaluation artifacts and return summary payload."""
     out_dir = Path(output_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     rows = [dict(row) for row in candidate_rows or []]
+    audit_rows = [dict(row) for row in (diagnostic_rows if diagnostic_rows is not None else rows)]
     horizons = [int(item) for item in horizons]
     k_values = _metric_k_values(top_k_values)
     daily_metrics = _daily_metrics(rows, horizons, k_values)
     percentile_curve = _percentile_curve(rows, horizons)
     diagnostics = {str(horizon): build_ranking_diagnostics(rows, horizon) for horizon in horizons}
+    if diagnostic_rows is not None:
+        audit_diagnostics = {str(horizon): build_ranking_diagnostics(audit_rows, horizon) for horizon in horizons}
+        _attach_audit_diagnostic_sections(diagnostics, audit_diagnostics)
     correlation_rows = []
     for horizon in horizons:
         correlation_rows.extend(factor_correlations(rows, horizon))
@@ -49,6 +54,8 @@ def build_ranking_report(
         "ranking_miss_samples.csv": "ranking_miss_samples.csv",
         "ranking_false_positive_samples.csv": "ranking_false_positive_samples.csv",
         "ranking_factor_correlations.csv": "ranking_factor_correlations.csv",
+        "ranking_strong_funnel_retention.csv": "ranking_strong_funnel_retention.csv",
+        "ranking_recall_channel_contribution.csv": "ranking_recall_channel_contribution.csv",
         "ranking_diagnostics.json": "ranking_diagnostics.json",
         "ranking_summary.json": "ranking_summary.json",
     }
@@ -59,6 +66,8 @@ def build_ranking_report(
     write_csv(out_dir / "ranking_miss_samples.csv", _flatten_samples(diagnostics, "late_winner_samples", "late_winner"))
     write_csv(out_dir / "ranking_false_positive_samples.csv", _flatten_samples(diagnostics, "early_loser_samples", "early_loser"))
     write_csv(out_dir / "ranking_factor_correlations.csv", correlation_rows)
+    write_csv(out_dir / "ranking_strong_funnel_retention.csv", _flatten_strong_funnel_retention(diagnostics))
+    write_csv(out_dir / "ranking_recall_channel_contribution.csv", _flatten_recall_channel_contribution(diagnostics))
     _write_json(out_dir / "ranking_diagnostics.json", diagnostics)
 
     aggregate = _aggregate_metrics(daily_metrics, k_values)
@@ -76,6 +85,7 @@ def build_ranking_report(
         "execution_config": execution_config or {},
         "coverage": coverage,
         "candidate_row_count": len(rows),
+        "diagnostic_row_count": len(audit_rows),
         "metrics": aggregate,
         "diagnostics": diagnostics,
         "artifacts": artifact_paths,
@@ -131,6 +141,39 @@ def _flatten_samples(diagnostics: Dict[str, Dict[str, Any]], key: str, sample_ty
         for sample in report.get(key) or []:
             rows.append({"horizon": int(horizon), "sample_type": sample_type, **sample})
     return rows
+
+
+def _flatten_strong_funnel_retention(diagnostics: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows = []
+    for horizon, report in diagnostics.items():
+        retention = report.get("strong_candidate_funnel_retention") or {}
+        for layer in sorted(retention):
+            rows.append({"horizon": int(horizon), "funnel_layer": layer, **retention[layer]})
+    return rows
+
+
+def _flatten_recall_channel_contribution(diagnostics: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows = []
+    for horizon, report in diagnostics.items():
+        contribution = report.get("recall_channel_contribution") or {}
+        for channel in sorted(contribution):
+            rows.append({"horizon": int(horizon), "recall_channel": channel, **contribution[channel]})
+    return rows
+
+
+def _attach_audit_diagnostic_sections(
+    diagnostics: Dict[str, Dict[str, Any]],
+    audit_diagnostics: Dict[str, Dict[str, Any]],
+) -> None:
+    audit_keys = [
+        "strong_candidate_funnel_retention",
+        "recall_channel_contribution",
+    ]
+    for horizon, report in diagnostics.items():
+        audit_report = audit_diagnostics.get(horizon) or {}
+        for key in audit_keys:
+            if key in audit_report:
+                report[key] = audit_report[key]
 
 
 def _aggregate_metrics(rows: List[Dict[str, Any]], k_values: List[int]) -> Dict[str, Any]:

@@ -1,20 +1,26 @@
 # SmartStock Recall Experiment Current Readiness
 
-生成时间：2026-07-04
+生成时间：2026-07-06
 
 ## 结论
 
-当前已有离线召回实验比较器、只读离线召回候选生成器，并已完成一轮同口径全区间真实宽召回实验。但实验组没有通过生产切换门禁。因此，本阶段不能切换生产召回、深度分析数量或多通道召回逻辑。
+当前已有离线召回实验比较器、只读离线召回候选生成器，并已完成行业 cap 消融、TopN 扩容和多通道 union 的同口径真实快照评估。但实验组没有通过生产切换门禁。因此，本阶段不能继续切换生产召回、深度分析数量、行业 cap 或多通道召回逻辑。
 
 - 状态：`blocked`
 - 生产切换：`false`
-- 已有能力：`baseline replay`、`offline variant generator`、`experiment comparator`、`snapshot-backed forward labels`
-- 已有正式实验报告：`5 / 5`
-- 可用实验：`baseline`、`recall_220_deep_150`、`recall_300_deep_300`、`recall_500_deep_500`、`multi_channel_union`
+- 已有能力：`baseline replay`、`offline variant generator`、`experiment comparator`、`snapshot-backed forward labels`、`industry cap ablation`、`funnel loss diagnostics`
+- 已有正式实验报告：`8 / 8`
+- 可用实验：`baseline`、`recall_220_deep_150`、`recall_300_deep_300`、`recall_500_deep_500`、`production_cap_240`、`no_industry_cap_240`、`no_industry_cap_500`、`multi_channel_union`
 - 缺失实验：无
 - 阻塞原因：`no_variant_passed_gates`
 
-这说明当前已经具备“生成离线实验候选”和“比较实验结果”的工具，但最新证据不支持把宽召回或多通道召回切入生产。
+这说明当前已经具备“生成离线实验候选”“比较实验结果”和“解释行业 cap / TopN 漏斗损耗”的工具，但最新证据不支持把去行业 cap、宽召回或多通道召回直接切入生产。
+
+最新详细报告：
+
+```text
+docs/strategy-evidence/recall-experiments/2026-07-06-funnel-recall-ablation.md
+```
 
 2026-07-04 后新增的只读生成器：
 
@@ -172,10 +178,13 @@ max_drawdown: 0.0
 最新离线实验摘要：
 
 ```text
-recall_220_deep_150 Precision@3: 0.264957, Precision@5: 0.251282, NDCG@10: 0.153053, Top5 average return pct: 1.755358
-recall_300_deep_300 Precision@3: 0.264957, Precision@5: 0.251282, NDCG@10: 0.137071, Top5 average return pct: 1.755358
-recall_500_deep_500 Precision@3: 0.264957, Precision@5: 0.251282, NDCG@10: 0.128966, Top5 average return pct: 1.755358
-multi_channel_union Precision@3: 0.256410, Precision@5: 0.225641, NDCG@10: 0.146095, Top5 average return pct: 3.082375
+recall_220_deep_150 Precision@3: 0.314815, Precision@5: 0.300000, NDCG@10: 0.176673, Top5 average return pct: 3.689218
+recall_300_deep_300 Precision@3: 0.314815, Precision@5: 0.300000, NDCG@10: 0.155354, Top5 average return pct: 3.689218
+recall_500_deep_500 Precision@3: 0.314815, Precision@5: 0.300000, NDCG@10: 0.144982, Top5 average return pct: 3.689218
+production_cap_240 Precision@3: 0.314815, Precision@5: 0.300000, NDCG@10: 0.169098, Top5 average return pct: 3.689218, cap rejected: 23658, topn rejected: 9942
+no_industry_cap_240 Precision@3: 0.314815, Precision@5: 0.300000, NDCG@10: 0.162762, Top5 average return pct: 3.689218, cap rejected: 0, topn rejected: 33600
+no_industry_cap_500 Precision@3: 0.314815, Precision@5: 0.300000, NDCG@10: 0.144982, Top5 average return pct: 3.689218, cap rejected: 0, topn rejected: 31260
+multi_channel_union Precision@3: 0.314815, Precision@5: 0.288889, NDCG@10: 0.169960, Top5 average return pct: 3.869818
 ```
 
 标签质量摘要：
@@ -194,3 +203,5 @@ multi_channel_union tradable labels: 4762 / 4776
 本次只运行离线比较器并记录当前缺口，不修改生产选股、召回、排序、买入、卖出、止盈、止损或仓位逻辑。
 
 下一步若要推进 Phase 5，需要积累或回填至少 30 个同口径全市场快照日期，并在覆盖达标后重新跑同一矩阵。只有实验组通过 Precision/NDCG/收益/回撤门禁后，才允许提出独立的策略切换方案。
+
+当前最重要的策略判断：行业 cap 是明显的召回损耗源，但简单取消行业 cap 没有证明能提升 Top-K；扩大召回也没有修复 NDCG。漏斗规则后续应转向“硬过滤极简化 + 多通道召回 + 排序因子重建 + 行业分散软约束”，不能只靠放大候选数量解决。
