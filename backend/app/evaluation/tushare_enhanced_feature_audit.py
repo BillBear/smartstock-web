@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 import pandas as pd
+
+from app.evaluation.offline_rerank_experiment import run_offline_rerank_experiment
 
 
 DEFAULT_ENDPOINTS = [
@@ -16,6 +19,80 @@ DEFAULT_ENDPOINTS = [
     "moneyflow_hsgt",
     "moneyflow",
 ]
+
+BASELINE_RULE = "return_60d_rank_desc"
+
+ENHANCED_RERANK_RULES = {
+    "current_smartstock_rank": {
+        "kind": "column",
+        "column": "rank_no",
+        "direction": "asc",
+        "feature_columns": ["rank_no"],
+    },
+    "current_smartstock_score_desc": {
+        "kind": "column",
+        "column": "score",
+        "direction": "desc",
+        "feature_columns": ["score"],
+    },
+    BASELINE_RULE: {
+        "kind": "column",
+        "column": "return_60d_rank",
+        "direction": "desc",
+        "feature_columns": ["return_60d_rank"],
+    },
+    "adj_return_60d_rank_desc": {
+        "kind": "column",
+        "column": "adj_return_60d_rank",
+        "direction": "desc",
+        "feature_columns": ["adj_return_60d_rank"],
+    },
+    "turnover_rate_rank_desc": {
+        "kind": "column",
+        "column": "turnover_rate_rank",
+        "direction": "desc",
+        "feature_columns": ["turnover_rate_rank"],
+    },
+    "volume_ratio_rank_desc": {
+        "kind": "column",
+        "column": "volume_ratio_rank",
+        "direction": "desc",
+        "feature_columns": ["volume_ratio_rank"],
+    },
+    "moneyflow_strength_desc": {
+        "kind": "column",
+        "column": "main_net_inflow_ratio_rank",
+        "direction": "desc",
+        "feature_columns": ["main_net_inflow_ratio_rank"],
+    },
+    "turnover_momentum_combo": {
+        "kind": "combo",
+        "weights": {
+            "adj_return_60d_rank": 0.45,
+            "turnover_rate_rank": 0.35,
+            "volume_ratio_rank": 0.20,
+        },
+        "feature_columns": ["adj_return_60d_rank", "turnover_rate_rank", "volume_ratio_rank"],
+    },
+    "limit_aware_momentum_combo": {
+        "kind": "combo",
+        "weights": {
+            "adj_return_60d_rank": 0.50,
+            "turnover_rate_rank": 0.25,
+            "limit_buyability_rank": 0.25,
+        },
+        "feature_columns": ["adj_return_60d_rank", "turnover_rate_rank", "limit_buyability_rank"],
+    },
+}
+
+ENHANCED_RULE_NAMES = {
+    "adj_return_60d_rank_desc",
+    "turnover_rate_rank_desc",
+    "volume_ratio_rank_desc",
+    "moneyflow_strength_desc",
+    "turnover_momentum_combo",
+    "limit_aware_momentum_combo",
+}
 
 
 def audit_tushare_endpoint_availability(
@@ -117,6 +194,49 @@ def build_tushare_enhanced_feature_panel(
     panel = _attach_limit_features(panel)
     panel = _attach_moneyflow_features(panel)
     return panel.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
+
+
+def run_tushare_enhanced_feature_audit(
+    feature_panel: pd.DataFrame,
+    horizon: int = 10,
+    train_ratio: float = 0.6,
+    round_trip_cost_pct: float = 0.13,
+    min_margin_pct: float = 0.30,
+    min_total_dates: int = 4,
+    min_test_dates: int = 2,
+) -> Dict[str, Any]:
+    """Compare enhanced TuShare rules against the current hard rule benchmark."""
+    prepared = _prepare_audit_panel(feature_panel)
+    summary = run_offline_rerank_experiment(
+        prepared,
+        horizon=horizon,
+        train_ratio=train_ratio,
+        round_trip_cost_pct=round_trip_cost_pct,
+        min_margin_pct=min_margin_pct,
+        min_total_dates=min_total_dates,
+        min_test_dates=min_test_dates,
+        rules=ENHANCED_RERANK_RULES,
+    )
+    best_enhanced = _select_best_enhanced_rule(summary.get("rules") or {})
+    summary["audit_type"] = "tushare_enhanced_feature_audit"
+    summary["production_evidence"] = False
+    summary["strategy_impact"] = False
+    summary["production_action"] = "do_not_change_strategy"
+    summary["baseline_rule"] = BASELINE_RULE
+    summary["best_enhanced_rule"] = best_enhanced.get("name", "")
+    summary["ml_v2_2_gate"] = _evaluate_ml_v22_gate(
+        summary.get("rules") or {},
+        baseline_rule=BASELINE_RULE,
+        candidate_rule=best_enhanced.get("name", ""),
+        min_margin_pct=min_margin_pct,
+    )
+    summary["decision"] = {
+        "outcome": "enhanced_feature_gate_passed" if summary["ml_v2_2_gate"]["allowed"] else "enhanced_feature_gate_blocked",
+        "production_action": "do_not_change_strategy",
+        "reason": "read_only_feature_audit_not_production_evidence",
+    }
+    summary["report_markdown"] = render_tushare_enhanced_feature_markdown(summary)
+    return summary
 
 
 def _normalize_date(value: Any) -> str:
@@ -246,6 +366,7 @@ def _attach_limit_features(panel: pd.DataFrame) -> pd.DataFrame:
     local["distance_to_down_limit_pct"] = ((close - down) / close.replace(0, pd.NA)) * 100.0
     local["hit_limit_up_today"] = close.ge(up * 0.999)
     local["near_limit_up_3pct"] = local["distance_to_up_limit_pct"].le(3.0)
+    local["limit_buyability_rank"] = _date_pct_rank(local, "distance_to_up_limit_pct")
     return local
 
 
@@ -285,3 +406,129 @@ def _date_pct_rank(df: pd.DataFrame, column: str) -> pd.Series:
 
 def _num(values: Any) -> pd.Series:
     return pd.to_numeric(values, errors="coerce")
+
+
+def _prepare_audit_panel(feature_panel: pd.DataFrame | None) -> pd.DataFrame:
+    if feature_panel is None or feature_panel.empty:
+        return pd.DataFrame()
+    local = feature_panel.copy()
+    if "limit_buyability_rank" not in local.columns and "distance_to_up_limit_pct" in local.columns:
+        local["limit_buyability_rank"] = _date_pct_rank(local, "distance_to_up_limit_pct")
+    return local
+
+
+def _select_best_enhanced_rule(rules: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    candidates = []
+    for name in sorted(ENHANCED_RULE_NAMES):
+        item = rules.get(name) or {}
+        if item.get("status") != "ok":
+            continue
+        train = item.get("train") or {}
+        candidates.append(
+            (
+                float(train.get("top5_return_after_cost") or 0.0),
+                float(train.get("ndcg_at_10") or 0.0),
+                float(train.get("precision_at_5") or 0.0),
+                name,
+            )
+        )
+    if not candidates:
+        return {"name": "", "reason": "no_available_enhanced_rule"}
+    best = sorted(candidates, key=lambda item: (-item[0], -item[1], -item[2], item[3]))[0]
+    return {
+        "name": best[3],
+        "train_top5_return_after_cost": _round(best[0]),
+        "train_ndcg_at_10": _round(best[1]),
+        "train_precision_at_5": _round(best[2]),
+    }
+
+
+def _evaluate_ml_v22_gate(
+    rules: Dict[str, Dict[str, Any]],
+    baseline_rule: str,
+    candidate_rule: str,
+    min_margin_pct: float,
+) -> Dict[str, Any]:
+    baseline = rules.get(baseline_rule) or {}
+    candidate = rules.get(candidate_rule) or {}
+    baseline_test = baseline.get("test") or {}
+    candidate_test = candidate.get("test") or {}
+    margin = _round(float(candidate_test.get("top5_return_after_cost") or 0.0) - float(baseline_test.get("top5_return_after_cost") or 0.0))
+    ndcg_delta = _round(float(candidate_test.get("ndcg_at_10") or 0.0) - float(baseline_test.get("ndcg_at_10") or 0.0))
+    reasons: List[str] = []
+    if not candidate_rule or candidate.get("status") != "ok":
+        reasons.append("no_available_enhanced_rule")
+    if margin < float(min_margin_pct):
+        reasons.append("top5_after_cost_margin_below_required")
+    if ndcg_delta < 0:
+        reasons.append("ndcg_at_10_worse_than_return_60d_baseline")
+    return {
+        "allowed": not reasons,
+        "production_action": "do_not_change_strategy",
+        "baseline_rule": baseline_rule,
+        "candidate_rule": candidate_rule,
+        "required_top5_after_cost_margin_pct": float(min_margin_pct),
+        "top5_after_cost_margin_pct": margin,
+        "ndcg_at_10_delta": ndcg_delta,
+        "baseline_test_top5_return_after_cost": baseline_test.get("top5_return_after_cost", 0.0),
+        "candidate_test_top5_return_after_cost": candidate_test.get("top5_return_after_cost", 0.0),
+        "baseline_test_ndcg_at_10": baseline_test.get("ndcg_at_10", 0.0),
+        "candidate_test_ndcg_at_10": candidate_test.get("ndcg_at_10", 0.0),
+        "blocking_reasons": reasons,
+    }
+
+
+def render_tushare_enhanced_feature_markdown(summary: Dict[str, Any]) -> str:
+    gate = summary.get("ml_v2_2_gate") or {}
+    sample = summary.get("sample") or {}
+    lines = [
+        "# TuShare Enhanced Feature Audit",
+        "",
+        f"status: `{summary.get('status')}`",
+        f"production_evidence: `{summary.get('production_evidence')}`",
+        f"strategy_impact: `{summary.get('strategy_impact')}`",
+        f"production_action: `{summary.get('production_action')}`",
+        f"baseline_rule: `{summary.get('baseline_rule')}`",
+        f"best_enhanced_rule: `{summary.get('best_enhanced_rule')}`",
+        f"ml_v2_2_allowed: `{gate.get('allowed')}`",
+        "",
+        "## Sample",
+        "",
+        f"- eligible_date_count: `{sample.get('eligible_date_count')}`",
+        f"- eligible_row_count: `{sample.get('eligible_row_count')}`",
+        f"- eligible_symbol_count: `{sample.get('eligible_symbol_count')}`",
+        "",
+        "## ML V2.2 Gate",
+        "",
+        f"- top5_after_cost_margin_pct: `{gate.get('top5_after_cost_margin_pct')}`",
+        f"- required_margin_pct: `{gate.get('required_top5_after_cost_margin_pct')}`",
+        f"- ndcg_at_10_delta: `{gate.get('ndcg_at_10_delta')}`",
+        f"- blocking_reasons: `{gate.get('blocking_reasons')}`",
+        "",
+        "## Rule Results",
+        "",
+        "| Rule | Status | Test P@5 | Test Top5 After Cost | Test NDCG@10 |",
+        "|---|---|---:|---:|---:|",
+    ]
+    for name, item in (summary.get("rules") or {}).items():
+        test = item.get("test") or {}
+        lines.append(
+            f"| `{name}` | `{item.get('status')}` | {test.get('precision_at_5', 0.0)} | {test.get('top5_return_after_cost', 0.0)} | {test.get('ndcg_at_10', 0.0)} |"
+        )
+    lines.extend(
+        [
+            "",
+            "This audit is read-only. It does not modify production selection, ranking, buy/sell, take-profit, stop-loss, or position sizing logic.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _round(value: Any, digits: int = 6) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if pd.isna(number):
+        return 0.0
+    return round(number, digits)

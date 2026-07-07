@@ -78,6 +78,40 @@ class TuShareEnhancedFeatureAuditTests(unittest.TestCase):
         self.assertTrue(bool(final.loc[final["symbol"] == "000003", "hit_limit_up_today"].iloc[0]))
         self.assertTrue(bool(final.loc[final["symbol"] == "000002", "suspend_risk_flag"].iloc[0]))
 
+    def test_enhanced_feature_audit_allows_ml_gate_only_when_holdout_beats_return_60d_baseline(self):
+        from app.evaluation.tushare_enhanced_feature_audit import run_tushare_enhanced_feature_audit
+
+        summary = run_tushare_enhanced_feature_audit(
+            make_labeled_enhanced_candidates(enhanced_signal="strong"),
+            horizon=10,
+            train_ratio=0.5,
+            round_trip_cost_pct=0.1,
+            min_margin_pct=0.3,
+        )
+
+        self.assertEqual(summary["status"], "completed")
+        self.assertFalse(summary["production_evidence"])
+        self.assertFalse(summary["strategy_impact"])
+        self.assertEqual(summary["production_action"], "do_not_change_strategy")
+        self.assertEqual(summary["baseline_rule"], "return_60d_rank_desc")
+        self.assertTrue(summary["ml_v2_2_gate"]["allowed"])
+        self.assertGreaterEqual(summary["ml_v2_2_gate"]["top5_after_cost_margin_pct"], 0.3)
+        self.assertGreaterEqual(summary["ml_v2_2_gate"]["candidate_test_ndcg_at_10"], summary["ml_v2_2_gate"]["baseline_test_ndcg_at_10"])
+
+    def test_enhanced_feature_audit_blocks_ml_gate_when_margin_is_not_enough(self):
+        from app.evaluation.tushare_enhanced_feature_audit import run_tushare_enhanced_feature_audit
+
+        summary = run_tushare_enhanced_feature_audit(
+            make_labeled_enhanced_candidates(enhanced_signal="baseline"),
+            horizon=10,
+            train_ratio=0.5,
+            round_trip_cost_pct=0.1,
+            min_margin_pct=0.3,
+        )
+
+        self.assertFalse(summary["ml_v2_2_gate"]["allowed"])
+        self.assertIn("top5_after_cost_margin_below_required", summary["ml_v2_2_gate"]["blocking_reasons"])
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -150,3 +184,37 @@ def make_tushare_feature_panels(date_count=65):
         suspend,
         final_date,
     )
+
+
+def make_labeled_enhanced_candidates(enhanced_signal):
+    rows = []
+    dates = pd.bdate_range("2026-04-01", periods=6).strftime("%Y-%m-%d")
+    for date in dates:
+        for idx in range(12):
+            symbol = f"600{idx:03d}"
+            is_strong = idx >= 9
+            if enhanced_signal == "strong":
+                enhanced_rank = idx / 11
+            else:
+                enhanced_rank = (11 - idx) / 11
+            rows.append(
+                {
+                    "trade_date": date,
+                    "symbol": symbol,
+                    "name": f"样本{idx}",
+                    "rank_no": idx + 1,
+                    "score": 100.0 - idx,
+                    "strong_10d": is_strong,
+                    "return_10d_pct": 9.0 if is_strong else -3.0,
+                    "tradability_status": "tradable",
+                    "incomplete_horizons": "[]",
+                    "has_60d_lookback": True,
+                    "return_60d_rank": (11 - idx) / 11,
+                    "adj_return_60d_rank": enhanced_rank,
+                    "turnover_rate_rank": enhanced_rank,
+                    "volume_ratio_rank": enhanced_rank,
+                    "distance_to_up_limit_pct": 7.0,
+                    "main_net_inflow_ratio_rank": enhanced_rank,
+                }
+            )
+    return pd.DataFrame(rows)
