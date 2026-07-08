@@ -24,6 +24,7 @@ def parse_args(argv=None):
     parser.add_argument("--index-codes", default="000001.SH,399001.SZ,399006.SZ,000300.SH,000905.SH,000852.SH")
     parser.add_argument("--sleep-seconds", type=float, default=0.2)
     parser.add_argument("--max-dates", type=int, default=0)
+    parser.add_argument("--lookback-calendar-days", type=int, default=0)
     parser.add_argument("--fixture", action="store_true", help="Use deterministic fake TuShare client for CLI smoke tests.")
     return parser.parse_args(argv)
 
@@ -50,6 +51,7 @@ def main(argv=None) -> int:
         endpoints=_split_csv(args.endpoints),
         index_codes=_split_csv(args.index_codes),
         sleep_seconds=0.0 if args.fixture else float(args.sleep_seconds),
+        lookback_calendar_days=int(args.lookback_calendar_days),
     )
     paths = write_tushare_panel_collection_artifacts(collection, args.output_dir)
     summary = collection.get("summary") or {}

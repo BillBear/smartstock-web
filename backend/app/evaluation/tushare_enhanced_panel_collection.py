@@ -21,9 +21,11 @@ def collect_tushare_enhanced_panels(
     endpoints: Iterable[str] | None = None,
     index_codes: Iterable[str] | None = None,
     sleep_seconds: float = 0.0,
+    lookback_calendar_days: int = 0,
 ) -> Dict[str, Any]:
     """Collect read-only TuShare panels for selected historical dates."""
     dates = _normalize_dates(trade_dates)
+    extended_dates = _extend_lookback_dates(dates, lookback_calendar_days)
     symbol_set = {_normalize_symbol(symbol) for symbol in (symbols or []) if _normalize_symbol(symbol)}
     selected_endpoints = list(endpoints or DEFAULT_ENDPOINTS)
     panels: Dict[str, pd.DataFrame] = {}
@@ -41,7 +43,7 @@ def collect_tushare_enhanced_panels(
             frame, status = _collect_stock_date_endpoint(
                 pro_client,
                 endpoint=endpoint,
-                trade_dates=dates,
+                trade_dates=extended_dates if endpoint in {"daily", "adj_factor"} else dates,
                 symbols=symbol_set,
                 sleep_seconds=sleep_seconds,
             )
@@ -60,6 +62,8 @@ def collect_tushare_enhanced_panels(
             "max_trade_date": dates[-1] if dates else "",
             "symbol_count": int(len(symbol_set)),
             "endpoint_count": int(len(selected_endpoints)),
+            "lookback_calendar_days": int(lookback_calendar_days or 0),
+            "fetch_date_count_daily_adj_factor": int(len(extended_dates)),
         },
         "endpoint_status": endpoint_status,
         "panels": panels,
@@ -184,6 +188,15 @@ def _normalize_dates(values: Iterable[Any]) -> List[str]:
         if date:
             normalized.append(date)
     return sorted(set(normalized))
+
+
+def _extend_lookback_dates(dates: List[str], lookback_calendar_days: int) -> List[str]:
+    if not dates or int(lookback_calendar_days or 0) <= 0:
+        return dates
+    start = pd.to_datetime(dates[0]) - pd.Timedelta(days=int(lookback_calendar_days))
+    end = pd.to_datetime(dates[-1])
+    business_dates = pd.bdate_range(start, end).strftime("%Y-%m-%d").tolist()
+    return sorted(set(business_dates).union(dates))
 
 
 def _normalize_date(value: Any) -> str:

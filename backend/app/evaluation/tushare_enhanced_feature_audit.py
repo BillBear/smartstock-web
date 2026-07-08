@@ -197,7 +197,7 @@ def build_tushare_enhanced_feature_panel(
     )
     panel = _attach_index_context(panel, index_panel)
     panel = _attach_daily_basic_features(panel)
-    panel = _attach_adjusted_return_features(panel)
+    panel = _attach_adjusted_return_features(panel, daily_panel=daily_panel, adj_factor_panel=adj_factor_panel)
     panel = _attach_limit_features(panel)
     panel = _attach_moneyflow_features(panel)
     return panel.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
@@ -364,23 +364,36 @@ def _attach_daily_basic_features(panel: pd.DataFrame) -> pd.DataFrame:
     return local
 
 
-def _attach_adjusted_return_features(panel: pd.DataFrame) -> pd.DataFrame:
+def _attach_adjusted_return_features(
+    panel: pd.DataFrame,
+    daily_panel: pd.DataFrame | None = None,
+    adj_factor_panel: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     local = panel.copy()
-    if "close" not in local.columns:
+    history = _normalize_symbol_date_panel(daily_panel)
+    if history.empty:
+        history = local.copy()
+    if "close" not in history.columns:
         return local
-    local["close"] = _num(local["close"])
-    if "adj_factor" in local.columns:
-        local["adj_factor"] = _num(local["adj_factor"]).fillna(1.0)
+    history = _merge_optional_panel(history, adj_factor_panel, ["adj_factor"])
+    history["close"] = _num(history["close"])
+    if "adj_factor" in history.columns:
+        history["adj_factor"] = _num(history["adj_factor"]).fillna(1.0)
     else:
-        local["adj_factor"] = 1.0
-    local = local.sort_values(["symbol", "trade_date"]).copy()
-    local["adj_close"] = local["close"] * local["adj_factor"]
-    grouped = local.groupby("symbol")["adj_close"]
+        history["adj_factor"] = 1.0
+    history = history.sort_values(["symbol", "trade_date"]).copy()
+    history["adj_close"] = history["close"] * history["adj_factor"]
+    grouped = history.groupby("symbol")["adj_close"]
+    return_columns = ["symbol", "trade_date", "adj_close"]
     for horizon in [5, 20, 60]:
         column = f"adj_return_{horizon}d_pct"
-        local[column] = grouped.pct_change(horizon) * 100.0
-        local[f"adj_return_{horizon}d_rank"] = _date_pct_rank(local, column)
-    return local
+        rank_column = f"adj_return_{horizon}d_rank"
+        history[column] = grouped.pct_change(horizon) * 100.0
+        history[rank_column] = _date_pct_rank(history, column)
+        return_columns.extend([column, rank_column])
+    features = history[return_columns].drop_duplicates(["symbol", "trade_date"], keep="last")
+    local = local.drop(columns=[column for column in return_columns if column not in {"symbol", "trade_date"} and column in local.columns])
+    return local.merge(features, on=["symbol", "trade_date"], how="left")
 
 
 def _attach_limit_features(panel: pd.DataFrame) -> pd.DataFrame:

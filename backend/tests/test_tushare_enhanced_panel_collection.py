@@ -82,6 +82,27 @@ class TuShareEnhancedPanelCollectionTests(unittest.TestCase):
         self.assertEqual(set(collection["panels"]["daily"]["symbol"]), {"000001"})
         self.assertEqual(collection["panels"]["index_daily"]["ts_code"].iloc[0], "000001.SH")
 
+    def test_daily_and_adj_factor_can_collect_extended_lookback_dates(self):
+        from app.evaluation.tushare_enhanced_panel_collection import collect_tushare_enhanced_panels
+
+        fake = FakeTuShareProClient()
+
+        collection = collect_tushare_enhanced_panels(
+            fake,
+            trade_dates=["2026-07-01"],
+            symbols=["000001"],
+            endpoints=["daily", "daily_basic", "adj_factor"],
+            lookback_calendar_days=10,
+        )
+
+        daily_dates = {call[1]["trade_date"] for call in fake.calls if call[0] == "daily"}
+        daily_basic_dates = {call[1]["trade_date"] for call in fake.calls if call[0] == "daily_basic"}
+        adj_dates = {call[1]["trade_date"] for call in fake.calls if call[0] == "adj_factor"}
+        self.assertGreater(len(daily_dates), 1)
+        self.assertGreater(len(adj_dates), 1)
+        self.assertEqual(daily_basic_dates, {"20260701"})
+        self.assertEqual(collection["summary"]["lookback_calendar_days"], 10)
+
     def test_collection_artifact_writer_outputs_csv_and_json(self):
         from app.evaluation.tushare_enhanced_panel_collection import (
             collect_tushare_enhanced_panels,

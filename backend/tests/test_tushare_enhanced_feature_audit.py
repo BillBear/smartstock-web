@@ -113,6 +113,30 @@ class TuShareEnhancedFeatureAuditTests(unittest.TestCase):
         self.assertTrue(final["adj_return_60d_rank"].notna().all())
         self.assertTrue(final["distance_to_up_limit_pct"].notna().all())
 
+    def test_enhanced_feature_panel_uses_daily_history_to_compute_adjusted_return_for_candidate_dates(self):
+        from app.evaluation.tushare_enhanced_feature_audit import build_tushare_enhanced_feature_panel
+
+        base, daily_basic, adj_factor, stk_limit, suspend, final_date = make_tushare_feature_panels()
+        daily_history = base[["ts_code", "trade_date", "close"]].copy()
+        candidate_base = base[base["trade_date"].map(lambda value: pd.to_datetime(value).strftime("%Y-%m-%d")) == final_date].drop(
+            columns=["close"]
+        )
+
+        panel = build_tushare_enhanced_feature_panel(
+            candidate_base,
+            daily_panel=daily_history,
+            daily_basic_panel=daily_basic,
+            adj_factor_panel=adj_factor,
+            stk_limit_panel=stk_limit,
+            suspend_panel=suspend,
+        )
+
+        self.assertEqual(panel["trade_date"].nunique(), 1)
+        self.assertTrue(panel["adj_return_60d_pct"].notna().all())
+        self.assertTrue(panel["adj_return_60d_rank"].notna().all())
+        best_symbol = panel.sort_values("adj_return_60d_rank", ascending=False)["symbol"].iloc[0]
+        self.assertEqual(best_symbol, "000001")
+
     def test_enhanced_feature_audit_allows_ml_gate_only_when_holdout_beats_return_60d_baseline(self):
         from app.evaluation.tushare_enhanced_feature_audit import run_tushare_enhanced_feature_audit
 
