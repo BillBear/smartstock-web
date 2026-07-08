@@ -277,37 +277,44 @@ def run_v22_adjusted_experiment(
 
     if quality["ready_for_training"]:
         trainable = dataset.dropna(subset=[label_col, return_col]).copy()
-        split_plan = build_ml_split_plan(
-            trainable,
-            final_holdout_months=final_holdout_months,
-            stock_holdout_ratio=0.20,
-            walk_forward_splits=4,
-            label_horizon_days=10,
-            stock_holdout_seed=stock_holdout_seed,
-        )
-        split_integrity = validate_v22_split_integrity(trainable, split_plan)
-        summary["split_integrity"] = split_integrity
-        _write_json(root / "ml_v22_adjusted_split_integrity.json", split_integrity)
-        if split_integrity["valid"]:
-            training = train_local_models(
+        try:
+            split_plan = build_ml_split_plan(
                 trainable,
-                feature_names=feature_names,
-                label_col=label_col,
-                return_col=return_col,
-                split_plan=split_plan,
-                candidate_set="core_v2",
-                sample_weight_mode="date_stock_balanced",
-                model_metadata={
-                    "experiment": "ml_v2_2_adjusted_momentum",
-                    "production_enabled": False,
-                    "strategy_impact": False,
-                },
-                prediction_output_path=root / "ml_v22_adjusted_predictions.csv",
+                final_holdout_months=final_holdout_months,
+                stock_holdout_ratio=0.20,
+                walk_forward_splits=4,
+                label_horizon_days=10,
+                stock_holdout_seed=stock_holdout_seed,
             )
-            summary["training"] = training
-        else:
-            summary["training"] = {"status": "skipped", "reason": "split_integrity_failed"}
+        except ValueError as exc:
+            summary["split_integrity"] = {"valid": False, "blocking_reasons": [str(exc)]}
+            summary["training"] = {"status": "skipped", "reason": "split_planning_failed"}
+            _write_json(root / "ml_v22_adjusted_split_integrity.json", summary["split_integrity"])
             pd.DataFrame().to_csv(root / "ml_v22_adjusted_predictions.csv", index=False)
+        else:
+            split_integrity = validate_v22_split_integrity(trainable, split_plan)
+            summary["split_integrity"] = split_integrity
+            _write_json(root / "ml_v22_adjusted_split_integrity.json", split_integrity)
+            if split_integrity["valid"]:
+                training = train_local_models(
+                    trainable,
+                    feature_names=feature_names,
+                    label_col=label_col,
+                    return_col=return_col,
+                    split_plan=split_plan,
+                    candidate_set="core_v2",
+                    sample_weight_mode="date_stock_balanced",
+                    model_metadata={
+                        "experiment": "ml_v2_2_adjusted_momentum",
+                        "production_enabled": False,
+                        "strategy_impact": False,
+                    },
+                    prediction_output_path=root / "ml_v22_adjusted_predictions.csv",
+                )
+                summary["training"] = training
+            else:
+                summary["training"] = {"status": "skipped", "reason": "split_integrity_failed"}
+                pd.DataFrame().to_csv(root / "ml_v22_adjusted_predictions.csv", index=False)
     else:
         summary["training"] = {"status": "skipped", "reason": "quality_gate_failed"}
         summary["split_integrity"] = {"valid": False, "blocking_reasons": ["quality_gate_failed"]}

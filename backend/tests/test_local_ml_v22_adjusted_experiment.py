@@ -68,6 +68,98 @@ def make_enhanced_panel(date_count: int = 90, symbol_count: int = 24) -> pd.Data
     return pd.DataFrame(rows)
 
 
+def make_sparse_candidate_panel(symbol_count: int = 24) -> pd.DataFrame:
+    rows = []
+    dates = [
+        "2026-04-28",
+        "2026-04-29",
+        "2026-05-06",
+        "2026-05-07",
+        "2026-05-08",
+        "2026-05-28",
+        "2026-05-29",
+        "2026-06-03",
+        "2026-06-04",
+        "2026-06-09",
+        "2026-06-11",
+        "2026-06-16",
+        "2026-06-17",
+        "2026-06-22",
+        "2026-06-23",
+        "2026-06-24",
+        "2026-06-25",
+        "2026-06-29",
+        "2026-06-30",
+        "2026-07-01",
+        "2026-07-02",
+        "2026-07-03",
+    ]
+    for day_idx, date in enumerate(dates):
+        for symbol_idx in range(symbol_count):
+            base_signal = symbol_idx / max(1, symbol_count - 1)
+            is_strong = int(symbol_idx >= symbol_count - 5)
+            rows.append(
+                {
+                    "trade_date": date,
+                    "symbol": f"{600000 + symbol_idx}.SH",
+                    "name": f"稀疏{symbol_idx}",
+                    "rank_no": symbol_idx + 1,
+                    "score": round(45 + base_signal * 45, 4),
+                    "strong_10d": is_strong,
+                    "return_10d_pct": round(4.0 + base_signal * 7.0 + day_idx * 0.01, 4) if is_strong else round(-2.0 + base_signal, 4),
+                    "return_60d_rank": round(base_signal, 6),
+                    "return_20d_rank": round(base_signal * 0.8, 6),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def make_sparse_enhanced_panel(symbol_count: int = 24) -> pd.DataFrame:
+    dates = [
+        "20260428",
+        "20260429",
+        "20260506",
+        "20260507",
+        "20260508",
+        "20260528",
+        "20260529",
+        "20260603",
+        "20260604",
+        "20260609",
+        "20260611",
+        "20260616",
+        "20260617",
+        "20260622",
+        "20260623",
+        "20260624",
+        "20260625",
+        "20260629",
+        "20260630",
+        "20260701",
+        "20260702",
+        "20260703",
+    ]
+    rows = []
+    for day_idx, date in enumerate(dates):
+        for symbol_idx in range(symbol_count):
+            base_signal = symbol_idx / max(1, symbol_count - 1)
+            rows.append(
+                {
+                    "trade_date": date,
+                    "ts_code": f"{600000 + symbol_idx}.SH",
+                    "adj_return_5d_rank": round(base_signal * 0.75 + day_idx * 0.0001, 6),
+                    "adj_return_20d_rank": round(base_signal * 0.85 + day_idx * 0.0001, 6),
+                    "adj_return_60d_rank": round(base_signal * 0.95 + day_idx * 0.0001, 6),
+                    "adj_return_60d_pct": round(base_signal * 30.0, 6),
+                    "turnover_rate_rank": round(1.0 - abs(0.65 - base_signal), 6),
+                    "volume_ratio_rank": round(0.5 + base_signal * 0.4, 6),
+                    "main_net_inflow_ratio_rank": round(0.4 + base_signal * 0.3, 6),
+                    "limit_buyability_rank": round(0.9 - base_signal * 0.2, 6),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 class LocalMLV22AdjustedExperimentTests(unittest.TestCase):
     def test_prepare_v22_dataset_normalizes_keys_joins_features_and_rejects_forward_features(self):
         dataset, feature_names, report = prepare_v22_adjusted_dataset(
@@ -172,6 +264,27 @@ class LocalMLV22AdjustedExperimentTests(unittest.TestCase):
             self.assertTrue((output_dir / "ml_v22_adjusted_quality.json").exists())
             self.assertTrue((output_dir / "ml_v22_adjusted_predictions.csv").exists())
             self.assertTrue((output_dir / "ml_v22_adjusted_report.md").exists())
+
+    def test_experiment_records_split_planning_failure_instead_of_crashing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "out"
+
+            summary = run_v22_adjusted_experiment(
+                make_sparse_candidate_panel(),
+                make_sparse_enhanced_panel(),
+                output_dir=output_dir,
+                min_rows=100,
+                min_dates=10,
+                min_symbols=20,
+                final_holdout_months=1,
+                stock_holdout_seed=7,
+            )
+
+            self.assertTrue(summary["quality"]["ready_for_training"], summary["quality"]["blocking_reasons"])
+            self.assertEqual(summary["training"]["status"], "skipped")
+            self.assertEqual(summary["training"]["reason"], "split_planning_failed")
+            self.assertIn("final holdout leaves no training", summary["split_integrity"]["blocking_reasons"][0])
+            self.assertTrue((output_dir / "ml_v22_adjusted_summary.json").exists())
 
     def test_cli_runs_v22_experiment_and_writes_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
