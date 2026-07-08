@@ -143,6 +143,7 @@ def audit_tushare_endpoint_availability(
 
 def build_tushare_enhanced_feature_panel(
     base_panel: pd.DataFrame,
+    daily_panel: pd.DataFrame | None = None,
     daily_basic_panel: pd.DataFrame | None = None,
     adj_factor_panel: pd.DataFrame | None = None,
     stk_limit_panel: pd.DataFrame | None = None,
@@ -154,6 +155,11 @@ def build_tushare_enhanced_feature_panel(
     panel = _normalize_symbol_date_panel(base_panel)
     if panel.empty:
         return panel
+    panel = _merge_optional_panel(
+        panel,
+        daily_panel,
+        ["open", "high", "low", "close", "pre_close", "pct_chg", "vol", "amount"],
+    )
     panel = _merge_optional_panel(
         panel,
         daily_basic_panel,

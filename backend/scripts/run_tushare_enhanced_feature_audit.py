@@ -18,6 +18,7 @@ def _bootstrap_paths() -> Path:
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Run read-only TuShare enhanced feature audit from CSV panels.")
     parser.add_argument("--base-panel-csv", required=True)
+    parser.add_argument("--daily-csv")
     parser.add_argument("--daily-basic-csv")
     parser.add_argument("--adj-factor-csv")
     parser.add_argument("--stk-limit-csv")
@@ -46,6 +47,7 @@ def main(argv=None) -> int:
     base = pd.read_csv(args.base_panel_csv)
     feature_panel = build_tushare_enhanced_feature_panel(
         base,
+        daily_panel=_read_optional_csv(args.daily_csv),
         daily_basic_panel=_read_optional_csv(args.daily_basic_csv),
         adj_factor_panel=_read_optional_csv(args.adj_factor_csv),
         stk_limit_panel=_read_optional_csv(args.stk_limit_csv),

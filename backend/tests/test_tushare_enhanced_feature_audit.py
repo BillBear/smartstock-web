@@ -86,6 +86,33 @@ class TuShareEnhancedFeatureAuditTests(unittest.TestCase):
         self.assertTrue(bool(final.loc[final["symbol"] == "000003", "hit_limit_up_today"].iloc[0]))
         self.assertTrue(bool(final.loc[final["symbol"] == "000002", "suspend_risk_flag"].iloc[0]))
 
+    def test_enhanced_feature_panel_can_use_daily_panel_when_base_candidates_have_no_close(self):
+        from app.evaluation.tushare_enhanced_feature_audit import build_tushare_enhanced_feature_panel
+
+        base, daily_basic, adj_factor, stk_limit, suspend, final_date = make_tushare_feature_panels()
+        daily = base[["ts_code", "trade_date", "close"]].copy()
+        daily["open"] = daily["close"] * 0.99
+        daily["high"] = daily["close"] * 1.02
+        daily["low"] = daily["close"] * 0.98
+        daily["vol"] = 1000
+        daily["amount"] = 100000
+        base_without_price = base.drop(columns=["close"])
+
+        panel = build_tushare_enhanced_feature_panel(
+            base_without_price,
+            daily_panel=daily,
+            daily_basic_panel=daily_basic,
+            adj_factor_panel=adj_factor,
+            stk_limit_panel=stk_limit,
+            suspend_panel=suspend,
+        )
+
+        final = panel[panel["trade_date"] == final_date]
+        self.assertTrue(final["close"].notna().all())
+        self.assertTrue(final["adj_close"].notna().all())
+        self.assertTrue(final["adj_return_60d_rank"].notna().all())
+        self.assertTrue(final["distance_to_up_limit_pct"].notna().all())
+
     def test_enhanced_feature_audit_allows_ml_gate_only_when_holdout_beats_return_60d_baseline(self):
         from app.evaluation.tushare_enhanced_feature_audit import run_tushare_enhanced_feature_audit
 
@@ -161,6 +188,8 @@ class TuShareEnhancedFeatureAuditTests(unittest.TestCase):
                     sys.executable,
                     str(PROJECT_ROOT / "scripts" / "run_tushare_enhanced_feature_audit.py"),
                     "--base-panel-csv",
+                    str(base_path),
+                    "--daily-csv",
                     str(base_path),
                     "--daily-basic-csv",
                     str(daily_basic_path),
