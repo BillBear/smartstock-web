@@ -28,6 +28,13 @@ export function sortPicksByStrategyScore(picks = []) {
   })
 }
 
+export function getDisplayOrderedPicks(picks = []) {
+  return sortPicksByStrategyScore(picks).map((pick, index) => ({
+    ...pick,
+    display_order: index + 1,
+  }))
+}
+
 export function getCalendarDisplayContext(calendarContext = {}, tradePlan = {}) {
   const mode = calendarContext?.mode || 'trading'
   const requestedDate = calendarContext?.requested_date || '-'

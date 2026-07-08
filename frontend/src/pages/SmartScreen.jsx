@@ -23,11 +23,11 @@ import { coachApi } from '../services/api'
 import MarketFactorExplain from '../components/MarketFactorExplain'
 import {
   getCalendarDisplayContext,
+  getDisplayOrderedPicks,
   getRankingEvidenceStatus,
   getSmartScreenDiagnostic,
   getUniverseFunnelSummary,
   shouldRefreshCurrentTradingPicks,
-  sortPicksByStrategyScore,
 } from './smartScreenData.mjs'
 import {
   getPickActionPresentation,
@@ -256,7 +256,7 @@ const SmartScreen = () => {
   }, [])
 
   const pickList = useMemo(() => result?.picks || [], [result])
-  const displayPickList = useMemo(() => sortPicksByStrategyScore(pickList), [pickList])
+  const displayPickList = useMemo(() => getDisplayOrderedPicks(pickList), [pickList])
   const marketNews = result?.market_state?.news_context || {}
   const tradePlan = result?.trade_plan || {}
   const coreCandidateCount = Number(tradePlan.core_count || 0)
@@ -428,12 +428,12 @@ const SmartScreen = () => {
 
   const columns = [
     {
-      title: '原始排名',
-      dataIndex: 'rank_no',
-      key: 'rank_no',
+      title: '排序',
+      dataIndex: 'display_order',
+      key: 'display_order',
       width: 72,
-      render: (rank) => {
-        const rankMeta = getRankPresentation(rank)
+      render: (order) => {
+        const rankMeta = getRankPresentation(order)
         return (
           <div className="rank-cell">
             {rankMeta.isTopRank && <TrophyOutlined style={{ color: '#faad14', fontSize: 16 }} />}

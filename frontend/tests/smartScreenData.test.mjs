@@ -2,12 +2,34 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  getDisplayOrderedPicks,
   getCalendarDisplayContext,
   getRankingEvidenceStatus,
   getSmartScreenDiagnostic,
   getUniverseFunnelSummary,
   shouldRefreshCurrentTradingPicks,
 } from '../src/pages/smartScreenData.mjs'
+
+test('display order follows strategy score instead of backend rank number', () => {
+  const ordered = getDisplayOrderedPicks([
+    {
+      rank_no: 1,
+      symbol: '600288',
+      score_breakdown: { total: 79.7 },
+    },
+    {
+      rank_no: 2,
+      symbol: '600900',
+      score_breakdown: { total: 85.22 },
+    },
+  ])
+
+  assert.equal(ordered[0].symbol, '600900')
+  assert.equal(ordered[0].rank_no, 2)
+  assert.equal(ordered[0].display_order, 1)
+  assert.equal(ordered[1].symbol, '600288')
+  assert.equal(ordered[1].display_order, 2)
+})
 
 test('trading day stale snapshot triggers background refresh', () => {
   assert.equal(
