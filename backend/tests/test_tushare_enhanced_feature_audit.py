@@ -171,6 +171,23 @@ class TuShareEnhancedFeatureAuditTests(unittest.TestCase):
         self.assertFalse(summary["ml_v2_2_gate"]["allowed"])
         self.assertIn("top5_after_cost_margin_below_required", summary["ml_v2_2_gate"]["blocking_reasons"])
 
+    def test_enhanced_feature_audit_gate_uses_any_holdout_enhanced_rule_that_beats_return_60d(self):
+        from app.evaluation.tushare_enhanced_feature_audit import run_tushare_enhanced_feature_audit
+
+        summary = run_tushare_enhanced_feature_audit(
+            make_gate_candidate_fixture(),
+            horizon=10,
+            train_ratio=0.5,
+            round_trip_cost_pct=0.1,
+            min_margin_pct=0.3,
+        )
+
+        gate = summary["ml_v2_2_gate"]
+        self.assertTrue(gate["allowed"])
+        self.assertEqual(gate["candidate_rule"], "adj_return_60d_rank_desc")
+        self.assertGreaterEqual(gate["top5_after_cost_margin_pct"], 0.3)
+        self.assertGreaterEqual(gate["ndcg_at_10_delta"], 0.0)
+
     def test_artifact_writer_outputs_json_csv_and_markdown(self):
         from app.evaluation.tushare_enhanced_feature_audit import (
             run_tushare_enhanced_feature_audit,
@@ -340,6 +357,38 @@ def make_labeled_enhanced_candidates(enhanced_signal):
                     "volume_ratio_rank": enhanced_rank,
                     "distance_to_up_limit_pct": 7.0,
                     "main_net_inflow_ratio_rank": enhanced_rank,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def make_gate_candidate_fixture():
+    rows = []
+    dates = pd.bdate_range("2026-04-01", periods=6).strftime("%Y-%m-%d")
+    for date_idx, date in enumerate(dates):
+        in_test = date_idx >= 3
+        for idx in range(12):
+            is_strong = idx >= 9
+            adj_rank = idx / 11 if in_test else (11 - idx) / 11
+            turnover_rank = (11 - idx) / 11 if in_test else idx / 11
+            rows.append(
+                {
+                    "trade_date": date,
+                    "symbol": f"600{idx:03d}",
+                    "rank_no": idx + 1,
+                    "score": 100.0 - idx,
+                    "strong_10d": is_strong,
+                    "return_10d_pct": 9.0 if is_strong else -3.0,
+                    "tradability_status": "tradable",
+                    "incomplete_horizons": "[]",
+                    "has_60d_lookback": True,
+                    "return_60d_rank": (11 - idx) / 11,
+                    "adj_return_60d_rank": adj_rank,
+                    "turnover_rate_rank": turnover_rank,
+                    "volume_ratio_rank": turnover_rank,
+                    "distance_to_up_limit_pct": 6.0,
+                    "limit_buyability_rank": turnover_rank,
+                    "main_net_inflow_ratio_rank": turnover_rank,
                 }
             )
     return pd.DataFrame(rows)

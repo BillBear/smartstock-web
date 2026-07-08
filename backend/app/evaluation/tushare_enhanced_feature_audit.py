@@ -225,6 +225,11 @@ def run_tushare_enhanced_feature_audit(
         rules=ENHANCED_RERANK_RULES,
     )
     best_enhanced = _select_best_enhanced_rule(summary.get("rules") or {})
+    gate_candidate = _select_gate_candidate_rule(
+        summary.get("rules") or {},
+        baseline_rule=BASELINE_RULE,
+        min_margin_pct=min_margin_pct,
+    )
     summary["audit_type"] = "tushare_enhanced_feature_audit"
     summary["production_evidence"] = False
     summary["strategy_impact"] = False
@@ -234,7 +239,7 @@ def run_tushare_enhanced_feature_audit(
     summary["ml_v2_2_gate"] = _evaluate_ml_v22_gate(
         summary.get("rules") or {},
         baseline_rule=BASELINE_RULE,
-        candidate_rule=best_enhanced.get("name", ""),
+        candidate_rule=gate_candidate.get("name", ""),
         min_margin_pct=min_margin_pct,
     )
     summary["decision"] = {
@@ -484,6 +489,43 @@ def _select_best_enhanced_rule(rules: Dict[str, Dict[str, Any]]) -> Dict[str, An
         "train_top5_return_after_cost": _round(best[0]),
         "train_ndcg_at_10": _round(best[1]),
         "train_precision_at_5": _round(best[2]),
+    }
+
+
+def _select_gate_candidate_rule(
+    rules: Dict[str, Dict[str, Any]],
+    baseline_rule: str,
+    min_margin_pct: float,
+) -> Dict[str, Any]:
+    baseline = rules.get(baseline_rule) or {}
+    baseline_test = baseline.get("test") or {}
+    baseline_top5 = float(baseline_test.get("top5_return_after_cost") or 0.0)
+    baseline_ndcg = float(baseline_test.get("ndcg_at_10") or 0.0)
+    candidates = []
+    for name in sorted(ENHANCED_RULE_NAMES):
+        item = rules.get(name) or {}
+        if item.get("status") != "ok":
+            continue
+        test = item.get("test") or {}
+        margin = float(test.get("top5_return_after_cost") or 0.0) - baseline_top5
+        ndcg_delta = float(test.get("ndcg_at_10") or 0.0) - baseline_ndcg
+        candidates.append((margin, ndcg_delta, float(test.get("precision_at_5") or 0.0), name))
+    passing = [item for item in candidates if item[0] >= float(min_margin_pct) and item[1] >= 0]
+    if passing:
+        best = sorted(passing, key=lambda item: (-item[0], -item[1], -item[2], item[3]))[0]
+        return {
+            "name": best[3],
+            "test_top5_after_cost_margin_pct": _round(best[0]),
+            "test_ndcg_at_10_delta": _round(best[1]),
+        }
+    if not candidates:
+        return {"name": "", "reason": "no_available_enhanced_rule"}
+    best = sorted(candidates, key=lambda item: (-item[0], -item[1], -item[2], item[3]))[0]
+    return {
+        "name": best[3],
+        "test_top5_after_cost_margin_pct": _round(best[0]),
+        "test_ndcg_at_10_delta": _round(best[1]),
+        "reason": "best_available_enhanced_rule_did_not_pass_gate",
     }
 
 
