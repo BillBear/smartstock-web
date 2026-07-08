@@ -273,7 +273,8 @@ def _finish_panel(panel: pd.DataFrame) -> pd.DataFrame:
     local["hit_limit_down_today"] = local["down_limit"].notna() & local["close"].le(local["down_limit"] * 1.001)
     next_open = local.groupby("symbol")["open"].shift(-1)
     next_up = local.groupby("symbol")["up_limit"].shift(-1)
-    next_suspended = local.groupby("symbol")["is_suspended"].shift(-1).fillna(True).astype(bool)
+    next_suspended = local.groupby("symbol")["is_suspended"].shift(-1)
+    next_suspended = next_suspended.where(next_suspended.notna(), True).astype(bool)
     local["entry_tradeable"] = next_open.notna() & ~next_suspended & (next_up.isna() | next_open.lt(next_up * 0.999))
     return local.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
 

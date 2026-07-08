@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -197,16 +198,18 @@ def _candidate_models(y: np.ndarray) -> Dict[str, Any]:
 
 
 def _fit_model(model: Any, train: pd.DataFrame, label_col: str) -> Any:
-    x = train[FEATURE_NAMES].astype(float).replace([np.inf, -np.inf], 0.0).fillna(0.0)
+    x = _feature_matrix(train)
     y = train[label_col].astype(int)
     weights = _sample_weights(train, label_col)
-    try:
-        if hasattr(model, "named_steps"):
-            model.fit(x, y, model__sample_weight=weights)
-        else:
-            model.fit(x, y, sample_weight=weights)
-    except TypeError:
-        model.fit(x, y)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=RuntimeWarning, module=r"sklearn\.")
+        try:
+            if hasattr(model, "named_steps"):
+                model.fit(x, y, model__sample_weight=weights)
+            else:
+                model.fit(x, y, sample_weight=weights)
+        except TypeError:
+            model.fit(x, y)
     return model
 
 
@@ -215,16 +218,23 @@ def _score_frame(model: Any, frame: pd.DataFrame) -> pd.DataFrame:
     if local.empty:
         local["model_score"] = []
         return local
-    x = local[FEATURE_NAMES].astype(float).replace([np.inf, -np.inf], 0.0).fillna(0.0)
-    if hasattr(model, "predict_proba"):
-        prob = model.predict_proba(x)
-        classes = list(getattr(model, "classes_", []))
-        if not classes and hasattr(model, "named_steps"):
-            classes = list(getattr(model.named_steps.get("model"), "classes_", [0, 1]))
-        local["model_score"] = prob[:, classes.index(1)] if 1 in classes else prob[:, -1]
-    else:
-        local["model_score"] = model.predict(x)
+    x = _feature_matrix(local)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=RuntimeWarning, module=r"sklearn\.")
+        if hasattr(model, "predict_proba"):
+            prob = model.predict_proba(x)
+            classes = list(getattr(model, "classes_", []))
+            if not classes and hasattr(model, "named_steps"):
+                classes = list(getattr(model.named_steps.get("model"), "classes_", [0, 1]))
+            local["model_score"] = prob[:, classes.index(1)] if 1 in classes else prob[:, -1]
+        else:
+            local["model_score"] = model.predict(x)
     return local
+
+
+def _feature_matrix(frame: pd.DataFrame) -> pd.DataFrame:
+    x = frame[FEATURE_NAMES].astype(float).replace([np.inf, -np.inf], 0.0).fillna(0.0)
+    return x.clip(lower=-1_000_000.0, upper=1_000_000.0)
 
 
 def _walk_forward(df: pd.DataFrame, split_plan: Dict[str, Any], model_name: str, label_col: str, return_col: str) -> Dict[str, Any]:
