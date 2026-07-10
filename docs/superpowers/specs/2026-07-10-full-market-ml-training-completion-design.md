@@ -55,7 +55,7 @@
 
 ### 3.1 固定研究区间
 
-- 原始采集：`2023-12-01` 至 `2026-07-03`。
+- 原始采集：`2023-12-01` 至 `2026-07-10`。根据 TuShare `trade_cal` 实测，`2026-06-05` 后至 `2026-07-10` 有 24 个交易日，足够生成完整 20 日标签。
 - 信号样本：`2024-06-03` 至 `2026-06-05`。
 - 前置 warm-up：覆盖至少 120 个交易日特征。
 - 后置 lookahead：覆盖 20 日标签和交易约束。
@@ -68,6 +68,7 @@
 核心接口：
 
 - `stock_basic`：分别采集 `L/D/P` 状态，保存 `list_date`、`delist_date`、市场、行业和名称。
+- `namechange`：还原历史 ST/退市风险名称区间，禁止用当前名称回填历史状态。
 - `trade_cal`：唯一交易日来源。
 - `daily`：OHLCV、成交额和涨跌幅。
 - `daily_basic`：换手率、量比、市值、PE、PB。
@@ -78,6 +79,7 @@
 
 可选接口：
 
+- `index_classify` + `index_member_all`：按申万 2021 一级行业及 `in_date/out_date` 还原历史行业。接口不可用时关闭行业相对标签和行业特征，禁止用当前 `stock_basic.industry` 回填历史。
 - `moneyflow`：只作为独立特征组。覆盖率或稳定性不达标时自动退出核心模型，不得用零值伪装缺失。
 - `index_dailybasic`：只用于市场估值实验，不阻塞核心训练。
 
@@ -135,7 +137,7 @@ market_excess_h = future_return_h - market_median_future_return_h
 industry_excess_h = future_return_h - industry_median_future_return_h
 ```
 
-所有收益单位统一为小数，展示报告时再转成百分比。
+所有收益单位统一为小数，展示报告时再转成百分比。只有历史行业成员区间可用时才生成 `industry_excess_h`；否则该列保持空并关闭行业特征组。
 
 ### 4.2 路径标签
 
@@ -152,8 +154,8 @@ industry_excess_h = future_return_h - industry_median_future_return_h
 
 | 等级 | 定义 |
 |---:|---|
-| 4 | Top5%，最大浮盈 >= 8%，最大回撤 > -6%，路径不含先止损 |
-| 3 | Top10%，最大浮盈 >= 6%，最大回撤 > -8% |
+| 4 | Top5%，最大浮盈 >= 8%，最大回撤 > -6%，且路径不歧义、不含先止损 |
+| 3 | Top10%，最大浮盈 >= 6%，最大回撤 > -8%，且路径不歧义 |
 | 2 | Top20%，且收益为正 |
 | 1 | 50% 至 80% 分位，且不是严重负样本 |
 | 0 | 其余样本 |
