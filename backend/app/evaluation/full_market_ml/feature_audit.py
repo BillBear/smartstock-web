@@ -54,7 +54,13 @@ def audit_features(development_dataset: pd.DataFrame, split_plan: SplitPlan) -> 
     and A-quadrant symbols. Final-time rows are rejected before any feature value is read.
     """
     dataset = _normalize_development_dataset(development_dataset, split_plan)
-    feature_names = _feature_names(dataset)
+    # Constant columns carry no cross-sectional information and otherwise create
+    # millions of meaningless daily bucket rows on the full-market panel.
+    feature_names = [
+        feature
+        for feature in _feature_names(dataset)
+        if pd.to_numeric(dataset[feature], errors="coerce").nunique(dropna=True) > 1
+    ]
     coverage_rows: list[dict] = []
     ic_rows: list[dict] = []
     bucket_rows: list[dict] = []
