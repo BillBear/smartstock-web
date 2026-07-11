@@ -18,6 +18,7 @@ class FullMarketMLConfigTests(unittest.TestCase):
         self.assertEqual(config.sample.minimum_daily_symbols, 4500)
         self.assertEqual(config.splits.embargo_trade_days, 20)
         self.assertEqual(config.training.seeds, (17, 42, 73))
+        self.assertEqual(config.collection.request_pacing_seconds, 0.01)
         self.assertEqual(config.sha256, hashlib.sha256(path.read_bytes()).hexdigest())
 
     def test_hashes_the_validated_byte_snapshot_when_file_changes_after_parse(self):
@@ -67,6 +68,11 @@ class FullMarketMLConfigTests(unittest.TestCase):
         data = full_market_ml_config_data()
         data["resources"]["memory_limit_gb"] = 13
         self._assert_invalid(data, "memory_limit_gb must not exceed 12")
+
+    def test_rejects_zero_or_negative_request_pacing(self):
+        data = full_market_ml_config_data()
+        data["collection"]["request_pacing_seconds"] = 0
+        self._assert_invalid(data, "request_pacing_seconds must be greater than zero")
 
     def _assert_invalid(self, data, message):
         with tempfile.TemporaryDirectory() as temporary_directory:

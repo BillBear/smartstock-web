@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 
-_REQUIRED_SECTIONS = ("dates", "sample", "splits", "training", "resources")
+_REQUIRED_SECTIONS = ("dates", "sample", "splits", "training", "resources", "collection")
 
 
 @dataclass(frozen=True)
@@ -42,12 +42,18 @@ class ResourcesConfig:
 
 
 @dataclass(frozen=True)
+class CollectionConfig:
+    request_pacing_seconds: float
+
+
+@dataclass(frozen=True)
 class FullMarketMLConfig:
     dates: DatesConfig
     sample: SampleConfig
     splits: SplitsConfig
     training: TrainingConfig
     resources: ResourcesConfig
+    collection: CollectionConfig
     sha256: str
 
 
@@ -70,12 +76,15 @@ def load_full_market_ml_config(path: str | Path) -> FullMarketMLConfig:
     )
     training = TrainingConfig(seeds=_integer_tuple(raw_config, "training", "seeds"))
     resources = ResourcesConfig(memory_limit_gb=_number(raw_config, "resources", "memory_limit_gb"))
+    collection = CollectionConfig(request_pacing_seconds=_number(raw_config, "collection", "request_pacing_seconds"))
 
     _validate_dates(dates)
     if splits.walk_forward_folds < 5:
         raise ValueError("walk_forward_folds must be at least 5")
     if resources.memory_limit_gb > 12:
         raise ValueError("memory_limit_gb must not exceed 12")
+    if collection.request_pacing_seconds <= 0:
+        raise ValueError("request_pacing_seconds must be greater than zero")
 
     return FullMarketMLConfig(
         dates=dates,
@@ -83,6 +92,7 @@ def load_full_market_ml_config(path: str | Path) -> FullMarketMLConfig:
         splits=splits,
         training=training,
         resources=resources,
+        collection=collection,
         sha256=config_digest,
     )
 
