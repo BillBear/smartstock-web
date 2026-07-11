@@ -42,6 +42,7 @@ def run_preflight(
 ) -> dict[str, Any]:
     """Return secret-safe readiness evidence and atomically persist it."""
     root = runtime_root or _default_runtime_root()
+    runtime_root_writable = _is_writable(root)
     observed: dict[str, Any] = {
         "config_sha256": config.sha256,
         "python_version": _version_text(python_version or sys.version_info),
@@ -50,7 +51,7 @@ def run_preflight(
         "memory_bytes": memory_bytes if memory_bytes is not None else _memory_bytes(),
         "free_disk_bytes": free_disk_bytes if free_disk_bytes is not None else _free_disk_bytes(root),
         "runtime_root": str(root),
-        "runtime_root_writable": False,
+        "runtime_root_writable": runtime_root_writable,
         "trade_calendar_date": None,
         "daily_probe_count": None,
     }
@@ -67,12 +68,17 @@ def run_preflight(
         blocking_codes.append("memory_insufficient")
     if observed["free_disk_bytes"] < MINIMUM_FREE_DISK_BYTES:
         blocking_codes.append("free_disk_insufficient")
-    observed["runtime_root_writable"] = _is_writable(root)
     if not observed["runtime_root_writable"]:
         blocking_codes.append("runtime_root_unwritable")
 
     if observed["tushare_token_configured"] and probe_client is not None:
-        _probe_tushare(probe_client, observed, blocking_codes, today or date.today(), config.sample.minimum_daily_symbols)
+        _probe_tushare(
+            probe_client,
+            observed,
+            blocking_codes,
+            today or date.today(),
+            max(4500, config.sample.minimum_daily_symbols),
+        )
     elif observed["tushare_token_configured"]:
         blocking_codes.extend(("trade_calendar_unavailable", "daily_probe_insufficient"))
 
