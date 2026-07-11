@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+from app.evaluation.full_market_ml.pipeline import (
+    FrozenModelMismatchError,
+    FullMarketMLPipeline,
+)
+from app.evaluation.full_market_ml.quality import TrainingBlockedError
+from tests.full_market_ml_fixtures import fake_pipeline_services
+from tests.test_full_market_ml_collector import FullMarketMLTestCase
+
+
+class FullMarketMLPipelineTests(FullMarketMLTestCase):
+    def test_pipeline_cannot_run_dev_train_after_failed_quality(self):
+        pipeline = FullMarketMLPipeline(self.config, self.temp_path, fake_pipeline_services(low_coverage=True))
+
+        with self.assertRaises(TrainingBlockedError):
+            pipeline.run("dev-train")
+
+    def test_final_evaluation_requires_matching_frozen_hash(self):
+        pipeline = FullMarketMLPipeline(self.config, self.temp_path, fake_pipeline_services())
+        pipeline.run("dev-train")
+
+        with self.assertRaises(FrozenModelMismatchError):
+            pipeline.run("final-evaluate", frozen_model_sha="wrong")
+
+    def test_resume_reuses_completed_stages(self):
+        pipeline = FullMarketMLPipeline(self.config, self.temp_path, fake_pipeline_services())
+        pipeline.run("probe")
+
+        second = pipeline.run("probe", resume=True)
+
+        self.assertEqual(second.reused_stages, ["preflight", "probe"])
+
+    def test_completed_stage_state_contains_hashes_and_timestamps(self):
+        pipeline = FullMarketMLPipeline(self.config, self.temp_path, fake_pipeline_services())
+        pipeline.run("preflight")
+
+        state = pipeline.stage_state("preflight")
+
+        self.assertEqual(state["status"], "complete")
+        self.assertEqual(state["input_hashes"]["config_sha256"], self.config.sha256)
+        self.assertTrue(state["output_hashes"])
+        self.assertIn("started_at", state)
+        self.assertIn("ended_at", state)
+        self.assertIn("peak_rss_bytes", state)
+
+    def test_cli_has_no_status_override_option(self):
+        script = Path(__file__).parents[1] / "scripts" / "run_full_market_ml_pipeline.py"
+
+        result = subprocess.run([sys.executable, str(script), "--help"], check=True, capture_output=True, text=True)
+
+        self.assertIn("--frozen-model-sha", result.stdout)
+        self.assertNotIn("override", result.stdout.lower())
+
+    def test_resume_rejects_a_tampered_file_artifact(self):
+        artifact = self.temp_path / "preflight-output.json"
+        services = fake_pipeline_services()
+
+        def preflight(_config, _root, _artifacts):
+            artifact.write_text('{"ready": true}\n', encoding="utf-8")
+            return {"quality_ready": True, "report": str(artifact)}
+
+        services["preflight"] = preflight
+        pipeline = FullMarketMLPipeline(self.config, self.temp_path, services)
+        pipeline.run("preflight")
+        artifact.write_text('{"ready": false}\n', encoding="utf-8")
+
+        with self.assertRaises(ValueError):
+            pipeline.run("preflight", resume=True)

@@ -9,6 +9,22 @@ import pandas as pd
 from app.evaluation.full_market_ml.splits import SplitPlan, WalkForwardFold
 
 
+def fake_pipeline_services(*, low_coverage: bool = False):
+    """Deterministic stage adapters for pipeline orchestration tests."""
+    def stage(name, _config, _root, _artifacts):
+        if name == "full-build" and low_coverage:
+            return {"quality_ready": False, "blocking_codes": ["daily_coverage_below_minimum"]}
+        if name == "dev-train":
+            return {"quality_ready": True, "frozen_model_sha": "fixture-frozen-sha"}
+        if name == "final-evaluate":
+            return {"evaluation_status": "research_only"}
+        return {"quality_ready": True}
+
+    return {name: (lambda config, root, artifacts, name=name: stage(name, config, root, artifacts)) for name in (
+        "preflight", "probe", "pilot-build", "full-build", "feature-audit", "dev-train", "final-evaluate",
+    )}
+
+
 FULL_MARKET_ML_CONFIG = {
     "dates": {
         "signal_start": "2024-06-03",
