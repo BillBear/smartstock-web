@@ -185,6 +185,27 @@ def mixed_typed_suspension_interval_fixture() -> dict:
     return values
 
 
+def twenty_session_panel_fixture(*, final_adj_factor=None) -> dict:
+    open_dates = pd.bdate_range("2025-01-02", periods=20)
+    daily = []
+    adjustments = []
+    calendar_rows = []
+    for index, trade_date in enumerate(open_dates):
+        compact_date = trade_date.strftime("%Y%m%d")
+        daily.append(
+            {"ts_code": "000001.SZ", "trade_date": compact_date, "open": 10.0, "high": 11.0, "low": 9.0, "close": 10.0, "vol": 1.0, "amount": 1.0}
+        )
+        if index < len(open_dates) - 1 or final_adj_factor is not None:
+            adjustments.append({"ts_code": "000001.SZ", "trade_date": compact_date, "adj_factor": 1.0 if index < len(open_dates) - 1 else final_adj_factor})
+        calendar_rows.append({"cal_date": compact_date, "is_open": 1})
+    values = two_day_split_fixture()
+    values["daily"] = frame(daily)
+    values["adj_factor"] = frame(adjustments)
+    values["trade_cal"] = frame(calendar_rows)
+    values["stock_basic"] = frame([{"ts_code": "000001.SZ", "list_date": "20250101", "list_status": "L"}])
+    return values
+
+
 class FakeTuShareClient:
     """Deterministic in-memory TuShare substitute for collection tests."""
 

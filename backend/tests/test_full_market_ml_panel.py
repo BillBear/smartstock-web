@@ -6,12 +6,14 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 import pyarrow.parquet as pq
 import pyarrow as pa
 import pandas as pd
 
 from app.evaluation.full_market_ml.config import load_full_market_ml_config
+from app.evaluation.full_market_ml import panel as panel_module
 from app.evaluation.full_market_ml.panel import (
     build_full_market_panel,
     build_historical_universe,
@@ -28,6 +30,7 @@ from tests.full_market_ml_fixtures import (
     open_ended_suspension_fixture,
     pre_signal_st_fixture,
     suspension_interval_fixture,
+    twenty_session_panel_fixture,
     two_day_split_fixture,
 )
 
@@ -102,6 +105,33 @@ class FullMarketMLPanelTests(unittest.TestCase):
             )
 
             self.assertEqual(result.row_count, 2)
+
+    def test_missing_or_nonpositive_adj_factor_invalidates_adjusted_rows_and_prior_entry(self):
+        for name, factor in (("missing", None), ("zero", 0.0)):
+            with self.subTest(name=name):
+                panel = build_panel_from_frames(twenty_session_panel_fixture(final_adj_factor=factor))
+                final_row = panel.iloc[-1]
+                prior_row = panel.iloc[-2]
+
+                self.assertFalse(bool(final_row["valid_ohlc"]))
+                self.assertFalse(bool(final_row["eligible_signal_day"]))
+                self.assertFalse(bool(prior_row["entry_tradeable"]))
+
+    def test_full_build_reuses_one_calendar_lookup_across_daily_partitions(self):
+        config = load_full_market_ml_config(Path(__file__).parents[1] / "config" / "ml_full_market_v1.toml")
+        fixtures = twenty_session_panel_fixture(final_adj_factor=1.0)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_raw_fixture(root, config, "calendar-lookup", fixtures)
+            dates = fixtures["trade_cal"]["cal_date"].map(lambda value: f"{value[:4]}-{value[4:6]}-{value[6:8]}")
+            config = replace(config, dates=replace(config.dates, signal_start=dates.iloc[0], signal_end=dates.iloc[-1]))
+
+            with patch.object(panel_module, "_build_calendar_lookup", wraps=panel_module._build_calendar_lookup) as build_lookup:
+                result = build_full_market_panel(config, root, "calendar-lookup")
+
+            final_panel = self._read_shards(result.shard_paths)
+            self.assertEqual(build_lookup.call_count, 1)
+            self.assertEqual(final_panel["listing_age_trade_days"].tolist(), list(range(1, 21)))
 
     def test_suspend_interval_uses_suspend_and_resume_dates(self):
         panel = build_panel_from_frames(suspension_interval_fixture())

@@ -1,6 +1,7 @@
 """Historically correct, symbol-sharded panel construction for offline ML."""
 from __future__ import annotations
 
+from bisect import bisect_left
 import hashlib
 import json
 import os
@@ -55,6 +56,12 @@ class PanelBuildResult:
     feature_contract_path: Path
 
 
+@dataclass(frozen=True)
+class _CalendarLookup:
+    open_dates: tuple[str, ...]
+    rank_by_date: dict[str, int]
+
+
 def build_full_market_panel(config: FullMarketMLConfig, runtime_root: str | Path, stage: str) -> PanelBuildResult:
     """Build an immutable panel without materialising the full market in memory."""
     root = Path(runtime_root)
@@ -72,12 +79,17 @@ def build_full_market_panel(config: FullMarketMLConfig, runtime_root: str | Path
         trade_dates = _open_trade_dates(root, manifest)
         if not trade_dates:
             raise ValueError("no open trade dates available for panel construction")
+        calendar_lookup = _build_calendar_lookup(static["trade_cal"])
         for trade_date in trade_dates:
             frames = dict(static)
             frames.update(_load_daily_frames(root, manifest, trade_date))
             if frames.get("daily", pd.DataFrame()).empty:
                 continue
-            base = _build_base_panel(frames, industry_relative_enabled=manifest.industry_relative_enabled)
+            base = _build_base_panel(
+                frames,
+                industry_relative_enabled=manifest.industry_relative_enabled,
+                calendar_lookup=calendar_lookup,
+            )
             if base.empty:
                 continue
             _write_intermediate_shards(base, temporary, trade_date)
@@ -116,7 +128,9 @@ def build_panel_from_frames(
     return _finalize_symbol_panel(_build_base_panel(frames, industry_relative_enabled=industry_relative_enabled))
 
 
-def _build_base_panel(frames: Mapping[str, pd.DataFrame], *, industry_relative_enabled: bool) -> pd.DataFrame:
+def _build_base_panel(
+    frames: Mapping[str, pd.DataFrame], *, industry_relative_enabled: bool, calendar_lookup: _CalendarLookup | None = None
+) -> pd.DataFrame:
     daily = _deduplicate_market_rows(_frame(frames, "daily"), "daily")
     if daily.empty:
         return pd.DataFrame()
@@ -142,12 +156,17 @@ def _build_base_panel(frames: Mapping[str, pd.DataFrame], *, industry_relative_e
     panel["is_st"] = _st_flags(panel, _frame(frames, "namechange"))
     panel["industry_l1"] = _industry_values(panel, frames, industry_relative_enabled)
     panel["industry_relative_enabled"] = bool(industry_relative_enabled)
-    panel["listing_age_trade_days"] = _listing_ages(panel, _frame(frames, "stock_basic"), _frame(frames, "trade_cal"))
+    panel["listing_age_trade_days"] = _listing_ages(
+        panel,
+        _frame(frames, "stock_basic"),
+        calendar_lookup or _build_calendar_lookup(_frame(frames, "trade_cal")),
+    )
     panel["valid_ohlc"] = (
         panel[["open", "high", "low", "close"]].gt(0).all(axis=1)
         & panel["high"].ge(panel["low"])
         & panel["high"].ge(panel[["open", "close"]].max(axis=1))
         & panel["low"].le(panel[["open", "close"]].min(axis=1))
+        & panel["adj_factor"].gt(0)
     )
     limits = _deduplicate_market_rows(_frame(frames, "stk_limit"), "stk_limit")
     panel["at_up_limit"] = _up_limit_flags(panel, limits)
@@ -310,23 +329,26 @@ def _industry_values(panel: pd.DataFrame, frames: Mapping[str, pd.DataFrame], en
     )
 
 
-def _listing_ages(panel: pd.DataFrame, stock_basic: pd.DataFrame, trade_cal: pd.DataFrame) -> pd.Series:
-    if stock_basic.empty or trade_cal.empty:
+def _build_calendar_lookup(trade_cal: pd.DataFrame) -> _CalendarLookup:
+    open_dates = tuple(_open_dates(trade_cal))
+    return _CalendarLookup(open_dates=open_dates, rank_by_date={trade_date: index + 1 for index, trade_date in enumerate(open_dates)})
+
+
+def _listing_ages(panel: pd.DataFrame, stock_basic: pd.DataFrame, calendar_lookup: _CalendarLookup) -> pd.Series:
+    if stock_basic.empty or not calendar_lookup.open_dates:
         return pd.Series(0, index=panel.index, dtype="int64")
     basics = stock_basic.copy()
     basics["symbol"] = _symbols(basics)
     list_dates = dict(zip(basics.symbol, basics.get("list_date", pd.Series("", index=basics.index)).map(_date_text)))
-    open_dates = sorted({_date_text(value) for value in trade_cal.loc[trade_cal.get("is_open", 0).astype(str) == "1", "cal_date"]})
-    age_by_symbol = {}
+    first_open_rank = {}
     for symbol, list_date in list_dates.items():
-        age = 0
-        values = {}
-        for trade_date in open_dates:
-            if list_date and trade_date >= list_date:
-                age += 1
-            values[trade_date] = age
-        age_by_symbol[symbol] = values
-    return pd.Series([age_by_symbol.get(symbol, {}).get(trade_date, 0) for symbol, trade_date in zip(panel.symbol, panel.trade_date)], index=panel.index)
+        first_open_index = bisect_left(calendar_lookup.open_dates, list_date) if list_date else len(calendar_lookup.open_dates)
+        if first_open_index < len(calendar_lookup.open_dates):
+            first_open_rank[symbol] = first_open_index + 1
+    trade_ranks = panel["trade_date"].map(calendar_lookup.rank_by_date)
+    listing_ranks = panel["symbol"].map(first_open_rank)
+    ages = (trade_ranks - listing_ranks + 1).where(trade_ranks >= listing_ranks, 0)
+    return ages.fillna(0).astype("int64")
 
 
 def _up_limit_flags(panel: pd.DataFrame, limits: pd.DataFrame) -> pd.Series:
