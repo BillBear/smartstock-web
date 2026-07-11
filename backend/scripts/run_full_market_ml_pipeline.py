@@ -99,7 +99,9 @@ def default_services():
         manifest = collect_full_market_raw(config, client, root, "full-build", resume=True)
         if not manifest.ready:
             return {"quality_ready": False, "blocking_codes": manifest.blocking_codes}
-        build_full_market_panel(config, root, "full-build")
+        panel_root = root / "panel" / "stage=full-build"
+        if not panel_root.exists():
+            build_full_market_panel(config, root, "full-build")
         panels = panel_dataset(root)
         dataset = pd.concat(panels.values(), ignore_index=True)
         quality = audit_panel_quality(config, dataset, manifest)
