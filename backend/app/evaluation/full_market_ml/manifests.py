@@ -1,12 +1,15 @@
 """Persistent, auditable collection manifests for full-market ML inputs."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+import pyarrow.parquet as pq
 
 
 @dataclass
@@ -123,3 +126,19 @@ def save_manifest(runtime_root: Path, manifest: CollectionManifest) -> None:
         os.fsync(temporary_file.fileno())
         temporary_path = Path(temporary_file.name)
     os.replace(temporary_path, path)
+
+
+def validate_partition(root: Path, record: PartitionRecord) -> Path:
+    """Return a manifest-verified partition path or reject any integrity mismatch."""
+    path = root / record.path
+    if record.status == "failed" or not path.is_file():
+        raise ValueError(f"manifest partition integrity failed: {record.endpoint}/{record.key}")
+    if hashlib.sha256(path.read_bytes()).hexdigest() != record.sha256:
+        raise ValueError(f"manifest partition integrity failed: {record.endpoint}/{record.key}")
+    try:
+        table = pq.ParquetFile(path).read()
+    except Exception as error:
+        raise ValueError(f"manifest partition integrity failed: {record.endpoint}/{record.key}") from error
+    if table.num_rows != record.row_count or str(table.schema) != record.schema:
+        raise ValueError(f"manifest partition integrity failed: {record.endpoint}/{record.key}")
+    return path

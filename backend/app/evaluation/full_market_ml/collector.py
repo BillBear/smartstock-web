@@ -13,7 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .config import FullMarketMLConfig
-from .manifests import CollectionManifest, PartitionRecord, load_manifest, manifest_path, save_manifest
+from .manifests import CollectionManifest, PartitionRecord, load_manifest, manifest_path, save_manifest, validate_partition
 
 
 CORE_DAILY_ENDPOINTS = ("daily", "daily_basic", "adj_factor", "stk_limit", "suspend_d")
@@ -125,7 +125,7 @@ def collect_full_market_raw(
             lambda endpoint=endpoint: _records(
                 _request(
                     lambda: getattr(client, endpoint)(
-                        start_date=_compact(config.dates.signal_start), end_date=_compact(config.dates.signal_end)
+                        start_date=_compact(config.collection.namechange_history_start), end_date=_compact(config.dates.signal_end)
                     ),
                     config.collection.request_pacing_seconds,
                 )
@@ -274,14 +274,9 @@ def _existing_partition(root: Path, manifest: CollectionManifest, endpoint: str,
         record = manifest.partition(endpoint, key)
     except KeyError:
         return None
-    path = root / record.path
-    if record.status == "failed" or not path.is_file() or _sha256(path) != record.sha256:
-        return None
     try:
-        table = pq.ParquetFile(path).read()
-    except Exception:
-        return None
-    if table.num_rows != record.row_count or str(table.schema) != record.schema:
+        validate_partition(root, record)
+    except ValueError:
         return None
     return record
 

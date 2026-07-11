@@ -44,6 +44,7 @@ class ResourcesConfig:
 @dataclass(frozen=True)
 class CollectionConfig:
     request_pacing_seconds: float
+    namechange_history_start: str
 
 
 @dataclass(frozen=True)
@@ -76,7 +77,10 @@ def load_full_market_ml_config(path: str | Path) -> FullMarketMLConfig:
     )
     training = TrainingConfig(seeds=_integer_tuple(raw_config, "training", "seeds"))
     resources = ResourcesConfig(memory_limit_gb=_number(raw_config, "resources", "memory_limit_gb"))
-    collection = CollectionConfig(request_pacing_seconds=_number(raw_config, "collection", "request_pacing_seconds"))
+    collection = CollectionConfig(
+        request_pacing_seconds=_number(raw_config, "collection", "request_pacing_seconds"),
+        namechange_history_start=_string(_section(raw_config, "collection"), "collection", "namechange_history_start"),
+    )
 
     _validate_dates(dates)
     if splits.walk_forward_folds < 5:
@@ -85,6 +89,10 @@ def load_full_market_ml_config(path: str | Path) -> FullMarketMLConfig:
         raise ValueError("memory_limit_gb must not exceed 12")
     if collection.request_pacing_seconds <= 0:
         raise ValueError("request_pacing_seconds must be greater than zero")
+    if _parse_date("collection.namechange_history_start", collection.namechange_history_start) > _parse_date(
+        "signal_start", dates.signal_start
+    ):
+        raise ValueError("collection.namechange_history_start must be on or before signal_start")
 
     return FullMarketMLConfig(
         dates=dates,

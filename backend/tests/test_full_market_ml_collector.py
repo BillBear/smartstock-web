@@ -99,6 +99,13 @@ class FullMarketMLCollectorTests(FullMarketMLTestCase):
         self.assertEqual(client.calls["index_classify"], 1)
         self.assertEqual(client.calls["index_member_all"], 2)
 
+    def test_namechange_collection_starts_at_configured_historical_floor(self):
+        client = FakeTuShareClient()
+        collect_full_market_raw(self.config, client, self.temp_path, "probe")
+
+        namechange_requests = [kwargs for endpoint, kwargs in client.request_kwargs if endpoint == "namechange"]
+        self.assertEqual(namechange_requests, [{"start_date": "19900101", "end_date": "20260709"}])
+
     def test_industry_failure_disables_relative_data_without_current_industry_fallback(self):
         with patch("app.evaluation.full_market_ml.collector.time.sleep"):
             manifest = collect_full_market_raw(

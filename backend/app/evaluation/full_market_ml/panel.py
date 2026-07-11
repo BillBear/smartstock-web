@@ -15,11 +15,35 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .config import FullMarketMLConfig
-from .manifests import CollectionManifest, load_manifest
+from .manifests import CollectionManifest, load_manifest, validate_partition
 
 
 SHARD_COUNT = 64
 _STATIC_ENDPOINTS = {"stock_basic", "namechange", "index_classify", "index_member_all"}
+ALLOWED_FEATURE_COLUMNS = (
+    "adjusted_open",
+    "adjusted_high",
+    "adjusted_low",
+    "adjusted_close",
+    "volume_shares",
+    "amount_cny",
+    "is_suspended",
+    "is_st",
+    "industry_l1",
+    "industry_relative_enabled",
+    "listing_age_trade_days",
+    "valid_ohlc",
+    "at_up_limit",
+    "median_amount_20d",
+)
+FUTURE_EXECUTION_COLUMNS = (
+    "next_open_date",
+    "next_adjusted_open",
+    "next_valid_ohlc",
+    "next_is_suspended",
+    "next_at_up_limit",
+    "entry_tradeable",
+)
 
 
 @dataclass(frozen=True)
@@ -28,6 +52,7 @@ class PanelBuildResult:
     row_count: int
     shard_paths: tuple[Path, ...]
     industry_relative_enabled: bool
+    feature_contract_path: Path
 
 
 def build_full_market_panel(config: FullMarketMLConfig, runtime_root: str | Path, stage: str) -> PanelBuildResult:
@@ -56,8 +81,8 @@ def build_full_market_panel(config: FullMarketMLConfig, runtime_root: str | Path
                 continue
             _write_intermediate_shards(base, temporary, trade_date)
 
-        shard_paths, row_count = _finalize_shards(temporary, output, manifest.industry_relative_enabled)
-        return PanelBuildResult(stage, row_count, tuple(shard_paths), manifest.industry_relative_enabled)
+        shard_paths, row_count, feature_contract_path = _finalize_shards(temporary, output, manifest.industry_relative_enabled)
+        return PanelBuildResult(stage, row_count, tuple(shard_paths), manifest.industry_relative_enabled, feature_contract_path)
     finally:
         shutil.rmtree(temporary, ignore_errors=True)
 
@@ -329,7 +354,7 @@ def _open_trade_dates(root: Path, manifest: CollectionManifest) -> list[str]:
 
 
 def _read_partitions(root: Path, records) -> pd.DataFrame:
-    frames = [pq.ParquetFile(root / record.path).read().to_pandas() for record in records if record.status != "failed" and (root / record.path).is_file()]
+    frames = [pq.ParquetFile(validate_partition(root, record)).read().to_pandas() for record in records if record.status != "failed"]
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
@@ -343,7 +368,7 @@ def _write_intermediate_shards(panel: pd.DataFrame, temporary: Path, trade_date:
         pq.write_table(pa.Table.from_pandas(rows, preserve_index=False), path)
 
 
-def _finalize_shards(temporary: Path, output: Path, industry_relative_enabled: bool) -> tuple[list[Path], int]:
+def _finalize_shards(temporary: Path, output: Path, industry_relative_enabled: bool) -> tuple[list[Path], int, Path]:
     staging = output.parent / f".{output.name}.tmp"
     if staging.exists():
         shutil.rmtree(staging)
@@ -362,12 +387,22 @@ def _finalize_shards(temporary: Path, output: Path, industry_relative_enabled: b
             pq.write_table(pa.Table.from_pandas(finalized, preserve_index=False), path)
             paths.append(output / f"shard={shard:02d}" / "data.parquet")
             row_count += len(finalized)
+        _write_feature_contract(staging)
         output.parent.mkdir(parents=True, exist_ok=True)
         os.replace(staging, output)
-        return paths, row_count
+        return paths, row_count, output / "feature_contract.json"
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+
+
+def _write_feature_contract(staging: Path) -> None:
+    contract = {
+        "schema_version": 1,
+        "allowed_feature_columns": list(ALLOWED_FEATURE_COLUMNS),
+        "excluded_future_execution_columns": list(FUTURE_EXECUTION_COLUMNS),
+    }
+    (staging / "feature_contract.json").write_text(json.dumps(contract, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _shard_for_symbol(symbol: str) -> int:

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
 
 import pyarrow.parquet as pq
+import pyarrow as pa
 import pandas as pd
 
 from app.evaluation.full_market_ml.config import load_full_market_ml_config
@@ -23,6 +26,7 @@ from tests.full_market_ml_fixtures import (
     mixed_typed_suspension_interval_fixture,
     next_open_suspension_fixture,
     open_ended_suspension_fixture,
+    pre_signal_st_fixture,
     suspension_interval_fixture,
     two_day_split_fixture,
 )
@@ -48,6 +52,20 @@ class FullMarketMLPanelTests(unittest.TestCase):
 
             final_panel = self._read_shards(result.shard_paths)
             self.assertEqual(final_panel["trade_date"].tolist(), ["2025-01-02"])
+
+    def test_full_build_blocks_tampered_manifested_raw_partition(self):
+        config = load_full_market_ml_config(Path(__file__).parents[1] / "config" / "ml_full_market_v1.toml")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = self._write_raw_fixture(root, config, "tampered", two_day_split_fixture())
+            daily_path = root / manifest.partition("daily", "20250102").path
+            table = pq.ParquetFile(daily_path).read()
+            pq.write_table(table.append_column("tampered", pa.array([True] * table.num_rows)), daily_path)
+
+            with self.assertRaisesRegex(ValueError, "manifest partition integrity"):
+                build_full_market_panel(
+                    replace(config, dates=replace(config.dates, signal_start="2025-01-02", signal_end="2025-01-03")), root, "tampered"
+                )
 
     def test_suspend_interval_uses_suspend_and_resume_dates(self):
         panel = build_panel_from_frames(suspension_interval_fixture())
@@ -128,6 +146,11 @@ class FullMarketMLPanelTests(unittest.TestCase):
         self.assertTrue(bool(panel.loc[panel.trade_date == "2025-01-02", "is_st"].item()))
         self.assertFalse(bool(panel.loc[panel.trade_date == "2025-03-03", "is_st"].item()))
 
+    def test_st_interval_starting_before_signal_start_remains_active(self):
+        panel = build_panel_from_frames(pre_signal_st_fixture())
+
+        self.assertTrue(bool(panel.loc[panel.trade_date == "2025-01-02", "is_st"].item()))
+
     def test_historical_industry_uses_membership_interval(self):
         panel = build_panel_from_frames(historical_industry_fixture())
 
@@ -164,6 +187,16 @@ class FullMarketMLPanelTests(unittest.TestCase):
             self.assertEqual(result.row_count, 2)
             self.assertEqual(len(result.shard_paths), 64)
             self.assertTrue(all(path.is_file() for path in result.shard_paths))
+            contract = json.loads(result.feature_contract_path.read_text(encoding="utf-8"))
+            self.assertTrue(contract["allowed_feature_columns"])
+            self.assertFalse(any(column.startswith("next_") or column == "entry_tradeable" for column in contract["allowed_feature_columns"]))
+            future_columns = {
+                column
+                for column in self._read_shards(result.shard_paths).columns
+                if column.startswith("next_") or column == "entry_tradeable"
+            }
+            self.assertTrue(future_columns)
+            self.assertTrue(future_columns.issubset(set(contract["excluded_future_execution_columns"])))
 
     def _write_raw_fixture(self, root, config, stage, fixtures):
         manifest = CollectionManifest(stage, config.sha256, config.collection.request_pacing_seconds)
@@ -180,12 +213,20 @@ class FullMarketMLPanelTests(unittest.TestCase):
                 path = root / "raw" / f"endpoint={endpoint}" / f"trade_date={normalized}" / "data.parquet"
                 self._write_manifest_partition(root, manifest, endpoint, normalized, path, rows)
         save_manifest(root, manifest)
+        return manifest
 
     def _write_manifest_partition(self, root, manifest, endpoint, key, path, values):
         path.parent.mkdir(parents=True, exist_ok=True)
         values.to_parquet(path, index=False)
         manifest.partitions.append(
-            PartitionRecord(endpoint, key, str(path.relative_to(root)), len(values), str(pq.ParquetFile(path).schema_arrow), "unused")
+            PartitionRecord(
+                endpoint,
+                key,
+                str(path.relative_to(root)),
+                len(values),
+                str(pq.ParquetFile(path).read().schema),
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
         )
 
     def _read_shards(self, paths):

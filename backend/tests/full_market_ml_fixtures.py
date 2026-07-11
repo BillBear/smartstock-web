@@ -18,7 +18,7 @@ FULL_MARKET_ML_CONFIG = {
     "splits": {"embargo_trade_days": 20, "walk_forward_folds": 5},
     "training": {"seeds": [17, 42, 73]},
     "resources": {"memory_limit_gb": 12},
-    "collection": {"request_pacing_seconds": 0.01},
+    "collection": {"request_pacing_seconds": 0.01, "namechange_history_start": "1990-01-01"},
 }
 
 
@@ -75,6 +75,14 @@ def historical_st_fixture() -> dict:
     )
     values["namechange"] = frame(
         [{"ts_code": "000001.SZ", "name": "*ST 样本", "start_date": "20241201", "end_date": "20250228"}]
+    )
+    return values
+
+
+def pre_signal_st_fixture() -> dict:
+    values = two_day_split_fixture()
+    values["namechange"] = frame(
+        [{"ts_code": "000001.SZ", "name": "ST 样本", "start_date": "19900101", "end_date": ""}]
     )
     return values
 
@@ -194,6 +202,7 @@ class FakeTuShareClient:
         self.transient_failures = Counter(transient_failures or {})
         self.always_fail = set(always_fail or ())
         self.calls = Counter()
+        self.request_kwargs = []
         self.index_daily_codes = []
         self.calendar_rows = calendar_rows
         self.short_endpoints = set(short_endpoints or ())
@@ -201,6 +210,7 @@ class FakeTuShareClient:
 
     def _result(self, endpoint, **kwargs):
         self.calls[endpoint] += 1
+        self.request_kwargs.append((endpoint, kwargs))
         if endpoint in self.always_fail:
             raise RuntimeError(f"{endpoint} unavailable")
         if self.transient_failures[endpoint]:

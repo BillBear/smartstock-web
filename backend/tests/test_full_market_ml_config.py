@@ -19,6 +19,7 @@ class FullMarketMLConfigTests(unittest.TestCase):
         self.assertEqual(config.splits.embargo_trade_days, 20)
         self.assertEqual(config.training.seeds, (17, 42, 73))
         self.assertEqual(config.collection.request_pacing_seconds, 0.01)
+        self.assertEqual(config.collection.namechange_history_start, "1990-01-01")
         self.assertEqual(config.sha256, hashlib.sha256(path.read_bytes()).hexdigest())
 
     def test_hashes_the_validated_byte_snapshot_when_file_changes_after_parse(self):

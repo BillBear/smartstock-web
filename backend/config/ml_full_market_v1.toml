@@ -19,3 +19,5 @@ memory_limit_gb = 12
 
 [collection]
 request_pacing_seconds = 0.01
+# Covers name histories active before the model signal period.
+namechange_history_start = "1990-01-01"
