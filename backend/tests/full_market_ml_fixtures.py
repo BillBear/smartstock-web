@@ -118,8 +118,91 @@ def three_fold_split_fixture() -> SplitPlan:
     )
 
 
-def sealed_split_fixture() -> SplitPlan:
-    return three_fold_split_fixture().seal_final_holdout("frozen-model-sha256")
+def sealed_split_fixture(*, symbols_per_date: int = 10) -> SplitPlan:
+    plan = three_fold_split_fixture()
+    symbols = tuple(f"{index + 1:06d}" for index in range(symbols_per_date))
+    if symbols_per_date != 10:
+        folds = tuple(
+            WalkForwardFold(
+                fold=fold.fold,
+                training_dates=fold.training_dates,
+                validation_dates=fold.validation_dates,
+                training_symbols=symbols,
+                train_start=fold.train_start,
+                train_end=fold.train_end,
+                validation_start=fold.validation_start,
+                validation_end=fold.validation_end,
+            )
+            for fold in plan.walk_forward
+        )
+        plan = SplitPlan(
+            development_dates=plan.development_dates,
+            final_dates=plan.final_dates,
+            stock_holdout_symbols=(),
+            A_dev_train_symbols=symbols,
+            B_final_train_symbols=symbols,
+            C_dev_unseen_symbols=(),
+            D_final_unseen_symbols=(),
+            walk_forward=folds,
+            stratum_counts_before={},
+            stratum_counts_after={},
+            split_sha256=f"fixture-split-sha256-{symbols_per_date}",
+        )
+    return plan.seal_final_holdout("frozen-model-sha256")
+
+
+def predictive_fixture(*, symbols_per_date: int = 220) -> pd.DataFrame:
+    """Development-only panel with a stable, leak-free ranking signal."""
+    dates = three_fold_split_fixture().development_dates
+    rows = []
+    for date_index, trade_date in enumerate(dates):
+        for symbol_index in range(symbols_per_date):
+            rank = symbol_index + 1
+            percentile = rank / symbols_per_date
+            # The fixed ranker grid permits leaves no smaller than 200.  This
+            # signal therefore occupies enough of each early training fold to
+            # make the pre-registered constraint observable in the test.
+            strong = percentile >= 0.50
+            severe = percentile <= 0.10
+            rows.append(
+                {
+                    "trade_date": trade_date,
+                    "symbol": f"{symbol_index + 1:06d}",
+                    "industry_l1": "Industry A" if symbol_index % 2 else "Industry B",
+                    "eligible_for_training": True,
+                    "adjusted_return_20d": percentile,
+                    "amount_log": float(rank % 31),
+                    "turnover_rate": float(rank % 17) / 17.0,
+                    "realized_volatility_20d": float((symbols_per_date - rank) % 19) / 19.0,
+                    "industry_return_20d_excess": percentile if symbol_index % 2 else -percentile,
+                    "main_net_inflow_ratio": percentile / 10.0,
+                    "future_return_10d": percentile / 10.0 + date_index / 10_000.0,
+                    "relevance_grade_10d": 4 if strong else 0,
+                    "label_strong_path_10d": strong,
+                    "label_severe_negative_10d": severe,
+                    "adjusted_next_open": 10.0,
+                    "adjusted_exit_close": 10.0 * (1.0 + percentile / 10.0),
+                    "exit_trade_date": trade_date,
+                }
+            )
+    return frame(rows)
+
+
+def random_label_fixture(*, seed: int) -> pd.DataFrame:
+    """Keep features fixed while permuting every target used by the trainer."""
+    import numpy as np
+
+    dataset = predictive_fixture()
+    rng = np.random.default_rng(seed)
+    for column in (
+        "future_return_10d",
+        "relevance_grade_10d",
+        "label_strong_path_10d",
+        "label_severe_negative_10d",
+        "adjusted_exit_close",
+    ):
+        dataset[column] = rng.permutation(dataset[column].to_numpy())
+    return dataset
 
 
 def dataset_with_final_rows_exposed() -> pd.DataFrame:
