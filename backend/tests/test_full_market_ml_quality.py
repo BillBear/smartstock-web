@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from app.evaluation.full_market_ml.config import load_full_market_ml_config
+from app.evaluation.full_market_ml.collector import CORE_DAILY_ENDPOINTS
 from app.evaluation.full_market_ml.manifests import CollectionManifest, PartitionRecord
 from app.evaluation.full_market_ml.quality import TrainingBlockedError, audit_panel_quality
 
@@ -101,13 +102,15 @@ class FullMarketMLQualityTests(unittest.TestCase):
         self.assertIn("industry_relative", report.disabled_feature_groups)
         self.assertNotIn("required_feature_missingness", report.blocking_codes)
 
-    def test_calendar_open_sessions_not_daily_records_define_required_coverage(self):
+    def test_calendar_open_sessions_not_core_daily_records_define_required_coverage(self):
         manifest = valid_manifest(self.config)
-        manifest.partitions = [record for record in manifest.partitions if record.endpoint != "daily"]
-        report = audit_panel_quality(self.config, valid_panel(), manifest)
+        for endpoint in CORE_DAILY_ENDPOINTS:
+            with self.subTest(endpoint=endpoint):
+                missing_endpoint = replace_manifest_without_endpoint(manifest, endpoint)
+                report = audit_panel_quality(self.config, valid_panel(), missing_endpoint)
 
-        self.assertEqual(report.expected_trade_dates, ("2025-01-02", "2025-01-03"))
-        self.assertIn("daily_manifest_missing", report.blocking_codes)
+                self.assertEqual(report.expected_trade_dates, ("2025-01-02", "2025-01-03"))
+                self.assertIn(f"{endpoint}_manifest_missing", report.blocking_codes)
 
     def test_panel_rows_cannot_spoof_persisted_open_calendar_evidence(self):
         manifest = valid_manifest(self.config)
@@ -118,29 +121,43 @@ class FullMarketMLQualityTests(unittest.TestCase):
         self.assertEqual(report.expected_trade_dates, ("2025-01-02",))
         self.assertIn("required_date_coverage_incomplete", report.blocking_codes)
 
-    def test_failed_daily_record_blocks_without_legacy_manifest_code(self):
+    def test_failed_core_daily_record_blocks_without_legacy_manifest_code(self):
         manifest = valid_manifest(self.config)
-        manifest.partitions[2].status = "failed"
-        report = audit_panel_quality(self.config, valid_panel(), manifest)
+        for endpoint in CORE_DAILY_ENDPOINTS:
+            with self.subTest(endpoint=endpoint):
+                failed_endpoint = replace_manifest_partition_status(manifest, endpoint, "20250102", "failed")
+                report = audit_panel_quality(self.config, valid_panel(), failed_endpoint)
 
-        self.assertIn("daily_manifest_failed", report.blocking_codes)
-        self.assertNotIn("manifest_not_ready", report.blocking_codes)
+                self.assertIn(f"{endpoint}_manifest_failed", report.blocking_codes)
+                self.assertNotIn("manifest_not_ready", report.blocking_codes)
 
-    def test_partial_daily_manifest_coverage_blocks_training(self):
+    def test_partial_core_daily_manifest_coverage_blocks_training(self):
         manifest = valid_manifest(self.config)
-        manifest.partitions = [
-            record for record in manifest.partitions if not (record.endpoint == "daily" and record.key == "20250103")
-        ]
-        report = audit_panel_quality(self.config, valid_panel(), manifest)
+        for endpoint in CORE_DAILY_ENDPOINTS:
+            with self.subTest(endpoint=endpoint):
+                partial_endpoint = replace_manifest_without_partition(manifest, endpoint, "20250103")
+                report = audit_panel_quality(self.config, valid_panel(), partial_endpoint)
 
-        self.assertIn("daily_manifest_incomplete", report.blocking_codes)
+                self.assertIn(f"{endpoint}_manifest_incomplete", report.blocking_codes)
 
-    def test_partial_daily_record_status_blocks_without_legacy_manifest_code(self):
+    def test_partial_core_daily_record_status_blocks_without_legacy_manifest_code(self):
         manifest = valid_manifest(self.config)
-        manifest.partitions[2].status = "partial"
-        report = audit_panel_quality(self.config, valid_panel(), manifest)
+        for endpoint in CORE_DAILY_ENDPOINTS:
+            with self.subTest(endpoint=endpoint):
+                partial_endpoint = replace_manifest_partition_status(manifest, endpoint, "20250102", "partial")
+                report = audit_panel_quality(self.config, valid_panel(), partial_endpoint)
 
-        self.assertIn("daily_manifest_incomplete", report.blocking_codes)
+                self.assertIn(f"{endpoint}_manifest_incomplete", report.blocking_codes)
+
+    def test_zero_row_suspend_partition_is_ready_evidence(self):
+        manifest = valid_manifest(self.config)
+        suspend_partitions = [record for record in manifest.partitions if record.endpoint == "suspend_d"]
+
+        self.assertEqual([(record.key, record.row_count, record.status) for record in suspend_partitions], [
+            ("20250102", 0, "collected"),
+            ("20250103", 0, "collected"),
+        ])
+        self.assertTrue(audit_panel_quality(self.config, valid_panel(), manifest).ready)
 
     def test_manifest_config_mismatch_blocks_quality_gate(self):
         manifest = valid_manifest(self.config)
@@ -159,6 +176,7 @@ class FullMarketMLQualityTests(unittest.TestCase):
 
 
 def valid_manifest(config) -> CollectionManifest:
+    open_dates = ("20250102", "20250103")
     manifest = CollectionManifest(
         stage="quality-test",
         config_sha256=config.sha256,
@@ -166,12 +184,35 @@ def valid_manifest(config) -> CollectionManifest:
         partitions=[
             PartitionRecord("trade_cal", "20250102", "unused", 1, "", ""),
             PartitionRecord("trade_cal", "20250103", "unused", 1, "", ""),
-            PartitionRecord("daily", "20250102", "unused", 3, "", ""),
-            PartitionRecord("daily", "20250103", "unused", 3, "", ""),
+            *[
+                PartitionRecord(endpoint, trade_date, "unused", 0 if endpoint == "suspend_d" else 3, "", "")
+                for endpoint in CORE_DAILY_ENDPOINTS
+                for trade_date in open_dates
+            ],
         ],
     )
     manifest.trade_cal_open_dates = ("2025-01-02", "2025-01-03")
     return manifest
+
+
+def replace_manifest_without_endpoint(manifest: CollectionManifest, endpoint: str) -> CollectionManifest:
+    return replace(manifest, partitions=[record for record in manifest.partitions if record.endpoint != endpoint])
+
+
+def replace_manifest_without_partition(manifest: CollectionManifest, endpoint: str, key: str) -> CollectionManifest:
+    return replace(
+        manifest,
+        partitions=[record for record in manifest.partitions if (record.endpoint, record.key) != (endpoint, key)],
+    )
+
+
+def replace_manifest_partition_status(
+    manifest: CollectionManifest, endpoint: str, key: str, status: str
+) -> CollectionManifest:
+    return replace(
+        manifest,
+        partitions=[replace(record, status=status) if (record.endpoint, record.key) == (endpoint, key) else record for record in manifest.partitions],
+    )
 
 
 def valid_panel(*, moneyflow_coverage: float | None = None) -> pd.DataFrame:

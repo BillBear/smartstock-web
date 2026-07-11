@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 import pandas as pd
 
+from .collector import CORE_DAILY_ENDPOINTS
 from .config import FullMarketMLConfig
 
 
@@ -289,13 +290,14 @@ def _manifest_evidence(
     trade_cal_status = records_by_endpoint.get("trade_cal", {})
     if any(trade_cal_status.get(date) not in READY_PARTITION_STATUSES for date in dates):
         gate_codes.add("trade_cal_manifest_incomplete")
-    daily_status = records_by_endpoint.get("daily", {})
-    if dates and not daily_status:
-        gate_codes.add("daily_manifest_missing")
-    elif any(daily_status.get(date) == "failed" for date in dates):
-        gate_codes.add("daily_manifest_failed")
-    elif any(daily_status.get(date) not in READY_PARTITION_STATUSES for date in dates):
-        gate_codes.add("daily_manifest_incomplete")
+    for endpoint in CORE_DAILY_ENDPOINTS:
+        endpoint_status = records_by_endpoint.get(endpoint, {})
+        if dates and not endpoint_status:
+            gate_codes.add(f"{endpoint}_manifest_missing")
+        elif any(endpoint_status.get(date) == "failed" for date in dates):
+            gate_codes.add(f"{endpoint}_manifest_failed")
+        elif any(endpoint_status.get(date) not in READY_PARTITION_STATUSES for date in dates):
+            gate_codes.add(f"{endpoint}_manifest_incomplete")
     disabled = set() if industry_enabled else {"industry_relative"}
     if "historical_industry" in optional_failures:
         disabled.add("industry_relative")
