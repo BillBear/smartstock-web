@@ -81,8 +81,8 @@ def default_services():
         return recent_window_config(config, calendar_days=45, sessions=5)
 
     def pilot_config(config):
-        # Six calendar months yields about 120 sessions and leaves room for labels.
-        return recent_window_config(config, calendar_days=220, sessions=100)
+        # 130 sessions leave at least 100 labelable days after the 20-day horizon.
+        return recent_window_config(config, calendar_days=300, sessions=130)
 
     def collect(stage, with_panel=False, bounded_probe=False):
         def handler(config, root, _artifacts):
