@@ -64,17 +64,25 @@ def default_services():
         report = run_preflight(config, os.environ, client, runtime_root=root)
         return {"quality_ready": report["ready"], "blocking_codes": report["blocking_codes"], "preflight": report}
 
-    def probe_config(config):
+    def recent_window_config(config, calendar_days, sessions):
         end = date.fromisoformat(config.dates.signal_end)
         rows = client.trade_cal(
             exchange="",
-            start_date=(end - timedelta(days=45)).strftime("%Y%m%d"),
+            start_date=(end - timedelta(days=calendar_days)).strftime("%Y%m%d"),
             end_date=end.strftime("%Y%m%d"),
         ).to_dict("records")
         dates = select_probe_dates(
             [str(row["cal_date"]) for row in rows if str(row.get("is_open")) == "1"],
+            sessions,
         )
         return replace(config, dates=replace(config.dates, signal_start=dates[0], signal_end=dates[-1]))
+
+    def probe_config(config):
+        return recent_window_config(config, calendar_days=45, sessions=5)
+
+    def pilot_config(config):
+        # Six calendar months yields about 120 sessions and leaves room for labels.
+        return recent_window_config(config, calendar_days=220, sessions=100)
 
     def collect(stage, with_panel=False, bounded_probe=False):
         def handler(config, root, _artifacts):
@@ -130,7 +138,7 @@ def default_services():
         output.write_text(json.dumps(report, ensure_ascii=True, sort_keys=True) + "\n", encoding="utf-8")
         return {"quality_ready": True, "evaluation": str(output), "status": report["status"]}
 
-    return {"preflight": preflight, "probe": collect("probe", bounded_probe=True), "pilot-build": collect("pilot-build", with_panel=True), "full-build": full_build, "feature-audit": feature_audit, "dev-train": dev_train, "final-evaluate": final_evaluate}
+    return {"preflight": preflight, "probe": collect("probe", bounded_probe=True), "pilot-build": lambda config, root, artifacts: collect("pilot-build", with_panel=True)(pilot_config(config), root, artifacts), "full-build": full_build, "feature-audit": feature_audit, "dev-train": dev_train, "final-evaluate": final_evaluate}
 
 
 def main() -> int:
