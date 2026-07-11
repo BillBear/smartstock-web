@@ -26,6 +26,40 @@ def full_market_ml_config_data() -> dict:
     return deepcopy(FULL_MARKET_ML_CONFIG)
 
 
+SPLIT_FIXTURE_DATES = tuple(pd.bdate_range("2024-01-02", periods=220).strftime("%Y-%m-%d"))
+SPLIT_HOLDOUT_START = SPLIT_FIXTURE_DATES[176]
+SPLIT_HOLDOUT_END = SPLIT_FIXTURE_DATES[-1]
+
+
+def stratified_panel_fixture() -> pd.DataFrame:
+    """Labeled panel with three stable, sufficiently common stock strata."""
+    groups = (
+        ("600", "Main Industry", 1_000_000_000.0, 10_000_000.0),
+        ("300", "Growth Industry", 5_000_000_000.0, 50_000_000.0),
+        ("688", "Star Industry", 20_000_000_000.0, 200_000_000.0),
+    )
+    rows = []
+    for group_index, (prefix, industry, market_cap, liquidity) in enumerate(groups):
+        for symbol_index in range(10):
+            symbol = f"{prefix}{group_index * 100 + symbol_index:03d}"
+            for date_index, trade_date in enumerate(SPLIT_FIXTURE_DATES):
+                rows.append(
+                    {
+                        "trade_date": trade_date,
+                        "symbol": symbol,
+                        "industry_l1": industry,
+                        "total_mv": market_cap,
+                        "amount_cny": liquidity + date_index,
+                        "eligible_for_training": True,
+                    }
+                )
+    return frame(rows)
+
+
+def long_calendar_fixture() -> pd.DataFrame:
+    return stratified_panel_fixture()
+
+
 def frame(rows=None, **kwargs):
     return pd.DataFrame(rows, **kwargs)
 
