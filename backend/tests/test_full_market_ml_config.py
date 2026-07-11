@@ -26,18 +26,22 @@ class FullMarketMLConfigTests(unittest.TestCase):
             path.write_text(_to_toml(full_market_ml_config_data()), encoding="utf-8")
             validated_bytes = path.read_bytes()
             replacement_bytes = validated_bytes.replace(b"minimum_daily_symbols = 4500", b"minimum_daily_symbols = 4501")
-            original_load = config_module.tomllib.load
+            hook_called = {"value": False}
+            original_require_sections = config_module._require_sections
 
-            def load_then_replace(config_file):
-                parsed = original_load(config_file)
+            def replace_file_after_parse(raw_config):
+                hook_called["value"] = True
                 path.write_bytes(replacement_bytes)
-                return parsed
+                original_require_sections(raw_config)
 
-            with patch.object(config_module.tomllib, "load", side_effect=load_then_replace):
+            with patch.object(config_module, "_require_sections", side_effect=replace_file_after_parse):
                 config = load_full_market_ml_config(path)
 
-        self.assertEqual(config.sample.minimum_daily_symbols, 4500)
-        self.assertEqual(config.sha256, hashlib.sha256(validated_bytes).hexdigest())
+            later_file_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+            self.assertTrue(hook_called["value"])
+            self.assertEqual(config.sample.minimum_daily_symbols, 4500)
+            self.assertEqual(config.sha256, hashlib.sha256(validated_bytes).hexdigest())
+            self.assertNotEqual(config.sha256, later_file_sha256)
 
     def test_rejects_missing_sections(self):
         data = full_market_ml_config_data()
