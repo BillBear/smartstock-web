@@ -131,6 +131,20 @@ class FullMarketMLQualityTests(unittest.TestCase):
                 self.assertIn(f"{endpoint}_manifest_failed", report.blocking_codes)
                 self.assertNotIn("manifest_not_ready", report.blocking_codes)
 
+    def test_duplicate_core_manifest_evidence_blocks_regardless_of_record_order(self):
+        for records in (("failed", "collected"), ("collected", "failed")):
+            with self.subTest(records=records):
+                manifest = replace_manifest_partition_status(valid_manifest(self.config), "daily", "20250102", records[0])
+                daily_record = next(
+                    record for record in manifest.partitions if (record.endpoint, record.key) == ("daily", "20250102")
+                )
+                manifest.partitions.append(replace(daily_record, status=records[1]))
+
+                report = audit_panel_quality(self.config, valid_panel(), manifest)
+
+                self.assertFalse(report.ready)
+                self.assertIn("duplicate_manifest_evidence", report.blocking_codes)
+
     def test_partial_core_daily_manifest_coverage_blocks_training(self):
         manifest = valid_manifest(self.config)
         for endpoint in CORE_DAILY_ENDPOINTS:

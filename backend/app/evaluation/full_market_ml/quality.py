@@ -280,13 +280,19 @@ def _manifest_evidence(
     if not dates:
         gate_codes.add("trade_cal_open_sessions_missing")
     records_by_endpoint: dict[str, dict[str, str]] = {}
+    seen_partition_keys: set[tuple[str, str]] = set()
     for partition in partitions:
         endpoint = partition.get("endpoint") if isinstance(partition, Mapping) else getattr(partition, "endpoint", None)
         key = partition.get("key") if isinstance(partition, Mapping) else getattr(partition, "key", None)
         status = partition.get("status", "collected") if isinstance(partition, Mapping) else getattr(partition, "status", "collected")
         key_date = _date_text(key)
         if endpoint and key_date:
-            records_by_endpoint.setdefault(str(endpoint), {})[key_date] = str(status)
+            endpoint_name = str(endpoint)
+            partition_key = (endpoint_name, key_date)
+            if partition_key in seen_partition_keys and endpoint_name in {*CORE_DAILY_ENDPOINTS, "trade_cal"}:
+                gate_codes.add("duplicate_manifest_evidence")
+            seen_partition_keys.add(partition_key)
+            records_by_endpoint.setdefault(endpoint_name, {})[key_date] = str(status)
     trade_cal_status = records_by_endpoint.get("trade_cal", {})
     if any(trade_cal_status.get(date) not in READY_PARTITION_STATUSES for date in dates):
         gate_codes.add("trade_cal_manifest_incomplete")
