@@ -9,6 +9,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 backend/venv/
+backend/.venv-ml/
 
 # Node / Vite
 frontend/node_modules/

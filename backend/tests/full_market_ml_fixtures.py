@@ -1,0 +1,21 @@
+from __future__ import annotations
+
+from copy import deepcopy
+
+
+FULL_MARKET_ML_CONFIG = {
+    "dates": {
+        "signal_start": "2024-06-03",
+        "signal_end": "2026-06-05",
+        "holdout_start": "2026-05-01",
+        "holdout_end": "2026-06-05",
+    },
+    "sample": {"minimum_daily_symbols": 4500},
+    "splits": {"embargo_trade_days": 20, "walk_forward_folds": 5},
+    "training": {"seeds": [17, 42, 73]},
+    "resources": {"memory_limit_gb": 12},
+}
+
+
+def full_market_ml_config_data() -> dict:
+    return deepcopy(FULL_MARKET_ML_CONFIG)

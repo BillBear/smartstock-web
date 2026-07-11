@@ -1,0 +1,9 @@
+numpy==2.0.2
+pandas==2.3.3
+pyarrow==20.0.0
+scikit-learn==1.6.1
+lightgbm==4.6.0
+joblib==1.5.3
+psutil==7.0.0
+tushare==1.4.21
+python-dotenv==1.0.0
