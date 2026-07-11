@@ -5,12 +5,14 @@ import argparse
 import os
 import json
 import sys
+from dataclasses import replace
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.evaluation.full_market_ml.config import load_full_market_ml_config
-from app.evaluation.full_market_ml.pipeline import FullMarketMLPipeline, STAGES
+from app.evaluation.full_market_ml.pipeline import FullMarketMLPipeline, STAGES, select_probe_dates
 
 
 RUN_ID = "fm_rank_10d_20260710_r1"
@@ -62,9 +64,22 @@ def default_services():
         report = run_preflight(config, os.environ, client, runtime_root=root)
         return {"quality_ready": report["ready"], "blocking_codes": report["blocking_codes"], "preflight": report}
 
-    def collect(stage, with_panel=False):
+    def probe_config(config):
+        end = date.fromisoformat(config.dates.signal_end)
+        rows = client.trade_cal(
+            exchange="",
+            start_date=(end - timedelta(days=45)).strftime("%Y%m%d"),
+            end_date=end.strftime("%Y%m%d"),
+        ).to_dict("records")
+        dates = select_probe_dates(
+            [str(row["cal_date"]) for row in rows if str(row.get("is_open")) == "1"],
+        )
+        return replace(config, dates=replace(config.dates, signal_start=dates[0], signal_end=dates[-1]))
+
+    def collect(stage, with_panel=False, bounded_probe=False):
         def handler(config, root, _artifacts):
-            manifest = collect_full_market_raw(config, client, root, stage, resume=True)
+            collection_config = probe_config(config) if bounded_probe else config
+            manifest = collect_full_market_raw(collection_config, client, root, stage, resume=True)
             result = {"manifest": manifest.to_dict(), "quality_ready": manifest.ready, "blocking_codes": manifest.blocking_codes}
             if with_panel and manifest.ready:
                 panel = build_full_market_panel(config, root, stage)
@@ -115,7 +130,7 @@ def default_services():
         output.write_text(json.dumps(report, ensure_ascii=True, sort_keys=True) + "\n", encoding="utf-8")
         return {"quality_ready": True, "evaluation": str(output), "status": report["status"]}
 
-    return {"preflight": preflight, "probe": collect("probe"), "pilot-build": collect("pilot-build", with_panel=True), "full-build": full_build, "feature-audit": feature_audit, "dev-train": dev_train, "final-evaluate": final_evaluate}
+    return {"preflight": preflight, "probe": collect("probe", bounded_probe=True), "pilot-build": collect("pilot-build", with_panel=True), "full-build": full_build, "feature-audit": feature_audit, "dev-train": dev_train, "final-evaluate": final_evaluate}
 
 
 def main() -> int:

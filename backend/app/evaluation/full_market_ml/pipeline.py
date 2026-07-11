@@ -33,6 +33,14 @@ STAGES = (
 )
 
 
+def select_probe_dates(open_dates: list[str] | tuple[str, ...], count: int = 5) -> tuple[str, ...]:
+    """Return the final ``count`` verified open sessions for a bounded probe."""
+    dates = tuple(sorted({str(value) for value in open_dates if str(value)}))
+    if len(dates) < count:
+        raise ValueError(f"probe requires at least {count} open trading dates")
+    return dates[-count:]
+
+
 class FrozenModelMismatchError(PermissionError):
     """Raised when final evaluation is not bound to the frozen candidate."""
 

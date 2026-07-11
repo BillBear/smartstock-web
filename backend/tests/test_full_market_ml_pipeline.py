@@ -7,6 +7,7 @@ from pathlib import Path
 from app.evaluation.full_market_ml.pipeline import (
     FrozenModelMismatchError,
     FullMarketMLPipeline,
+    select_probe_dates,
 )
 from app.evaluation.full_market_ml.quality import TrainingBlockedError
 from tests.full_market_ml_fixtures import fake_pipeline_services
@@ -14,6 +15,11 @@ from tests.test_full_market_ml_collector import FullMarketMLTestCase
 
 
 class FullMarketMLPipelineTests(FullMarketMLTestCase):
+    def test_probe_window_uses_exactly_five_final_open_sessions(self):
+        self.assertEqual(
+            select_probe_dates(("2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05", "2026-06-08")),
+            ("2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05", "2026-06-08"),
+        )
     def test_pipeline_cannot_run_dev_train_after_failed_quality(self):
         pipeline = FullMarketMLPipeline(self.config, self.temp_path, fake_pipeline_services(low_coverage=True))
 
