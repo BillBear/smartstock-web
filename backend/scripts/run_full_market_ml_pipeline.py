@@ -120,14 +120,18 @@ def default_services():
 
     def feature_audit(config, root, _artifacts):
         dataset = pd.read_parquet(artifact(root, "full-build") / "dataset.parquet")
-        report = audit_features(dataset.loc[dataset["trade_date"].lt(config.dates.holdout_start)].copy(), load_split(root))
+        split = load_split(root)
+        development = dataset.loc[dataset["trade_date"].isin(split.development_dates)].copy()
+        report = audit_features(development, split)
         output = artifact(root, "feature-audit") / "report.json"
         output.write_text(json.dumps(report.to_csv_rows(), ensure_ascii=True, default=str) + "\n", encoding="utf-8")
         return {"quality_ready": True, "feature_audit": str(output)}
 
     def dev_train(config, root, _artifacts):
         dataset = pd.read_parquet(artifact(root, "full-build") / "dataset.parquet")
-        candidate = run_development_training(config, dataset.loc[dataset["trade_date"].lt(config.dates.holdout_start)].copy(), load_split(root))
+        split = load_split(root)
+        development = dataset.loc[dataset["trade_date"].isin(split.development_dates)].copy()
+        candidate = run_development_training(config, development, split)
         output = artifact(root, "dev-train") / "oof_predictions.parquet"
         candidate.oof_predictions.to_parquet(output, index=False)
         return {"quality_ready": True, "frozen_model_sha": candidate.frozen_model_sha256, "preliminary_status": candidate.preliminary_status, "oof_predictions": str(output)}
