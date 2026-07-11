@@ -52,6 +52,8 @@ def build_full_market_panel(config: FullMarketMLConfig, runtime_root: str | Path
             if frames.get("daily", pd.DataFrame()).empty:
                 continue
             base = _build_base_panel(frames, industry_relative_enabled=manifest.industry_relative_enabled)
+            if base.empty:
+                continue
             _write_intermediate_shards(base, temporary, trade_date)
 
         shard_paths, row_count = _finalize_shards(temporary, output, manifest.industry_relative_enabled)
@@ -66,8 +68,8 @@ def build_historical_universe(stock_basic: pd.DataFrame, trade_dates: Iterable[s
     if basic.empty:
         return pd.DataFrame(columns=["trade_date", "symbol"])
     basic["symbol"] = _symbols(basic)
-    basic["list_date"] = basic.get("list_date", "").map(_date_text)
-    basic["delist_date"] = basic.get("delist_date", "").map(_date_text)
+    basic["list_date"] = basic.get("list_date", pd.Series("", index=basic.index)).map(_date_text)
+    basic["delist_date"] = basic.get("delist_date", pd.Series("", index=basic.index)).map(_date_text)
     rows = []
     for trade_date in sorted({_date_text(value) for value in trade_dates}):
         included = basic[(basic["list_date"] <= trade_date) & ((basic["delist_date"] == "") | (basic["delist_date"] >= trade_date))]
@@ -88,6 +90,10 @@ def _build_base_panel(frames: Mapping[str, pd.DataFrame], *, industry_relative_e
         return pd.DataFrame()
     daily["symbol"] = _symbols(daily)
     daily["trade_date"] = daily["trade_date"].map(_date_text)
+    historical_universe = build_historical_universe(_frame(frames, "stock_basic"), daily["trade_date"].unique())
+    daily = daily.merge(historical_universe, on=["symbol", "trade_date"], how="inner")
+    if daily.empty:
+        return pd.DataFrame()
     adjustments = _deduplicate_market_rows(_frame(frames, "adj_factor"), "adj_factor")
     if not adjustments.empty:
         adjustments["symbol"] = _symbols(adjustments)
@@ -100,7 +106,7 @@ def _build_base_panel(frames: Mapping[str, pd.DataFrame], *, industry_relative_e
         panel[adjusted_name] = panel[raw_name] * panel["adj_factor"]
     panel["volume_shares"] = pd.to_numeric(panel.get("vol"), errors="coerce") * 100.0
     panel["amount_cny"] = pd.to_numeric(panel.get("amount"), errors="coerce") * 1000.0
-    panel["is_suspended"] = _suspension_flags(panel, _frame(frames, "suspend_d"))
+    panel["is_suspended"] = _suspension_flags(panel, _frame(frames, "suspend_d"), _frame(frames, "trade_cal"))
     panel["is_st"] = _st_flags(panel, _frame(frames, "namechange"))
     panel["industry_l1"] = _industry_values(panel, frames, industry_relative_enabled)
     panel["industry_relative_enabled"] = bool(industry_relative_enabled)
@@ -113,6 +119,7 @@ def _build_base_panel(frames: Mapping[str, pd.DataFrame], *, industry_relative_e
     )
     limits = _frame(frames, "stk_limit")
     panel["at_up_limit"] = _up_limit_flags(panel, limits)
+    panel["next_open_date"] = _next_open_dates(panel, _frame(frames, "trade_cal"))
     return panel.sort_values(["symbol", "trade_date"], kind="stable").reset_index(drop=True)
 
 
@@ -122,13 +129,19 @@ def _finalize_symbol_panel(panel: pd.DataFrame) -> pd.DataFrame:
     panel = panel.sort_values(["symbol", "trade_date"], kind="stable").reset_index(drop=True).copy()
     grouped = panel.groupby("symbol", sort=False)
     panel["median_amount_20d"] = grouped["amount_cny"].transform(lambda values: values.rolling(20, min_periods=20).median())
-    panel["next_adjusted_open"] = grouped["adjusted_open"].shift(-1)
-    next_valid_values = grouped["valid_ohlc"].shift(-1)
-    next_suspended_values = grouped["is_suspended"].shift(-1)
-    next_at_up_limit_values = grouped["at_up_limit"].shift(-1)
-    next_valid = next_valid_values.eq(True)
-    next_suspended = next_suspended_values.eq(True) | next_suspended_values.isna()
-    next_at_up_limit = next_at_up_limit_values.eq(True) | next_at_up_limit_values.isna()
+    next_session = panel[["symbol", "trade_date", "adjusted_open", "valid_ohlc", "is_suspended", "at_up_limit"]].rename(
+        columns={
+            "trade_date": "next_open_date",
+            "adjusted_open": "next_adjusted_open",
+            "valid_ohlc": "next_valid_ohlc",
+            "is_suspended": "next_is_suspended",
+            "at_up_limit": "next_at_up_limit",
+        }
+    )
+    panel = panel.merge(next_session, on=["symbol", "next_open_date"], how="left", validate="many_to_one")
+    next_valid = panel["next_valid_ohlc"].eq(True)
+    next_suspended = panel["next_is_suspended"].eq(True) | panel["next_is_suspended"].isna()
+    next_at_up_limit = panel["next_at_up_limit"].eq(True) | panel["next_at_up_limit"].isna()
     panel["entry_tradeable"] = next_valid & ~next_suspended & ~next_at_up_limit & panel["next_adjusted_open"].notna()
     panel["eligible_signal_day"] = (
         panel["listing_age_trade_days"].ge(20)
@@ -185,14 +198,45 @@ def _date_text(value) -> str:
     return f"{text[:4]}-{text[4:6]}-{text[6:8]}" if len(text) == 8 else text
 
 
-def _suspension_flags(panel: pd.DataFrame, suspended: pd.DataFrame) -> pd.Series:
+def _suspension_flags(panel: pd.DataFrame, suspended: pd.DataFrame, trade_cal: pd.DataFrame) -> pd.Series:
     if suspended.empty:
         return pd.Series(False, index=panel.index)
     suspended = suspended.copy()
     suspended["symbol"] = _symbols(suspended)
-    suspended["trade_date"] = suspended["trade_date"].map(_date_text)
-    suspended_keys = set(zip(suspended["symbol"], suspended["trade_date"]))
-    return pd.Series([(symbol, trade_date) in suspended_keys for symbol, trade_date in zip(panel.symbol, panel.trade_date)], index=panel.index)
+    if "trade_date" in suspended:
+        suspended["trade_date"] = suspended["trade_date"].map(_date_text)
+        suspended_keys = set(zip(suspended["symbol"], suspended["trade_date"]))
+        return pd.Series([(symbol, trade_date) in suspended_keys for symbol, trade_date in zip(panel.symbol, panel.trade_date)], index=panel.index)
+
+    available_dates = set(_open_dates(trade_cal) or sorted(panel["trade_date"].unique()))
+    intervals = {}
+    for symbol, suspend_date, resume_date in zip(
+        suspended["symbol"],
+        suspended.get("suspend_date", pd.Series("", index=suspended.index)).map(_date_text),
+        suspended.get("resume_date", pd.Series("", index=suspended.index)).map(_date_text),
+    ):
+        if suspend_date:
+            intervals.setdefault(symbol, []).append((suspend_date, resume_date))
+    return pd.Series(
+        [
+            trade_date in available_dates
+            and any(start <= trade_date and (not resume_date or trade_date < resume_date) for start, resume_date in intervals.get(symbol, []))
+            for symbol, trade_date in zip(panel.symbol, panel.trade_date)
+        ],
+        index=panel.index,
+    )
+
+
+def _next_open_dates(panel: pd.DataFrame, trade_cal: pd.DataFrame) -> pd.Series:
+    dates = _open_dates(trade_cal)
+    successor = dict(zip(dates, dates[1:]))
+    return panel["trade_date"].map(successor)
+
+
+def _open_dates(trade_cal: pd.DataFrame) -> list[str]:
+    if trade_cal.empty or "cal_date" not in trade_cal or "is_open" not in trade_cal:
+        return []
+    return sorted({_date_text(value) for value in trade_cal.loc[trade_cal["is_open"].astype(str) == "1", "cal_date"]})
 
 
 def _st_flags(panel: pd.DataFrame, namechange: pd.DataFrame) -> pd.Series:
@@ -266,12 +310,13 @@ def _up_limit_flags(panel: pd.DataFrame, limits: pd.DataFrame) -> pd.Series:
 def _load_static_frames(root: Path, manifest: CollectionManifest) -> dict[str, pd.DataFrame]:
     frames = {endpoint: _read_partitions(root, [record for record in manifest.partitions if record.endpoint == endpoint]) for endpoint in _STATIC_ENDPOINTS}
     frames["trade_cal"] = _read_partitions(root, [record for record in manifest.partitions if record.endpoint == "trade_cal"])
+    frames["suspend_d"] = _read_partitions(root, [record for record in manifest.partitions if record.endpoint == "suspend_d"])
     return frames
 
 
 def _load_daily_frames(root: Path, manifest: CollectionManifest, trade_date: str) -> dict[str, pd.DataFrame]:
     compact = trade_date.replace("-", "")
-    endpoints = {"daily", "adj_factor", "suspend_d", "stk_limit"}
+    endpoints = {"daily", "adj_factor", "stk_limit"}
     return {
         endpoint: _read_partitions(root, [record for record in manifest.partitions if record.endpoint == endpoint and record.key == compact])
         for endpoint in endpoints
@@ -280,9 +325,7 @@ def _load_daily_frames(root: Path, manifest: CollectionManifest, trade_date: str
 
 def _open_trade_dates(root: Path, manifest: CollectionManifest) -> list[str]:
     calendar = _read_partitions(root, [record for record in manifest.partitions if record.endpoint == "trade_cal"])
-    if calendar.empty:
-        return []
-    return sorted({_date_text(value) for value in calendar.loc[calendar["is_open"].astype(str) == "1", "cal_date"]})
+    return _open_dates(calendar)
 
 
 def _read_partitions(root: Path, records) -> pd.DataFrame:

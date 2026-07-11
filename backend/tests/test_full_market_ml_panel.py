@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pyarrow.parquet as pq
+import pandas as pd
 
 from app.evaluation.full_market_ml.config import load_full_market_ml_config
 from app.evaluation.full_market_ml.panel import (
@@ -15,9 +16,13 @@ from app.evaluation.full_market_ml.panel import (
 )
 from app.evaluation.full_market_ml.manifests import CollectionManifest, PartitionRecord, save_manifest
 from tests.full_market_ml_fixtures import (
+    delisted_daily_fixture,
     frame,
     historical_industry_fixture,
     historical_st_fixture,
+    next_open_suspension_fixture,
+    open_ended_suspension_fixture,
+    suspension_interval_fixture,
     two_day_split_fixture,
 )
 
@@ -29,6 +34,52 @@ class FullMarketMLPanelTests(unittest.TestCase):
 
         self.assertEqual(universe.query("trade_date == '2025-01-10'")["symbol"].tolist(), ["600001"])
         self.assertTrue(universe.query("trade_date == '2025-01-20'").empty)
+
+    def test_full_build_excludes_daily_row_after_delist_date(self):
+        config = load_full_market_ml_config(Path(__file__).parents[1] / "config" / "ml_full_market_v1.toml")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_raw_fixture(root, config, "delisted", delisted_daily_fixture())
+
+            result = build_full_market_panel(
+                replace(config, dates=replace(config.dates, signal_start="2025-01-02", signal_end="2025-01-03")), root, "delisted"
+            )
+
+            final_panel = self._read_shards(result.shard_paths)
+            self.assertEqual(final_panel["trade_date"].tolist(), ["2025-01-02"])
+
+    def test_suspend_interval_uses_suspend_and_resume_dates(self):
+        panel = build_panel_from_frames(suspension_interval_fixture())
+
+        self.assertTrue(bool(panel.loc[panel.trade_date == "2025-01-03", "is_suspended"].item()))
+        self.assertFalse(bool(panel.loc[panel.trade_date == "2025-01-06", "is_suspended"].item()))
+        self.assertFalse(bool(panel.loc[panel.trade_date == "2025-01-02", "entry_tradeable"].item()))
+
+    def test_next_open_uses_exact_next_calendar_session_not_later_resume_row(self):
+        panel = build_panel_from_frames(next_open_suspension_fixture())
+        row = panel.loc[panel.trade_date == "2025-01-02"].iloc[0]
+
+        self.assertEqual(row["next_open_date"], "2025-01-03")
+        self.assertTrue(pd.isna(row["next_adjusted_open"]))
+        self.assertFalse(bool(row["entry_tradeable"]))
+
+    def test_suspend_interval_without_resume_last_through_available_calendar(self):
+        panel = build_panel_from_frames(open_ended_suspension_fixture())
+
+        self.assertTrue(bool(panel.loc[panel.trade_date == "2025-01-06", "is_suspended"].item()))
+
+    def test_full_build_carries_suspend_interval_from_prior_raw_partition(self):
+        config = load_full_market_ml_config(Path(__file__).parents[1] / "config" / "ml_full_market_v1.toml")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_raw_fixture(root, config, "open-ended-suspend", open_ended_suspension_fixture())
+
+            result = build_full_market_panel(
+                replace(config, dates=replace(config.dates, signal_start="2025-01-02", signal_end="2025-01-06")), root, "open-ended-suspend"
+            )
+
+            final_panel = self._read_shards(result.shard_paths)
+            self.assertTrue(bool(final_panel.loc[final_panel.trade_date == "2025-01-06", "is_suspended"].item()))
 
     def test_adjusted_ohlc_and_next_open_tradeability_are_correct(self):
         panel = build_panel_from_frames(two_day_split_fixture())
@@ -73,29 +124,41 @@ class FullMarketMLPanelTests(unittest.TestCase):
         config = load_full_market_ml_config(Path(__file__).parents[1] / "config" / "ml_full_market_v1.toml")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            fixtures = two_day_split_fixture()
-            manifest = CollectionManifest("panel-test", config.sha256, config.collection.request_pacing_seconds)
-            for endpoint, values in fixtures.items():
-                if endpoint in {"stock_basic", "namechange", "index_classify", "index_member_all"}:
-                    path = root / "raw" / f"endpoint={endpoint}" / "data.parquet"
-                    key = "static" if endpoint == "namechange" else ("L" if endpoint == "stock_basic" else "SW2021-L1")
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    values.to_parquet(path, index=False)
-                    manifest.partitions.append(PartitionRecord(endpoint, key, str(path.relative_to(root)), len(values), str(pq.ParquetFile(path).schema_arrow), "unused"))
-                else:
-                    for trade_date, rows in values.groupby(values.get("trade_date", values.get("cal_date", "static"))):
-                        normalized = str(trade_date).replace("-", "")
-                        path = root / "raw" / f"endpoint={endpoint}" / f"trade_date={normalized}" / "data.parquet"
-                        path.parent.mkdir(parents=True, exist_ok=True)
-                        rows.to_parquet(path, index=False)
-                        manifest.partitions.append(PartitionRecord(endpoint, normalized, str(path.relative_to(root)), len(rows), str(pq.ParquetFile(path).schema_arrow), "unused"))
-            save_manifest(root, manifest)
+            self._write_raw_fixture(root, config, "panel-test", two_day_split_fixture())
 
             result = build_full_market_panel(replace(config, dates=replace(config.dates, signal_start="2025-01-02", signal_end="2025-01-03")), root, "panel-test")
 
             self.assertEqual(result.row_count, 2)
             self.assertEqual(len(result.shard_paths), 64)
             self.assertTrue(all(path.is_file() for path in result.shard_paths))
+
+    def _write_raw_fixture(self, root, config, stage, fixtures):
+        manifest = CollectionManifest(stage, config.sha256, config.collection.request_pacing_seconds)
+        static_endpoints = {"stock_basic", "namechange", "index_classify", "index_member_all"}
+        for endpoint, values in fixtures.items():
+            if endpoint in static_endpoints:
+                path = root / "raw" / f"endpoint={endpoint}" / "data.parquet"
+                key = "static" if endpoint == "namechange" else ("L" if endpoint == "stock_basic" else "SW2021-L1")
+                self._write_manifest_partition(root, manifest, endpoint, key, path, values)
+                continue
+            date_column = next((name for name in ("trade_date", "cal_date", "suspend_date") if name in values), None)
+            for partition_date, rows in values.groupby(values[date_column] if date_column else lambda _: "static"):
+                normalized = str(partition_date).replace("-", "")
+                path = root / "raw" / f"endpoint={endpoint}" / f"trade_date={normalized}" / "data.parquet"
+                self._write_manifest_partition(root, manifest, endpoint, normalized, path, rows)
+        save_manifest(root, manifest)
+
+    def _write_manifest_partition(self, root, manifest, endpoint, key, path, values):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        values.to_parquet(path, index=False)
+        manifest.partitions.append(
+            PartitionRecord(endpoint, key, str(path.relative_to(root)), len(values), str(pq.ParquetFile(path).schema_arrow), "unused")
+        )
+
+    def _read_shards(self, paths):
+        return pd.concat([pq.ParquetFile(path).read().to_pandas() for path in paths], ignore_index=True).sort_values(
+            ["symbol", "trade_date"], kind="stable"
+        ).reset_index(drop=True)
 
 
 if __name__ == "__main__":

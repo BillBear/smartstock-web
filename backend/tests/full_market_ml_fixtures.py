@@ -51,7 +51,7 @@ def two_day_split_fixture() -> dict:
         ),
         "stock_basic": frame([{"ts_code": "000001.SZ", "list_date": "20240101", "list_status": "L"}]),
         "namechange": frame(columns=["ts_code", "name", "start_date", "end_date"]),
-        "suspend_d": frame(columns=["ts_code", "trade_date", "suspend_type"]),
+        "suspend_d": frame(columns=["ts_code", "suspend_date", "resume_date", "suspend_type"]),
         "stk_limit": frame(columns=["ts_code", "trade_date", "up_limit", "down_limit"]),
         "index_classify": frame(columns=["index_code", "industry_name"]),
         "index_member_all": frame(columns=["l1_code", "con_code", "in_date", "out_date"]),
@@ -103,6 +103,58 @@ def historical_industry_fixture() -> dict:
             {"l1_code": "801010.SI", "con_code": "000001.SZ", "in_date": "20200101", "out_date": "20241231"},
             {"l1_code": "801020.SI", "con_code": "000001.SZ", "in_date": "20250101", "out_date": ""},
         ]
+    )
+    return values
+
+
+def delisted_daily_fixture() -> dict:
+    values = two_day_split_fixture()
+    values["stock_basic"] = frame(
+        [{"ts_code": "000001.SZ", "list_date": "20240101", "delist_date": "20250102", "list_status": "D"}]
+    )
+    return values
+
+
+def suspension_interval_fixture() -> dict:
+    values = two_day_split_fixture()
+    values["daily"] = frame(
+        [
+            {"ts_code": "000001.SZ", "trade_date": "20250102", "open": 10.0, "high": 11.0, "low": 9.0, "close": 10.0, "vol": 1.0, "amount": 1.0},
+            {"ts_code": "000001.SZ", "trade_date": "20250103", "open": 10.0, "high": 11.0, "low": 9.0, "close": 10.0, "vol": 1.0, "amount": 1.0},
+            {"ts_code": "000001.SZ", "trade_date": "20250106", "open": 10.0, "high": 11.0, "low": 9.0, "close": 10.0, "vol": 1.0, "amount": 1.0},
+        ]
+    )
+    values["adj_factor"] = frame(
+        [
+            {"ts_code": "000001.SZ", "trade_date": "20250102", "adj_factor": 1.0},
+            {"ts_code": "000001.SZ", "trade_date": "20250103", "adj_factor": 1.0},
+            {"ts_code": "000001.SZ", "trade_date": "20250106", "adj_factor": 1.0},
+        ]
+    )
+    values["trade_cal"] = frame(
+        [
+            {"cal_date": "20250102", "is_open": 1},
+            {"cal_date": "20250103", "is_open": 1},
+            {"cal_date": "20250106", "is_open": 1},
+        ]
+    )
+    values["suspend_d"] = frame(
+        [{"ts_code": "000001.SZ", "suspend_date": "20250103", "resume_date": "20250106", "suspend_type": "S"}]
+    )
+    return values
+
+
+def next_open_suspension_fixture() -> dict:
+    values = suspension_interval_fixture()
+    values["daily"] = values["daily"].query("trade_date != '20250103'").reset_index(drop=True)
+    values["adj_factor"] = values["adj_factor"].query("trade_date != '20250103'").reset_index(drop=True)
+    return values
+
+
+def open_ended_suspension_fixture() -> dict:
+    values = suspension_interval_fixture()
+    values["suspend_d"] = frame(
+        [{"ts_code": "000001.SZ", "suspend_date": "20250103", "resume_date": "", "suspend_type": "S"}]
     )
     return values
 
