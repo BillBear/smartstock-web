@@ -206,6 +206,69 @@ def twenty_session_panel_fixture(*, final_adj_factor=None) -> dict:
     return values
 
 
+def _label_panel_rows(*, signal_close: float = 10.0, next_open: float = 20.0, day10_close: float = 20.0) -> list[dict]:
+    dates = pd.bdate_range("2025-01-02", periods=11)
+    rows = []
+    for index, trade_date in enumerate(dates):
+        price = signal_close if index == 0 else (day10_close if index == 10 else next_open)
+        rows.append(
+            {
+                "trade_date": trade_date.strftime("%Y-%m-%d"),
+                "symbol": "000001",
+                "adjusted_open": price,
+                "adjusted_high": price,
+                "adjusted_low": price,
+                "adjusted_close": price,
+                "valid_ohlc": True,
+                "eligible_signal_day": True,
+                "entry_tradeable": True,
+                "industry_l1": "Industry A",
+            }
+        )
+    return rows
+
+
+def next_open_gap_fixture(*, signal_close: float, next_open: float, day10_close: float) -> pd.DataFrame:
+    return frame(_label_panel_rows(signal_close=signal_close, next_open=next_open, day10_close=day10_close))
+
+
+def corporate_action_fixture() -> pd.DataFrame:
+    """Raw-price discontinuities are neutral once the panel supplies adjusted OHLC."""
+    rows = _label_panel_rows(signal_close=10.0, next_open=20.0, day10_close=20.0)
+    for row in rows:
+        row.update({"open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0})
+    rows[1].update({"open": 5.0, "high": 5.0, "low": 5.0, "close": 5.0})
+    return frame(rows)
+
+
+def same_bar_tp_sl_fixture() -> pd.DataFrame:
+    rows = _label_panel_rows()
+    rows[1].update({"adjusted_high": 22.0, "adjusted_low": 18.0})
+    return frame(rows)
+
+
+def locked_limit_up_entry_fixture() -> pd.DataFrame:
+    rows = _label_panel_rows()
+    rows[0]["entry_tradeable"] = False
+    return frame(rows)
+
+
+def eligible_cross_section_fixture(*, count: int = 4) -> pd.DataFrame:
+    """One complete ten-session cross-section with an ineligible outlier."""
+    rows = []
+    for symbol_index in range(count):
+        symbol = f"{symbol_index + 1:06d}"
+        multiplier = 1.0 + symbol_index * 0.01
+        for row in _label_panel_rows(day10_close=20.0 * multiplier):
+            row["symbol"] = symbol
+            row["industry_l1"] = "Industry A" if symbol_index % 2 == 0 else "Industry B"
+            rows.append(row)
+    outlier = _label_panel_rows(day10_close=200.0)[0]
+    outlier.update({"symbol": "999999", "eligible_signal_day": False, "entry_tradeable": True, "industry_l1": "Industry A"})
+    rows.append(outlier)
+    return frame(rows)
+
+
 class FakeTuShareClient:
     """Deterministic in-memory TuShare substitute for collection tests."""
 
