@@ -1,0 +1,102 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from dataclasses import replace
+from pathlib import Path
+
+import pyarrow.parquet as pq
+
+from app.evaluation.full_market_ml.config import load_full_market_ml_config
+from app.evaluation.full_market_ml.panel import (
+    build_full_market_panel,
+    build_historical_universe,
+    build_panel_from_frames,
+)
+from app.evaluation.full_market_ml.manifests import CollectionManifest, PartitionRecord, save_manifest
+from tests.full_market_ml_fixtures import (
+    frame,
+    historical_industry_fixture,
+    historical_st_fixture,
+    two_day_split_fixture,
+)
+
+
+class FullMarketMLPanelTests(unittest.TestCase):
+    def test_historical_universe_includes_delisted_stock_before_delist_date(self):
+        basic = frame([{"symbol": "600001", "list_date": "20200101", "delist_date": "20250115", "list_status": "D"}])
+        universe = build_historical_universe(basic, ["2025-01-10", "2025-01-20"])
+
+        self.assertEqual(universe.query("trade_date == '2025-01-10'")["symbol"].tolist(), ["600001"])
+        self.assertTrue(universe.query("trade_date == '2025-01-20'").empty)
+
+    def test_adjusted_ohlc_and_next_open_tradeability_are_correct(self):
+        panel = build_panel_from_frames(two_day_split_fixture())
+        row = panel.query("trade_date == '2025-01-02'").iloc[0]
+
+        self.assertEqual(row["adjusted_close"], 20.0)
+        self.assertEqual(row["next_adjusted_open"], 20.0)
+        self.assertTrue(bool(row["entry_tradeable"]))
+
+    def test_historical_st_status_uses_namechange_interval_not_current_name(self):
+        panel = build_panel_from_frames(historical_st_fixture())
+
+        self.assertTrue(bool(panel.loc[panel.trade_date == "2025-01-02", "is_st"].item()))
+        self.assertFalse(bool(panel.loc[panel.trade_date == "2025-03-03", "is_st"].item()))
+
+    def test_historical_industry_uses_membership_interval(self):
+        panel = build_panel_from_frames(historical_industry_fixture())
+
+        self.assertEqual(panel.loc[panel.trade_date == "2024-12-31", "industry_l1"].item(), "基础化工")
+        self.assertEqual(panel.loc[panel.trade_date == "2025-01-02", "industry_l1"].item(), "有色金属")
+
+    def test_units_are_converted_once_and_conflicting_market_duplicates_block_build(self):
+        panel = build_panel_from_frames(two_day_split_fixture())
+        row = panel.query("trade_date == '2025-01-02'").iloc[0]
+        self.assertEqual(row["volume_shares"], 200.0)
+        self.assertEqual(row["amount_cny"], 3000.0)
+
+        conflicting = two_day_split_fixture()
+        conflicting["daily"] = conflicting["daily"]._append(
+            {"ts_code": "000001.SZ", "trade_date": "20250102", "open": 99.0, "high": 11.0, "low": 9.0, "close": 10.0, "vol": 2.0, "amount": 3.0},
+            ignore_index=True,
+        )
+        with self.assertRaisesRegex(ValueError, "conflicting duplicate"):
+            build_panel_from_frames(conflicting)
+
+    def test_industry_disabled_keeps_industry_null(self):
+        panel = build_panel_from_frames(historical_industry_fixture(), industry_relative_enabled=False)
+        self.assertTrue(panel["industry_l1"].isna().all())
+        self.assertFalse(panel["industry_relative_enabled"].any())
+
+    def test_full_build_writes_all_deterministic_symbol_shards(self):
+        config = load_full_market_ml_config(Path(__file__).parents[1] / "config" / "ml_full_market_v1.toml")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixtures = two_day_split_fixture()
+            manifest = CollectionManifest("panel-test", config.sha256, config.collection.request_pacing_seconds)
+            for endpoint, values in fixtures.items():
+                if endpoint in {"stock_basic", "namechange", "index_classify", "index_member_all"}:
+                    path = root / "raw" / f"endpoint={endpoint}" / "data.parquet"
+                    key = "static" if endpoint == "namechange" else ("L" if endpoint == "stock_basic" else "SW2021-L1")
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    values.to_parquet(path, index=False)
+                    manifest.partitions.append(PartitionRecord(endpoint, key, str(path.relative_to(root)), len(values), str(pq.ParquetFile(path).schema_arrow), "unused"))
+                else:
+                    for trade_date, rows in values.groupby(values.get("trade_date", values.get("cal_date", "static"))):
+                        normalized = str(trade_date).replace("-", "")
+                        path = root / "raw" / f"endpoint={endpoint}" / f"trade_date={normalized}" / "data.parquet"
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        rows.to_parquet(path, index=False)
+                        manifest.partitions.append(PartitionRecord(endpoint, normalized, str(path.relative_to(root)), len(rows), str(pq.ParquetFile(path).schema_arrow), "unused"))
+            save_manifest(root, manifest)
+
+            result = build_full_market_panel(replace(config, dates=replace(config.dates, signal_start="2025-01-02", signal_end="2025-01-03")), root, "panel-test")
+
+            self.assertEqual(result.row_count, 2)
+            self.assertEqual(len(result.shard_paths), 64)
+            self.assertTrue(all(path.is_file() for path in result.shard_paths))
+
+
+if __name__ == "__main__":
+    unittest.main()

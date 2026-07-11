@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from collections import Counter
 
+import pandas as pd
+
 
 FULL_MARKET_ML_CONFIG = {
     "dates": {
@@ -21,6 +23,88 @@ FULL_MARKET_ML_CONFIG = {
 
 def full_market_ml_config_data() -> dict:
     return deepcopy(FULL_MARKET_ML_CONFIG)
+
+
+def frame(rows=None, **kwargs):
+    return pd.DataFrame(rows, **kwargs)
+
+
+def two_day_split_fixture() -> dict:
+    return {
+        "daily": frame(
+            [
+                {"ts_code": "000001.SZ", "trade_date": "20250102", "open": 10.0, "high": 11.0, "low": 9.0, "close": 10.0, "vol": 2.0, "amount": 3.0},
+                {"ts_code": "000001.SZ", "trade_date": "20250103", "open": 10.0, "high": 11.0, "low": 9.0, "close": 10.0, "vol": 4.0, "amount": 5.0},
+            ]
+        ),
+        "adj_factor": frame(
+            [
+                {"ts_code": "000001.SZ", "trade_date": "20250102", "adj_factor": 2.0},
+                {"ts_code": "000001.SZ", "trade_date": "20250103", "adj_factor": 2.0},
+            ]
+        ),
+        "trade_cal": frame(
+            [
+                {"cal_date": "20250102", "is_open": 1},
+                {"cal_date": "20250103", "is_open": 1},
+            ]
+        ),
+        "stock_basic": frame([{"ts_code": "000001.SZ", "list_date": "20240101", "list_status": "L"}]),
+        "namechange": frame(columns=["ts_code", "name", "start_date", "end_date"]),
+        "suspend_d": frame(columns=["ts_code", "trade_date", "suspend_type"]),
+        "stk_limit": frame(columns=["ts_code", "trade_date", "up_limit", "down_limit"]),
+        "index_classify": frame(columns=["index_code", "industry_name"]),
+        "index_member_all": frame(columns=["l1_code", "con_code", "in_date", "out_date"]),
+    }
+
+
+def historical_st_fixture() -> dict:
+    values = two_day_split_fixture()
+    values["daily"] = frame(
+        [
+            {"ts_code": "000001.SZ", "trade_date": "20250102", "open": 10.0, "high": 11.0, "low": 9.0, "close": 10.0, "vol": 1.0, "amount": 1.0},
+            {"ts_code": "000001.SZ", "trade_date": "20250303", "open": 10.0, "high": 11.0, "low": 9.0, "close": 10.0, "vol": 1.0, "amount": 1.0},
+        ]
+    )
+    values["adj_factor"] = frame(
+        [
+            {"ts_code": "000001.SZ", "trade_date": "20250102", "adj_factor": 1.0},
+            {"ts_code": "000001.SZ", "trade_date": "20250303", "adj_factor": 1.0},
+        ]
+    )
+    values["namechange"] = frame(
+        [{"ts_code": "000001.SZ", "name": "*ST 样本", "start_date": "20241201", "end_date": "20250228"}]
+    )
+    return values
+
+
+def historical_industry_fixture() -> dict:
+    values = two_day_split_fixture()
+    values["daily"] = frame(
+        [
+            {"ts_code": "000001.SZ", "trade_date": "20241231", "open": 10.0, "high": 11.0, "low": 9.0, "close": 10.0, "vol": 1.0, "amount": 1.0},
+            {"ts_code": "000001.SZ", "trade_date": "20250102", "open": 10.0, "high": 11.0, "low": 9.0, "close": 10.0, "vol": 1.0, "amount": 1.0},
+        ]
+    )
+    values["adj_factor"] = frame(
+        [
+            {"ts_code": "000001.SZ", "trade_date": "20241231", "adj_factor": 1.0},
+            {"ts_code": "000001.SZ", "trade_date": "20250102", "adj_factor": 1.0},
+        ]
+    )
+    values["index_classify"] = frame(
+        [
+            {"index_code": "801010.SI", "industry_name": "基础化工"},
+            {"index_code": "801020.SI", "industry_name": "有色金属"},
+        ]
+    )
+    values["index_member_all"] = frame(
+        [
+            {"l1_code": "801010.SI", "con_code": "000001.SZ", "in_date": "20200101", "out_date": "20241231"},
+            {"l1_code": "801020.SI", "con_code": "000001.SZ", "in_date": "20250101", "out_date": ""},
+        ]
+    )
+    return values
 
 
 class FakeTuShareClient:
