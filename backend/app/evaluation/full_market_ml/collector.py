@@ -230,9 +230,10 @@ def _collect_partition(
     resume: bool,
     optional_group: str | None = None,
 ) -> list[dict[str, Any]]:
+    has_manifest_record = _has_manifest_partition(manifest, endpoint, key)
     existing = _existing_partition(root, manifest, endpoint, key) if resume else None
     was_manifest_record = existing is not None
-    if existing is None and resume:
+    if existing is None and resume and not has_manifest_record:
         existing = _adopt_orphan_partition(root, endpoint, key, relative_path)
     if existing is not None:
         existing.status = "reused" if was_manifest_record else "adopted"
@@ -250,6 +251,14 @@ def _collect_partition(
         manifest.replace_partition(PartitionRecord(endpoint, key, str(relative_path), 0, "", "", "failed"))
         save_manifest(root, manifest)
         return []
+
+
+def _has_manifest_partition(manifest: CollectionManifest, endpoint: str, key: str) -> bool:
+    try:
+        manifest.partition(endpoint, key)
+    except KeyError:
+        return False
+    return True
 
 
 def _enforce_minimum_rows(

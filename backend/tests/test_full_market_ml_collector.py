@@ -248,3 +248,20 @@ class FullMarketMLCollectorTests(FullMarketMLTestCase):
         self.assertIn("ts_code", partition.schema)
         self.assertIn("suspend_type", partition.schema)
         self.assertEqual(second.partition_status("suspend_d", "20260709"), "reused")
+
+    def test_manifested_partition_integrity_failure_is_not_adopted_as_orphan(self):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        first = collect_full_market_raw(self.config, FakeTuShareClient(), self.temp_path, "probe")
+        daily_path = self.temp_path / first.partition("daily", "20260709").path
+        original_table = pq.ParquetFile(daily_path).read()
+        pq.write_table(original_table.append_column("tampered", pa.array([True] * original_table.num_rows)), daily_path)
+        unavailable_daily = FakeTuShareClient(always_fail={"daily"})
+
+        with patch("app.evaluation.full_market_ml.collector.time.sleep"):
+            resumed = collect_full_market_raw(self.config, unavailable_daily, self.temp_path, "probe")
+
+        self.assertEqual(unavailable_daily.calls["daily"], 5)
+        self.assertEqual(resumed.partition_status("daily", "20260709"), "failed")
+        self.assertIn("daily_collection_failed", resumed.blocking_codes)
