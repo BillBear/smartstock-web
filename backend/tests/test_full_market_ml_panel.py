@@ -20,6 +20,7 @@ from tests.full_market_ml_fixtures import (
     frame,
     historical_industry_fixture,
     historical_st_fixture,
+    mixed_typed_suspension_interval_fixture,
     next_open_suspension_fixture,
     open_ended_suspension_fixture,
     suspension_interval_fixture,
@@ -80,6 +81,38 @@ class FullMarketMLPanelTests(unittest.TestCase):
 
             final_panel = self._read_shards(result.shard_paths)
             self.assertTrue(bool(final_panel.loc[final_panel.trade_date == "2025-01-06", "is_suspended"].item()))
+
+    def test_conflicting_limit_rows_block_entry_tradeability_build(self):
+        permissive = two_day_split_fixture()
+        permissive["stk_limit"] = frame(
+            [{"ts_code": "000001.SZ", "trade_date": "20250103", "up_limit": 11.0, "down_limit": 9.0}]
+        )
+        self.assertTrue(bool(build_panel_from_frames(permissive).loc[lambda rows: rows.trade_date == "2025-01-02", "entry_tradeable"].item()))
+
+        equivalent = two_day_split_fixture()
+        equivalent["stk_limit"] = frame(
+            [
+                {"ts_code": "000001.SZ", "trade_date": "20250103", "up_limit": 11.0, "down_limit": 9.0},
+                {"ts_code": "000001.SZ", "trade_date": "20250103", "up_limit": 11.0, "down_limit": 9.0},
+            ]
+        )
+        self.assertTrue(bool(build_panel_from_frames(equivalent).loc[lambda rows: rows.trade_date == "2025-01-02", "entry_tradeable"].item()))
+
+        conflicting = two_day_split_fixture()
+        conflicting["stk_limit"] = frame(
+            [
+                {"ts_code": "000001.SZ", "trade_date": "20250103", "up_limit": 10.0, "down_limit": 9.0},
+                {"ts_code": "000001.SZ", "trade_date": "20250103", "up_limit": 11.0, "down_limit": 9.0},
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "conflicting duplicate stk_limit"):
+            build_panel_from_frames(conflicting)
+
+    def test_mixed_typed_dates_normalize_before_suspension_interval_comparison(self):
+        panel = build_panel_from_frames(mixed_typed_suspension_interval_fixture())
+
+        self.assertTrue(bool(panel.loc[panel.trade_date == "2025-01-03", "is_suspended"].item()))
+        self.assertFalse(bool(panel.loc[panel.trade_date == "2025-01-06", "is_suspended"].item()))
 
     def test_adjusted_ohlc_and_next_open_tradeability_are_correct(self):
         panel = build_panel_from_frames(two_day_split_fixture())

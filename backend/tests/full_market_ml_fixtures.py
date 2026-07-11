@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from collections import Counter
+from datetime import datetime
 
 import pandas as pd
 
@@ -155,6 +156,23 @@ def open_ended_suspension_fixture() -> dict:
     values = suspension_interval_fixture()
     values["suspend_d"] = frame(
         [{"ts_code": "000001.SZ", "suspend_date": "20250103", "resume_date": "", "suspend_type": "S"}]
+    )
+    return values
+
+
+def mixed_typed_suspension_interval_fixture() -> dict:
+    values = suspension_interval_fixture()
+    values["stock_basic"]["list_date"] = pd.Timestamp("2024-01-01")
+    values["trade_cal"]["cal_date"] = pd.to_datetime(values["trade_cal"]["cal_date"])
+    values["suspend_d"] = frame(
+        [
+            {
+                "ts_code": "000001.SZ",
+                "suspend_date": pd.Timestamp("2025-01-03"),
+                "resume_date": datetime(2025, 1, 6),
+                "suspend_type": "S",
+            }
+        ]
     )
     return values
 

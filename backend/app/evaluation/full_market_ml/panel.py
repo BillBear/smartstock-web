@@ -117,7 +117,7 @@ def _build_base_panel(frames: Mapping[str, pd.DataFrame], *, industry_relative_e
         & panel["high"].ge(panel[["open", "close"]].max(axis=1))
         & panel["low"].le(panel[["open", "close"]].min(axis=1))
     )
-    limits = _frame(frames, "stk_limit")
+    limits = _deduplicate_market_rows(_frame(frames, "stk_limit"), "stk_limit")
     panel["at_up_limit"] = _up_limit_flags(panel, limits)
     panel["next_open_date"] = _next_open_dates(panel, _frame(frames, "trade_cal"))
     return panel.sort_values(["symbol", "trade_date"], kind="stable").reset_index(drop=True)
@@ -194,8 +194,8 @@ def _symbols(frame: pd.DataFrame) -> pd.Series:
 def _date_text(value) -> str:
     if pd.isna(value) or value is None:
         return ""
-    text = str(value).replace("-", "")
-    return f"{text[:4]}-{text[4:6]}-{text[6:8]}" if len(text) == 8 else text
+    digits = "".join(character for character in str(value) if character.isdigit())
+    return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}" if len(digits) >= 8 else str(value)
 
 
 def _suspension_flags(panel: pd.DataFrame, suspended: pd.DataFrame, trade_cal: pd.DataFrame) -> pd.Series:
