@@ -88,15 +88,16 @@ def bootstrap_uplift(
     uplifts = []
     iterations = max(1, int(iterations))
     by_date = {date: rows for date, rows in data.groupby(_DATE, sort=False)}
+    # Ranking a daily cross-section dominates runtime.  It is invariant across
+    # bootstrap draws, so compute each pair once and resample only scalars.
+    daily_uplifts = {
+        date: _daily_ranking_metrics(rows, score_col)["precision_at_5"]
+        - _daily_ranking_metrics(rows, baseline_score_col)["precision_at_5"]
+        for date, rows in by_date.items()
+    }
     for _ in range(iterations):
         sampled_dates = rng.choice(dates, size=len(dates), replace=True)
-        model_scores = []
-        baseline_scores = []
-        for date in sampled_dates:
-            rows = by_date[str(date)]
-            model_scores.append(_daily_ranking_metrics(rows, score_col)["precision_at_5"])
-            baseline_scores.append(_daily_ranking_metrics(rows, baseline_score_col)["precision_at_5"])
-        uplifts.append(float(mean(model_scores) - mean(baseline_scores)))
+        uplifts.append(float(mean(daily_uplifts[str(date)] for date in sampled_dates)))
     low, high = np.quantile(np.asarray(uplifts, dtype=float), [0.025, 0.975])
     return {
         "resample_unit": _DATE,

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from unittest.mock import patch
+
+from app.evaluation.full_market_ml import evaluator as evaluator_module
 from app.evaluation.full_market_ml.evaluator import (
     bootstrap_uplift,
     evaluate_calibration,
@@ -52,6 +55,19 @@ class FullMarketMLEvaluatorTests(FullMarketMLTestCase):
         self.assertEqual(result["source_date_count"], 2)
         self.assertLessEqual(result["precision_at_5_uplift_ci_low"], 0)
         self.assertGreaterEqual(result["precision_at_5_uplift_ci_high"], 0)
+
+    def test_bootstrap_computes_each_daily_metric_once_before_resampling(self):
+        original = evaluator_module._daily_ranking_metrics
+        with patch.object(evaluator_module, "_daily_ranking_metrics", wraps=original) as daily_metrics:
+            bootstrap_uplift(
+                bootstrap_date_fixture(),
+                score_col="score",
+                baseline_score_col="baseline_score",
+                iterations=50,
+                seed=17,
+            )
+
+        self.assertEqual(daily_metrics.call_count, 4)
 
     def test_overlapping_top5_cohorts_apply_costs_on_entry_and_exit(self):
         gross = simulate_daily_topk_portfolio(overlapping_portfolio_fixture(), hold_days=2, commission=0.0, slippage=0.0)
