@@ -218,3 +218,33 @@ class FullMarketMLCollectorTests(FullMarketMLTestCase):
         self.assertGreaterEqual(repaired.endpoint_errors["daily_basic"], 1)
         self.assertTrue(any(event["status"] == "failed" for event in repaired.attempt_history))
         self.assertTrue(any(event["status"] == "collected" for event in repaired.attempt_history))
+
+    def test_empty_historical_industry_dataframes_disable_industry_relative_data(self):
+        import pandas as pd
+
+        empty_classifications = FakeTuShareClient()
+        empty_classifications.index_classify = lambda **_: pd.DataFrame(columns=["index_code", "industry_name"])
+        empty_members = FakeTuShareClient()
+        empty_members.index_member_all = lambda **_: pd.DataFrame(columns=["l1_code", "con_code", "in_date"])
+
+        for name, client in (("classifications", empty_classifications), ("members", empty_members)):
+            with self.subTest(name=name):
+                manifest = collect_full_market_raw(self.config, client, self.temp_path / name, "probe")
+                self.assertTrue(manifest.ready)
+                self.assertFalse(manifest.industry_relative_enabled)
+                self.assertIn("historical_industry", manifest.optional_failures)
+
+    def test_empty_suspend_dataframe_preserves_schema_and_reuses_partition(self):
+        import pandas as pd
+
+        client = FakeTuShareClient()
+        client.suspend_d = lambda **_: pd.DataFrame(columns=["ts_code", "trade_date", "suspend_type"])
+
+        first = collect_full_market_raw(self.config, client, self.temp_path, "probe")
+        partition = first.partition("suspend_d", "20260709")
+        second = collect_full_market_raw(self.config, client, self.temp_path, "probe")
+
+        self.assertEqual(partition.row_count, 0)
+        self.assertIn("ts_code", partition.schema)
+        self.assertIn("suspend_type", partition.schema)
+        self.assertEqual(second.partition_status("suspend_d", "20260709"), "reused")

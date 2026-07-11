@@ -190,23 +190,31 @@ def _collect_historical_industry(
         optional_group="historical_industry",
         resume=resume,
     )
+    if not classifications:
+        _mark_historical_industry_unavailable(root, manifest)
+        return
     codes = [str(row["index_code"]) for row in classifications if row.get("index_code")]
-    _collect_partition(
+    members = _collect_partition(
         root,
         manifest,
         "index_member_all",
         "SW2021-L1",
         _static_path("index_member_all"),
-        lambda: [
-            row
-            for code in codes
-            for row in _records(_request(lambda code=code: client.index_member_all(l1_code=code), pacing_seconds))
-        ],
+        lambda: _historical_member_records(client, codes, pacing_seconds),
         core=False,
         optional_group="historical_industry",
         resume=resume,
     )
-    manifest.industry_relative_enabled = "historical_industry" not in manifest.optional_failures
+    if not members:
+        _mark_historical_industry_unavailable(root, manifest)
+        return
+    manifest.industry_relative_enabled = True
+    save_manifest(root, manifest)
+
+
+def _mark_historical_industry_unavailable(root: Path, manifest: CollectionManifest) -> None:
+    manifest.mark_endpoint_error("historical_industry", core=False, optional_group="historical_industry")
+    manifest.industry_relative_enabled = False
     save_manifest(root, manifest)
 
 
@@ -294,7 +302,7 @@ def _request(fetch: Callable[[], Any], pacing_seconds: float) -> Any:
 
 def _write_partition(root: Path, path: Path, endpoint: str, key: str, rows: list[dict[str, Any]]) -> PartitionRecord:
     path.parent.mkdir(parents=True, exist_ok=True)
-    table = pa.Table.from_pylist(rows)
+    table = rows.arrow_table if isinstance(rows, _Records) and rows.arrow_table is not None else pa.Table.from_pylist(rows)
     with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".data-", suffix=".tmp", delete=False) as temporary_file:
         temporary_path = Path(temporary_file.name)
     try:
@@ -311,12 +319,32 @@ def _read_records(path: Path) -> list[dict[str, Any]]:
     return pq.ParquetFile(path).read().to_pylist()
 
 
+class _Records(list[dict[str, Any]]):
+    def __init__(self, rows: list[dict[str, Any]], arrow_table: pa.Table | None = None):
+        super().__init__(rows)
+        self.arrow_table = arrow_table
+
+
 def _records(value: Any) -> list[dict[str, Any]]:
     if value is None:
         return []
     if hasattr(value, "to_dict"):
-        return list(value.to_dict("records"))
+        rows = list(value.to_dict("records"))
+        try:
+            return _Records(rows, pa.Table.from_pandas(value, preserve_index=False))
+        except Exception:
+            return rows
     return [dict(row) for row in value]
+
+
+def _historical_member_records(client: Any, codes: list[str], pacing_seconds: float) -> list[dict[str, Any]]:
+    results = [
+        _records(_request(lambda code=code: client.index_member_all(l1_code=code), pacing_seconds))
+        for code in codes
+    ]
+    rows = [row for result in results for row in result]
+    tables = [result.arrow_table for result in results if isinstance(result, _Records) and result.arrow_table is not None]
+    return _Records(rows, pa.concat_tables(tables)) if tables else rows
 
 
 def _index_daily_rows(client: Any, trade_date: str, pacing_seconds: float) -> list[dict[str, Any]]:
