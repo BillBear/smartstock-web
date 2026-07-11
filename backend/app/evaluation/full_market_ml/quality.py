@@ -27,6 +27,7 @@ CORE_JOIN_COLUMNS = ("valid_ohlc", "listing_age_trade_days")
 REQUIRED_BOARDS = ("MAIN", "CHINEXT", "STAR")
 OPTIONAL_MONEYFLOW_COLUMNS = ("net_mf_amount", "net_mf_vol", "moneyflow")
 OPTIONAL_MONEYFLOW_MINIMUM_COVERAGE = 0.95
+READY_PARTITION_STATUSES = ("collected", "reused", "adopted")
 
 
 class TrainingBlockedError(RuntimeError):
@@ -53,6 +54,7 @@ class QualityReport:
     join_coverage: dict[str, float]
     listing_coverage: float
     board_coverage: dict[str, float]
+    per_date_board_coverage: dict[str, dict[str, float]]
     industry_coverage: float
     moneyflow_coverage: float | None
     sample_estimates: dict[str, int]
@@ -82,6 +84,7 @@ class QualityReport:
             "join_coverage": self.join_coverage,
             "listing_coverage": self.listing_coverage,
             "board_coverage": self.board_coverage,
+            "per_date_board_coverage": self.per_date_board_coverage,
             "industry_coverage": self.industry_coverage,
             "moneyflow_coverage": self.moneyflow_coverage,
             "sample_estimates": self.sample_estimates,
@@ -109,13 +112,15 @@ def audit_panel_quality(config: FullMarketMLConfig, panel_dataset: pd.DataFrame,
     exclusions: set[str] = set()
     disabled_groups: set[str] = set()
 
-    manifest_codes, expected_dates, manifest_disabled = _manifest_evidence(manifest)
+    manifest_codes, manifest_gate_codes, expected_dates, manifest_disabled = _manifest_evidence(config, manifest)
     if manifest is None:
         blocking_codes.add("manifest_missing")
         exclusions.add("manifest:missing")
     elif manifest_codes:
         blocking_codes.add("manifest_not_ready")
         exclusions.update(f"manifest:{code}" for code in manifest_codes)
+    blocking_codes.update(manifest_gate_codes)
+    exclusions.update(f"manifest_gate:{code}" for code in manifest_gate_codes)
     disabled_groups.update(manifest_disabled)
 
     missing_columns = [column for column in REQUIRED_COLUMNS if column not in panel]
@@ -154,8 +159,6 @@ def audit_panel_quality(config: FullMarketMLConfig, panel_dataset: pd.DataFrame,
         exclusions.update(f"join_missing:{column}" for column, coverage in join_coverage.items() if coverage < 1.0)
 
     observed_dates = tuple(sorted(date for date in panel["trade_date"].unique() if date))
-    if not expected_dates:
-        expected_dates = observed_dates
     expected_date_set = set(expected_dates)
     observed_date_set = set(observed_dates)
     required_date_coverage = len(expected_date_set & observed_date_set) / len(expected_date_set) if expected_date_set else 0.0
@@ -184,6 +187,18 @@ def audit_panel_quality(config: FullMarketMLConfig, panel_dataset: pd.DataFrame,
     if any(board_coverage[board] <= 0.0 for board in REQUIRED_BOARDS):
         blocking_codes.add("board_coverage_incomplete")
         exclusions.update(f"board_missing:{board}" for board in REQUIRED_BOARDS if board_coverage[board] <= 0.0)
+    per_date_board_coverage = {
+        trade_date: _board_coverage(panel.loc[panel["trade_date"] == trade_date, "symbol"])
+        for trade_date in expected_dates
+    }
+    incomplete_board_dates = [
+        trade_date
+        for trade_date, coverage in per_date_board_coverage.items()
+        if any(coverage[board] <= 0.0 for board in REQUIRED_BOARDS)
+    ]
+    if incomplete_board_dates:
+        blocking_codes.add("daily_board_coverage_incomplete")
+        exclusions.update(f"daily_board_missing:{trade_date}:{board}" for trade_date in incomplete_board_dates for board in REQUIRED_BOARDS if per_date_board_coverage[trade_date][board] <= 0.0)
 
     industry_coverage = _non_missing_ratio(panel["industry_l1"])
     if "industry_relative" not in disabled_groups and industry_coverage < 1.0:
@@ -212,6 +227,7 @@ def audit_panel_quality(config: FullMarketMLConfig, panel_dataset: pd.DataFrame,
         join_coverage=join_coverage,
         listing_coverage=listing_coverage,
         board_coverage=board_coverage,
+        per_date_board_coverage=per_date_board_coverage,
         industry_coverage=industry_coverage,
         moneyflow_coverage=moneyflow_coverage,
         sample_estimates=sample_estimates,
@@ -226,34 +242,66 @@ def _panel_frame(panel_dataset: pd.DataFrame) -> pd.DataFrame:
     return panel_dataset
 
 
-def _manifest_evidence(manifest: Any) -> tuple[tuple[str, ...], tuple[str, ...], set[str]]:
+def _manifest_evidence(
+    config: FullMarketMLConfig, manifest: Any
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], set[str]]:
     if manifest is None:
-        return (), (), set()
+        return (), (), (), set()
     if isinstance(manifest, Mapping):
         blocking = tuple(str(code) for code in manifest.get("blocking_codes", ()))
         partitions = manifest.get("partitions", ())
         industry_enabled = bool(manifest.get("industry_relative_enabled", True))
         optional_failures = {str(group) for group in manifest.get("optional_failures", ())}
+        config_sha256 = str(manifest.get("config_sha256", ""))
+        open_dates = manifest.get("trade_cal_open_dates")
     else:
         blocking = tuple(str(code) for code in getattr(manifest, "blocking_codes", ()))
         partitions = getattr(manifest, "partitions", ())
         industry_enabled = bool(getattr(manifest, "industry_relative_enabled", True))
         optional_failures = {str(group) for group in getattr(manifest, "optional_failures", ())}
-    dates = []
+        config_sha256 = str(getattr(manifest, "config_sha256", ""))
+        open_dates = getattr(manifest, "trade_cal_open_dates", None)
+    gate_codes: set[str] = set()
+    if config_sha256 != config.sha256:
+        gate_codes.add("manifest_config_mismatch")
+    if not isinstance(open_dates, (list, tuple, set)):
+        gate_codes.add("trade_cal_open_sessions_missing")
+        open_dates = ()
+    dates = tuple(
+        sorted(
+            {
+                date
+                for value in open_dates
+                if (date := _date_text(value)) and config.dates.signal_start <= date <= config.dates.signal_end
+            }
+        )
+    )
+    if not dates:
+        gate_codes.add("trade_cal_open_sessions_missing")
+    records_by_endpoint: dict[str, dict[str, str]] = {}
     for partition in partitions:
         endpoint = partition.get("endpoint") if isinstance(partition, Mapping) else getattr(partition, "endpoint", None)
         key = partition.get("key") if isinstance(partition, Mapping) else getattr(partition, "key", None)
         status = partition.get("status", "collected") if isinstance(partition, Mapping) else getattr(partition, "status", "collected")
-        if endpoint == "daily" and status != "failed":
-            date = _date_text(key)
-            if date:
-                dates.append(date)
+        key_date = _date_text(key)
+        if endpoint and key_date:
+            records_by_endpoint.setdefault(str(endpoint), {})[key_date] = str(status)
+    trade_cal_status = records_by_endpoint.get("trade_cal", {})
+    if any(trade_cal_status.get(date) not in READY_PARTITION_STATUSES for date in dates):
+        gate_codes.add("trade_cal_manifest_incomplete")
+    daily_status = records_by_endpoint.get("daily", {})
+    if dates and not daily_status:
+        gate_codes.add("daily_manifest_missing")
+    elif any(daily_status.get(date) == "failed" for date in dates):
+        gate_codes.add("daily_manifest_failed")
+    elif any(daily_status.get(date) not in READY_PARTITION_STATUSES for date in dates):
+        gate_codes.add("daily_manifest_incomplete")
     disabled = set() if industry_enabled else {"industry_relative"}
     if "historical_industry" in optional_failures:
         disabled.add("industry_relative")
     if "moneyflow" in optional_failures:
         disabled.add("moneyflow")
-    return tuple(sorted(set(blocking))), tuple(sorted(set(dates))), disabled
+    return tuple(sorted(set(blocking))), tuple(sorted(gate_codes)), dates, disabled
 
 
 def _valid_ohlc(panel: pd.DataFrame) -> pd.Series:
