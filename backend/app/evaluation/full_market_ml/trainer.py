@@ -13,7 +13,12 @@ import pandas as pd
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 
-from .evaluator import evaluate_ranking, simulate_daily_topk_portfolio
+from .evaluator import (
+    bootstrap_uplift,
+    evaluate_calibration,
+    evaluate_ranking,
+    simulate_daily_topk_portfolio,
+)
 from .feature_audit import FeatureAuditResult
 from .features import CORE_FEATURE_SPECS
 from .splits import FinalHoldoutAccessError, SplitPlan
@@ -43,14 +48,48 @@ class FrozenCandidate:
     calibrators: dict[str, dict[str, Any]]
     feature_importance: dict[str, float]
     frozen_model_sha256: str
+    split_sha256: str
     preliminary_status: str
     failed_gates: list[str]
     fixed_ranker_grid: tuple[dict[str, int], ...]
     seeds: tuple[int, ...]
     risk_alphas: tuple[float, ...]
     selected_risk_alpha: float
+    selected_ranker_params: dict[str, int]
     group_ablations: list[dict[str, Any]]
     selected_features: tuple[str, ...]
+
+    def manifest(self, *, config_sha256: str, data_sha256: str, feature_schema_sha256: str) -> dict[str, Any]:
+        """Return the complete, non-model-binary contract required for one final evaluation."""
+        return {
+            "frozen_model_sha": self.frozen_model_sha256,
+            "config_sha256": config_sha256,
+            "data_sha256": data_sha256,
+            "feature_schema_sha256": feature_schema_sha256,
+            "split_sha256": self.split_sha256,
+            "selection_sources": list(self.selection_sources),
+            "selected_features": list(self.selected_features),
+            "selected_ranker_params": dict(self.selected_ranker_params),
+            "selected_risk_alpha": self.selected_risk_alpha,
+            "seeds": list(self.seeds),
+            "calibrators": self.calibrators,
+            "preliminary_status": self.preliminary_status,
+            "failed_gates": list(self.failed_gates),
+        }
+
+@dataclass(frozen=True)
+class FinalHoldoutEvaluation:
+    """One-shot sealed-quadrant evaluation of an already frozen candidate."""
+
+    selection_sources: list[str]
+    predictions: pd.DataFrame
+    quadrant_metrics: dict[str, dict[str, Any]]
+    baseline_metrics: dict[str, dict[str, dict[str, Any]]]
+    calibration: dict[str, dict[str, Any]]
+    bootstrap: dict[str, dict[str, Any]]
+    portfolios: dict[str, dict[str, Any]]
+    model_status: str
+    failed_gates: list[str]
 
 
 def run_development_training(
@@ -110,14 +149,113 @@ def run_development_training(
         calibrators={"strong": strong_calibrator, "severe_negative": severe_calibrator},
         feature_importance=importances,
         frozen_model_sha256=frozen_hash,
+        split_sha256=split_plan.split_sha256,
         preliminary_status="research_only_failed_gate" if failed_gates else "research_only_candidate",
         failed_gates=failed_gates,
         fixed_ranker_grid=FIXED_RANKER_GRID,
         seeds=seeds,
         risk_alphas=RISK_ALPHAS,
         selected_risk_alpha=risk_selected["alpha"],
+        selected_ranker_params=dict(selected["params"]),
         group_ablations=group_ablations,
         selected_features=selected_features,
+    )
+
+
+def run_final_holdout_evaluation(
+    config: Any,
+    dataset: pd.DataFrame,
+    split_plan: SplitPlan,
+    candidate: FrozenCandidate,
+    *,
+    frozen_model_sha: str,
+) -> FinalHoldoutEvaluation:
+    """Fit the frozen candidate on development A and evaluate B/C/D exactly once.
+
+    Candidate selection remains confined to A walk-forward OOF.  The B, C and D
+    quadrants are only resolved after the supplied SHA has sealed the plan.
+    """
+    if frozen_model_sha != candidate.frozen_model_sha256:
+        raise FinalHoldoutAccessError("final holdout requires the exact frozen candidate SHA")
+    sealed = split_plan.seal_final_holdout(frozen_model_sha)
+    train_symbols = set(sealed.A_dev_train_symbols)
+    quadrants = {
+        "B_time_holdout": (set(sealed.load_quadrant("B", frozen_model_sha=frozen_model_sha)), set(sealed.final_dates)),
+        "C_stock_holdout": (set(sealed.load_quadrant("C", frozen_model_sha=frozen_model_sha)), set(sealed.development_dates)),
+        "D_joint_holdout": (set(sealed.load_quadrant("D", frozen_model_sha=frozen_model_sha)), set(sealed.final_dates)),
+    }
+    data = _final_evaluation_dataset(dataset, sealed, candidate.selected_features)
+    train = data.loc[data["trade_date"].isin(sealed.development_dates) & data["symbol"].isin(train_symbols)].copy()
+    if train.empty:
+        raise ValueError("final holdout evaluation has no eligible A-quadrant training rows")
+
+    rank_models = [
+        _train_ranker(train, candidate.selected_features, candidate.selected_ranker_params, seed)
+        for seed in candidate.seeds
+    ]
+    strong_models, strong_constant = _train_classifier_models(
+        train, candidate.selected_features, "label_strong_path_10d", candidate.selected_ranker_params, candidate.seeds
+    )
+    severe_models, severe_constant = _train_classifier_models(
+        train, candidate.selected_features, "label_severe_negative_10d", candidate.selected_ranker_params, candidate.seeds
+    )
+
+    prediction_frames = []
+    quadrant_metrics: dict[str, dict[str, Any]] = {}
+    baseline_metrics: dict[str, dict[str, dict[str, Any]]] = {}
+    calibration: dict[str, dict[str, Any]] = {}
+    bootstrap: dict[str, dict[str, Any]] = {}
+    portfolios: dict[str, dict[str, Any]] = {}
+    for quadrant, (symbols, dates) in quadrants.items():
+        rows = data.loc[data["trade_date"].isin(dates) & data["symbol"].isin(symbols)].copy()
+        if rows.empty:
+            raise ValueError(f"final holdout quadrant {quadrant} has no eligible rows")
+        predicted = _predict_frozen_candidate(
+            rows,
+            candidate,
+            rank_models,
+            strong_models,
+            strong_constant,
+            severe_models,
+            severe_constant,
+        )
+        predicted["quadrant"] = quadrant
+        prediction_frames.append(predicted)
+        quadrant_metrics[quadrant] = evaluate_ranking(predicted)
+        baseline_metrics[quadrant] = _baselines(predicted)
+        calibration[quadrant] = evaluate_calibration(predicted, score_col="strong_probability")
+        baseline_column = _preferred_baseline_column(predicted)
+        bootstrap[quadrant] = bootstrap_uplift(
+            predicted,
+            score_col="score",
+            baseline_score_col=baseline_column,
+            iterations=200,
+        )
+        portfolios[quadrant] = simulate_daily_topk_portfolio(predicted)
+
+    failed_gates = list(candidate.failed_gates)
+    if candidate.preliminary_status == "research_only_failed_gate":
+        failed_gates.append("development_oof_gate_failed")
+    for quadrant in ("B_time_holdout", "D_joint_holdout"):
+        model = quadrant_metrics[quadrant]
+        baseline = baseline_metrics[quadrant].get("momentum_60d", {})
+        if baseline.get("status") != "available":
+            failed_gates.append(f"{quadrant}:momentum_60d_baseline_unavailable")
+        elif model["precision_at_5"] <= baseline["precision_at_5"]:
+            failed_gates.append(f"{quadrant}:precision_at_5_not_above_momentum_60d")
+        elif model["ndcg_at_10"] <= baseline["ndcg_at_10"]:
+            failed_gates.append(f"{quadrant}:ndcg_at_10_not_above_momentum_60d")
+    status = "research_only_failed_gate" if failed_gates else "research_only"
+    return FinalHoldoutEvaluation(
+        selection_sources=list(candidate.selection_sources),
+        predictions=pd.concat(prediction_frames, ignore_index=True).sort_values(["quadrant", "trade_date", "symbol"], kind="stable").reset_index(drop=True),
+        quadrant_metrics=quadrant_metrics,
+        baseline_metrics=baseline_metrics,
+        calibration=calibration,
+        bootstrap=bootstrap,
+        portfolios=portfolios,
+        model_status=status,
+        failed_gates=sorted(set(failed_gates)),
     )
 
 
@@ -139,6 +277,100 @@ def _development_dataset(dataset: pd.DataFrame, split_plan: SplitPlan) -> pd.Dat
     if data.empty:
         raise ValueError("development dataset has no eligible A-quadrant rows")
     return data.sort_values(["trade_date", "symbol"], kind="stable").reset_index(drop=True)
+
+
+def _final_evaluation_dataset(dataset: pd.DataFrame, split_plan: SplitPlan, features: tuple[str, ...]) -> pd.DataFrame:
+    required = {
+        "trade_date",
+        "symbol",
+        "future_return_10d",
+        "relevance_grade_10d",
+        "label_strong_path_10d",
+        "label_severe_negative_10d",
+        *features,
+    }
+    missing = sorted(required - set(dataset.columns))
+    if missing:
+        raise ValueError("final holdout dataset missing columns: " + ", ".join(missing))
+    data = dataset.copy()
+    data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    data["symbol"] = data["symbol"].astype("string").fillna("").str.split(".", regex=False).str[0].str.zfill(6)
+    allowed_dates = set(split_plan.development_dates) | set(split_plan.final_dates)
+    if data["trade_date"].isna().any() or (~data["trade_date"].isin(allowed_dates)).any():
+        raise FinalHoldoutAccessError("final holdout dataset contains an unplanned trading date")
+    if "eligible_for_training" in data:
+        data = data.loc[data["eligible_for_training"].eq(True)].copy()
+    if data.empty:
+        raise ValueError("final holdout dataset has no eligible rows")
+    return data.sort_values(["trade_date", "symbol"], kind="stable").reset_index(drop=True)
+
+
+def _train_classifier_models(train, features, label, params, seeds):
+    target = train[label].astype(bool).astype(int)
+    if target.nunique() < 2:
+        return (), float(target.iloc[0])
+    models = []
+    for seed in seeds:
+        models.append(
+            lgb.train(
+                {
+                    "objective": "binary",
+                    "metric": "binary_logloss",
+                    "learning_rate": 0.03,
+                    "feature_fraction": 0.8,
+                    "bagging_fraction": 0.8,
+                    "bagging_freq": 1,
+                    "verbosity": -1,
+                    "seed": seed,
+                    **params,
+                },
+                lgb.Dataset(train[list(features)], label=target),
+                num_boost_round=120,
+            )
+        )
+    return tuple(models), None
+
+
+def _predict_frozen_candidate(rows, candidate, rank_models, strong_models, strong_constant, severe_models, severe_constant):
+    features = list(candidate.selected_features)
+    result = rows.copy()
+    result["score"] = np.median(
+        np.vstack([model.predict(result[features], num_iteration=model.current_iteration()) for model in rank_models]), axis=0
+    )
+    strong_raw = _predict_classifier_probability(result, features, strong_models, strong_constant)
+    severe_raw = _predict_classifier_probability(result, features, severe_models, severe_constant)
+    result["strong_probability"] = _apply_calibrator(strong_raw, candidate.calibrators["strong"])
+    result["severe_negative_probability"] = _apply_calibrator(severe_raw, candidate.calibrators["severe_negative"])
+    result["score"] = result["score"] - candidate.selected_risk_alpha * result["severe_negative_probability"]
+    return result
+
+
+def _predict_classifier_probability(rows, features, models, constant):
+    if constant is not None:
+        return np.repeat(constant, len(rows))
+    values = [model.predict(rows[features], num_iteration=model.current_iteration()) for model in models]
+    return np.median(np.vstack(values), axis=0)
+
+
+def _apply_calibrator(probabilities, report):
+    values = np.clip(np.asarray(probabilities, dtype=float), 1e-6, 1 - 1e-6)
+    selected = report.get("selected")
+    if selected == "constant":
+        return np.repeat(float(report["constant"]), len(values))
+    if selected == "sigmoid":
+        coefficient = float(report["coefficient"])
+        intercept = float(report["intercept"])
+        return 1.0 / (1.0 + np.exp(-(coefficient * values + intercept)))
+    if selected == "isotonic":
+        return np.interp(values, report["x_thresholds"], report["y_thresholds"])
+    raise ValueError("unsupported frozen calibration report")
+
+
+def _preferred_baseline_column(predictions: pd.DataFrame) -> str:
+    for column in ("adjusted_return_60d", "adjusted_return_20d", "amount_log"):
+        if column in predictions and pd.to_numeric(predictions[column], errors="coerce").notna().all():
+            return column
+    raise ValueError("final holdout predictions have no complete fixed baseline score")
 
 
 def _available_features(data: pd.DataFrame) -> list[str]:
@@ -256,13 +488,37 @@ def _calibrate_oof(probabilities, labels):
     clipped = np.clip(np.asarray(probabilities, dtype=float), 1e-6, 1 - 1e-6)
     if len(np.unique(labels)) < 2:
         calibrated = np.repeat(float(labels[0]), len(labels))
-        return calibrated, {"selected": "constant", "brier": float(np.mean((calibrated - labels) ** 2)), "source": "A_walk_forward_oof"}
-    sigmoid = LogisticRegression(random_state=17, solver="liblinear").fit(clipped.reshape(-1, 1), labels).predict_proba(clipped.reshape(-1, 1))[:, 1]
-    isotonic = IsotonicRegression(out_of_bounds="clip").fit_transform(clipped, labels)
+        return calibrated, {
+            "selected": "constant",
+            "constant": float(labels[0]),
+            "brier": float(np.mean((calibrated - labels) ** 2)),
+            "source": "A_walk_forward_oof",
+        }
+    sigmoid_model = LogisticRegression(random_state=17, solver="liblinear").fit(clipped.reshape(-1, 1), labels)
+    sigmoid = sigmoid_model.predict_proba(clipped.reshape(-1, 1))[:, 1]
+    isotonic_model = IsotonicRegression(out_of_bounds="clip").fit(clipped, labels)
+    isotonic = isotonic_model.transform(clipped)
     sigmoid_brier = float(np.mean((sigmoid - labels) ** 2))
     isotonic_brier = float(np.mean((isotonic - labels) ** 2))
-    selected, calibrated = ("sigmoid", sigmoid) if sigmoid_brier <= isotonic_brier else ("isotonic", isotonic)
-    return calibrated, {"selected": selected, "brier": min(sigmoid_brier, isotonic_brier), "sigmoid_brier": sigmoid_brier, "isotonic_brier": isotonic_brier, "source": "A_walk_forward_oof"}
+    if sigmoid_brier <= isotonic_brier:
+        return sigmoid, {
+            "selected": "sigmoid",
+            "coefficient": float(sigmoid_model.coef_[0][0]),
+            "intercept": float(sigmoid_model.intercept_[0]),
+            "brier": sigmoid_brier,
+            "sigmoid_brier": sigmoid_brier,
+            "isotonic_brier": isotonic_brier,
+            "source": "A_walk_forward_oof",
+        }
+    return isotonic, {
+        "selected": "isotonic",
+        "x_thresholds": isotonic_model.X_thresholds_.tolist(),
+        "y_thresholds": isotonic_model.y_thresholds_.tolist(),
+        "brier": isotonic_brier,
+        "sigmoid_brier": sigmoid_brier,
+        "isotonic_brier": isotonic_brier,
+        "source": "A_walk_forward_oof",
+    }
 
 
 def _run_group_ablations(data, split_plan, features, params, seeds, feature_audit):

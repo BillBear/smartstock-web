@@ -29,9 +29,10 @@ class FullMarketMLPipelineTests(FullMarketMLTestCase):
     def test_final_evaluation_requires_matching_frozen_hash(self):
         pipeline = FullMarketMLPipeline(self.config, self.temp_path, fake_pipeline_services())
         pipeline.run("dev-train")
+        pipeline.run("final-evaluate", frozen_model_sha="fixture-frozen-sha")
 
         with self.assertRaises(FrozenModelMismatchError):
-            pipeline.run("final-evaluate", frozen_model_sha="wrong")
+            pipeline.run("final-holdout-evaluate", frozen_model_sha="wrong")
 
     def test_resume_reuses_completed_stages(self):
         pipeline = FullMarketMLPipeline(self.config, self.temp_path, fake_pipeline_services())
@@ -60,6 +61,7 @@ class FullMarketMLPipelineTests(FullMarketMLTestCase):
         result = subprocess.run([sys.executable, str(script), "--help"], check=True, capture_output=True, text=True)
 
         self.assertIn("--frozen-model-sha", result.stdout)
+        self.assertIn("--run-id", result.stdout)
         self.assertNotIn("override", result.stdout.lower())
 
     def test_resume_rejects_a_tampered_file_artifact(self):

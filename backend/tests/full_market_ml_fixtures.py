@@ -16,12 +16,12 @@ def fake_pipeline_services(*, low_coverage: bool = False):
             return {"quality_ready": False, "blocking_codes": ["daily_coverage_below_minimum"]}
         if name == "dev-train":
             return {"quality_ready": True, "frozen_model_sha": "fixture-frozen-sha"}
-        if name == "final-evaluate":
+        if name in {"final-evaluate", "final-holdout-evaluate"}:
             return {"evaluation_status": "research_only"}
         return {"quality_ready": True}
 
     return {name: (lambda config, root, artifacts, name=name: stage(name, config, root, artifacts)) for name in (
-        "preflight", "probe", "pilot-build", "full-build", "feature-audit", "dev-train", "final-evaluate",
+        "preflight", "probe", "pilot-build", "full-build", "feature-audit", "dev-train", "final-evaluate", "final-holdout-evaluate",
     )}
 
 

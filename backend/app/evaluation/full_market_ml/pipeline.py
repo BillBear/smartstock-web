@@ -30,6 +30,7 @@ STAGES = (
     "feature-audit",
     "dev-train",
     "final-evaluate",
+    "final-holdout-evaluate",
 )
 
 
@@ -69,8 +70,8 @@ class FullMarketMLPipeline:
     def run(self, stage: str, *, resume: bool = False, frozen_model_sha: str | None = None) -> PipelineRunResult:
         if stage not in STAGES:
             raise ValueError("stage must be one of " + ", ".join(STAGES))
-        if frozen_model_sha is not None and stage != "final-evaluate":
-            raise ValueError("frozen_model_sha is only accepted for final-evaluate")
+        if frozen_model_sha is not None and stage not in {"final-evaluate", "final-holdout-evaluate"}:
+            raise ValueError("frozen_model_sha is only accepted for final evaluation stages")
 
         states: dict[str, dict[str, Any]] = {}
         reused: list[str] = []
@@ -84,7 +85,7 @@ class FullMarketMLPipeline:
             if existing and existing.get("status") == "complete":
                 raise ValueError(f"stage already complete: {current}; rerun with resume")
 
-            if current == "final-evaluate":
+            if current in {"final-evaluate", "final-holdout-evaluate"}:
                 self._require_frozen_sha(frozen_model_sha)
             states[current] = self._run_stage(current, inputs, states)
 
@@ -112,7 +113,10 @@ class FullMarketMLPipeline:
                 frozen = str(output.get("frozen_model_sha", "")).strip()
                 if not frozen:
                     raise ValueError("dev-train service must return frozen_model_sha")
-                self._write_json(self.runtime_root / "frozen_model_manifest.json", {"frozen_model_sha": frozen})
+                manifest = dict(output.get("frozen_model_manifest") or {"frozen_model_sha": frozen})
+                if str(manifest.get("frozen_model_sha", "")).strip() != frozen:
+                    raise ValueError("frozen model manifest SHA does not match dev-train output")
+                self._write_json(self.runtime_root / "frozen_model_manifest.json", manifest)
             complete = self._state(stage, "complete", inputs, output, started_at=started, ended_at=_timestamp())
             self._write_json(self._state_path(stage), complete)
             return complete

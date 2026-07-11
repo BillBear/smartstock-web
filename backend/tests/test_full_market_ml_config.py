@@ -22,6 +22,16 @@ class FullMarketMLConfigTests(unittest.TestCase):
         self.assertEqual(config.collection.namechange_history_start, "1990-01-01")
         self.assertEqual(config.sha256, hashlib.sha256(path.read_bytes()).hexdigest())
 
+    def test_v2_contract_reserves_three_calendar_months_for_the_sealed_final_holdout(self):
+        path = Path(__file__).parents[1] / "config" / "ml_full_market_v2.toml"
+
+        config = load_full_market_ml_config(path)
+
+        self.assertEqual(config.dates.signal_start, "2024-06-03")
+        self.assertEqual(config.dates.signal_end, "2026-07-10")
+        self.assertEqual(config.dates.holdout_start, "2026-04-01")
+        self.assertEqual(config.dates.holdout_end, "2026-07-10")
+
     def test_hashes_the_validated_byte_snapshot_when_file_changes_after_parse(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "config.toml"

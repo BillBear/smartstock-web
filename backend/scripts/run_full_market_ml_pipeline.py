@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import json
 import sys
@@ -34,7 +35,7 @@ def default_services():
     from app.evaluation.full_market_ml.preflight import run_preflight
     from app.evaluation.full_market_ml.quality import audit_panel_quality
     from app.evaluation.full_market_ml.splits import SplitPlan, WalkForwardFold, build_split_plan
-    from app.evaluation.full_market_ml.trainer import run_development_training
+    from app.evaluation.full_market_ml.trainer import run_development_training, run_final_holdout_evaluation
 
     client = ts.pro_api(os.environ.get("TUSHARE_TOKEN", ""))
 
@@ -42,6 +43,55 @@ def default_services():
         path = root / "artifacts" / name
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def write_json(path, value):
+        path.write_text(json.dumps(value, ensure_ascii=True, sort_keys=True, default=str, indent=2) + "\n", encoding="utf-8")
+
+    def file_sha256(path):
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def feature_schema_sha256(candidate):
+        payload = json.dumps({"selected_features": list(candidate.selected_features)}, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(payload).hexdigest()
+
+    def metric_rows(metrics_by_name):
+        rows = []
+        for name, metrics in metrics_by_name.items():
+            rows.extend({"scope": name, "metric": metric, "value": value} for metric, value in metrics.items())
+        return rows
+
+    def write_model_card(path, candidate, evaluation, split):
+        lines = [
+            "# Full-Market ML Model Card",
+            "",
+            f"- Status: `{evaluation.model_status}`",
+            f"- Frozen candidate SHA: `{candidate.frozen_model_sha256}`",
+            f"- Split SHA: `{split.split_sha256}`",
+            "- Selection source: `A_walk_forward_oof` only.",
+            "- Final evaluation quadrants: B (time holdout), C (unseen stocks), D (joint holdout).",
+            "- Production integration: prohibited by this research-only run.",
+            "",
+            "## Failed Gates",
+            "",
+        ]
+        if evaluation.failed_gates:
+            lines.extend(f"- `{gate}`" for gate in evaluation.failed_gates)
+        else:
+            lines.append("- None")
+        lines.extend(["", "## Holdout Metrics", ""])
+        for quadrant, metrics in evaluation.quadrant_metrics.items():
+            lines.append(f"### {quadrant}")
+            lines.append("")
+            lines.append(f"- Precision@5: `{metrics.get('precision_at_5')}`")
+            lines.append(f"- NDCG@10: `{metrics.get('ndcg_at_10')}`")
+            lines.append(f"- Top5 mean return: `{metrics.get('top_5_mean_return')}`")
+            lines.append(f"- Severe negative rate: `{metrics.get('severe_negative_rate')}`")
+            lines.append("")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def panel_dataset(root):
         paths = sorted((root / "panel" / "stage=full-build").glob("shard=*/data.parquet"))
@@ -128,13 +178,28 @@ def default_services():
         return {"quality_ready": True, "feature_audit": str(output)}
 
     def dev_train(config, root, _artifacts):
-        dataset = pd.read_parquet(artifact(root, "full-build") / "dataset.parquet")
+        dataset_path = artifact(root, "full-build") / "dataset.parquet"
+        dataset = pd.read_parquet(dataset_path)
         split = load_split(root)
         development = dataset.loc[dataset["trade_date"].isin(split.development_dates)].copy()
         candidate = run_development_training(config, development, split)
         output = artifact(root, "dev-train") / "oof_predictions.parquet"
         candidate.oof_predictions.to_parquet(output, index=False)
-        return {"quality_ready": True, "frozen_model_sha": candidate.frozen_model_sha256, "preliminary_status": candidate.preliminary_status, "oof_predictions": str(output)}
+        manifest = candidate.manifest(
+            config_sha256=config.sha256,
+            data_sha256=file_sha256(dataset_path),
+            feature_schema_sha256=feature_schema_sha256(candidate),
+        )
+        manifest_path = artifact(root, "dev-train") / "candidate_manifest.json"
+        write_json(manifest_path, manifest)
+        return {
+            "quality_ready": True,
+            "frozen_model_sha": candidate.frozen_model_sha256,
+            "frozen_model_manifest": manifest,
+            "preliminary_status": candidate.preliminary_status,
+            "oof_predictions": str(output),
+            "candidate_manifest": str(manifest_path),
+        }
 
     def final_evaluate(_config, root, _artifacts):
         # No deployment decision is made here; this is an immutable research report.
@@ -144,7 +209,81 @@ def default_services():
         output.write_text(json.dumps(report, ensure_ascii=True, sort_keys=True) + "\n", encoding="utf-8")
         return {"quality_ready": True, "evaluation": str(output), "status": report["status"]}
 
-    return {"preflight": preflight, "probe": collect("probe", bounded_probe=True), "pilot-build": lambda config, root, artifacts: collect("pilot-build", with_panel=True)(pilot_config(config), root, artifacts), "full-build": full_build, "feature-audit": feature_audit, "dev-train": dev_train, "final-evaluate": final_evaluate}
+    def final_holdout_evaluate(config, root, _artifacts):
+        dataset_path = artifact(root, "full-build") / "dataset.parquet"
+        split = load_split(root)
+        frozen_sha = str(json.loads((root / "frozen_model_manifest.json").read_text(encoding="utf-8"))["frozen_model_sha"])
+        dates = pd.read_parquet(dataset_path, columns=["trade_date", "eligible_for_training"])
+        dates["trade_date"] = pd.to_datetime(dates["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        labelable_final_dates = dates.loc[
+            dates["trade_date"].isin(split.final_dates) & dates["eligible_for_training"].eq(True), "trade_date"
+        ].nunique()
+        if labelable_final_dates < 40:
+            raise ValueError(
+                f"final holdout has only {labelable_final_dates} labelable trade dates; requires at least 40 before opening the sealed holdout"
+            )
+        dataset = pd.read_parquet(dataset_path)
+        development = dataset.loc[dataset["trade_date"].isin(split.development_dates)].copy()
+        candidate = run_development_training(config, development, split)
+        if candidate.frozen_model_sha256 != frozen_sha:
+            raise ValueError("reconstructed frozen candidate SHA does not match the sealed manifest")
+        evaluation = run_final_holdout_evaluation(
+            config,
+            dataset,
+            split,
+            candidate,
+            frozen_model_sha=frozen_sha,
+        )
+        output = artifact(root, "final-holdout-evaluate")
+        predictions_path = output / "predictions.parquet"
+        evaluation.predictions.to_parquet(predictions_path, index=False)
+        pd.DataFrame(metric_rows(evaluation.quadrant_metrics)).to_csv(root / "holdout_metrics.csv", index=False)
+        baseline_rows = []
+        for quadrant, baselines in evaluation.baseline_metrics.items():
+            for baseline, values in baselines.items():
+                baseline_rows.extend(
+                    {"quadrant": quadrant, "baseline": baseline, "metric": key, "value": value}
+                    for key, value in values.items()
+                )
+        pd.DataFrame(baseline_rows).to_csv(root / "baseline_comparison.csv", index=False)
+        calibration_rows = []
+        for quadrant, report in evaluation.calibration.items():
+            calibration_rows.append({"quadrant": quadrant, "bin": 0, "count": None, "mean_predicted_probability": None, "hit_rate": None, "brier": report["brier"], "ece": report["ece"]})
+            calibration_rows.extend({"quadrant": quadrant, **row, "brier": None, "ece": None} for row in report["bins"])
+        pd.DataFrame(calibration_rows).to_csv(root / "calibration.csv", index=False)
+        pd.DataFrame(metric_rows(evaluation.bootstrap)).to_csv(root / "bootstrap_metrics.csv", index=False)
+        error_rows = []
+        for quadrant, rows in evaluation.predictions.groupby("quadrant", sort=True):
+            ranked = rows.sort_values(["score", "symbol"], ascending=[False, True], kind="stable").groupby("trade_date", sort=True).head(5)
+            error_rows.append(ranked.loc[ranked["label_severe_negative_10d"].astype(bool)])
+        pd.concat(error_rows, ignore_index=True).to_csv(root / "error_cases.csv", index=False)
+        metrics = {
+            "model_status": evaluation.model_status,
+            "gate_results": {"failed": evaluation.failed_gates},
+            "time_holdout": evaluation.quadrant_metrics["B_time_holdout"],
+            "stock_holdout": evaluation.quadrant_metrics["C_stock_holdout"],
+            "joint_holdout": evaluation.quadrant_metrics["D_joint_holdout"],
+            "portfolios": evaluation.portfolios,
+            "labelable_final_dates": labelable_final_dates,
+        }
+        write_json(root / "model_metrics.json", metrics)
+        write_model_card(root / "model_card.md", candidate, evaluation, split)
+        manifest = candidate.manifest(
+            config_sha256=config.sha256,
+            data_sha256=file_sha256(dataset_path),
+            feature_schema_sha256=feature_schema_sha256(candidate),
+        )
+        write_json(output / "candidate_manifest.json", manifest)
+        return {
+            "quality_ready": True,
+            "model_status": evaluation.model_status,
+            "holdout_metrics": str(root / "holdout_metrics.csv"),
+            "model_metrics": str(root / "model_metrics.json"),
+            "model_card": str(root / "model_card.md"),
+            "predictions": str(predictions_path),
+        }
+
+    return {"preflight": preflight, "probe": collect("probe", bounded_probe=True), "pilot-build": lambda config, root, artifacts: collect("pilot-build", with_panel=True)(pilot_config(config), root, artifacts), "full-build": full_build, "feature-audit": feature_audit, "dev-train": dev_train, "final-evaluate": final_evaluate, "final-holdout-evaluate": final_holdout_evaluate}
 
 
 def main() -> int:
@@ -153,9 +292,10 @@ def main() -> int:
     parser.add_argument("--stage", required=True, choices=STAGES)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--frozen-model-sha")
+    parser.add_argument("--run-id", default=RUN_ID)
     arguments = parser.parse_args()
     config = load_full_market_ml_config(arguments.config)
-    root = Path(__file__).resolve().parents[2] / "runtime" / "ml_full_market" / "runs" / RUN_ID
+    root = Path(__file__).resolve().parents[2] / "runtime" / "ml_full_market" / "runs" / arguments.run_id
     result = FullMarketMLPipeline(config, root, default_services()).run(
         arguments.stage, resume=arguments.resume, frozen_model_sha=arguments.frozen_model_sha
     )
