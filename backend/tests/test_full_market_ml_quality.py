@@ -109,6 +109,15 @@ class FullMarketMLQualityTests(unittest.TestCase):
         self.assertEqual(report.expected_trade_dates, ("2025-01-02", "2025-01-03"))
         self.assertIn("daily_manifest_missing", report.blocking_codes)
 
+    def test_panel_rows_cannot_spoof_persisted_open_calendar_evidence(self):
+        manifest = valid_manifest(self.config)
+        manifest.trade_cal_open_dates = ("2025-01-02",)
+        panel = valid_panel().query("trade_date == '2025-01-03'").reset_index(drop=True)
+        report = audit_panel_quality(self.config, panel, manifest)
+
+        self.assertEqual(report.expected_trade_dates, ("2025-01-02",))
+        self.assertIn("required_date_coverage_incomplete", report.blocking_codes)
+
     def test_failed_daily_record_blocks_without_legacy_manifest_code(self):
         manifest = valid_manifest(self.config)
         manifest.partitions[2].status = "failed"

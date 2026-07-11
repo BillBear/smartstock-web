@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from app.evaluation.full_market_ml.collector import collect_full_market_raw
 from app.evaluation.full_market_ml.config import DatesConfig, load_full_market_ml_config
-from app.evaluation.full_market_ml.manifests import manifest_path
+from app.evaluation.full_market_ml.manifests import load_manifest, manifest_path
 from tests.full_market_ml_fixtures import FakeTuShareClient
 
 
@@ -32,6 +32,32 @@ class FullMarketMLTestCase(unittest.TestCase):
 
 
 class FullMarketMLCollectorTests(FullMarketMLTestCase):
+    def test_persists_verified_open_calendar_dates_across_reload_and_resume(self):
+        config = replace(
+            self.config,
+            dates=DatesConfig(
+                signal_start="2026-07-09",
+                signal_end="2026-07-10",
+                holdout_start="2026-07-09",
+                holdout_end="2026-07-10",
+            ),
+        )
+        client = FakeTuShareClient(
+            calendar_rows=[
+                {"cal_date": "20260709", "is_open": "1"},
+                {"cal_date": "20260710", "is_open": "0"},
+            ]
+        )
+
+        collected = collect_full_market_raw(config, client, self.temp_path, "probe")
+        reloaded = load_manifest(self.temp_path, "probe", config.sha256, config.collection.request_pacing_seconds)
+        resumed = collect_full_market_raw(config, client, self.temp_path, "probe", resume=True)
+
+        self.assertEqual(collected.trade_cal_open_dates, ("2026-07-09",))
+        self.assertEqual(reloaded.trade_cal_open_dates, ("2026-07-09",))
+        self.assertEqual(resumed.trade_cal_open_dates, ("2026-07-09",))
+        self.assertEqual(client.calls["trade_cal"], 1)
+
     def test_resume_repairs_missing_endpoint_without_recollecting_daily(self):
         client = FakeTuShareClient(fail_once={"daily_basic": 1})
         with patch("app.evaluation.full_market_ml.collector.time.sleep"):

@@ -28,6 +28,7 @@ class CollectionManifest:
     stage: str
     config_sha256: str
     request_pacing_seconds: float
+    trade_cal_open_dates: tuple[str, ...] = ()
     partitions: list[PartitionRecord] = field(default_factory=list)
     endpoint_errors: dict[str, int] = field(default_factory=dict)
     blocking_codes: list[str] = field(default_factory=list)
@@ -75,6 +76,7 @@ class CollectionManifest:
             "stage": self.stage,
             "config_sha256": self.config_sha256,
             "request_pacing_seconds": self.request_pacing_seconds,
+            "trade_cal_open_dates": list(self.trade_cal_open_dates),
             "partitions": [asdict(partition) for partition in self.partitions],
             "endpoint_errors": self.endpoint_errors,
             "blocking_codes": self.blocking_codes,
@@ -89,6 +91,7 @@ class CollectionManifest:
             stage=str(value["stage"]),
             config_sha256=str(value["config_sha256"]),
             request_pacing_seconds=float(value.get("request_pacing_seconds", 0)),
+            trade_cal_open_dates=tuple(str(trade_date) for trade_date in value.get("trade_cal_open_dates", ())),
             partitions=[PartitionRecord(**partition) for partition in value.get("partitions", [])],
             endpoint_errors={str(key): int(count) for key, count in value.get("endpoint_errors", {}).items()},
             blocking_codes=[str(code) for code in value.get("blocking_codes", [])],

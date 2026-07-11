@@ -148,8 +148,10 @@ def _collect_trade_calendar(
             for partition in reused:
                 partition.status = "reused"
                 manifest.replace_partition(partition)
-                save_manifest(root, manifest)
-            return [row for partition in reused for row in _read_records(root / partition.path)]
+            rows = [row for partition in reused for row in _read_records(root / partition.path)]
+            manifest.trade_cal_open_dates = _verified_open_calendar_dates(rows)
+            save_manifest(root, manifest)
+            return rows
     try:
         rows = _records(
             _request(
@@ -170,6 +172,8 @@ def _collect_trade_calendar(
         save_manifest(root, manifest)
     for trade_date, row in by_date.items():
         _collect_partition(root, manifest, "trade_cal", trade_date, _raw_path("trade_cal", trade_date), lambda row=row: [row], core=True, resume=resume)
+    manifest.trade_cal_open_dates = _verified_open_calendar_dates(rows)
+    save_manifest(root, manifest)
     if not [row for row in rows if str(row.get("is_open")) == "1"]:
         manifest.add_blocking_code("trade_cal_no_open_dates")
         save_manifest(root, manifest)
@@ -376,6 +380,17 @@ def _static_path(endpoint: str) -> Path:
 
 def _compact(value: str) -> str:
     return value.replace("-", "")
+
+
+def _verified_open_calendar_dates(rows: list[dict[str, Any]]) -> tuple[str, ...]:
+    dates = set()
+    for row in rows:
+        if str(row.get("is_open")) != "1" or not row.get("cal_date"):
+            continue
+        digits = "".join(character for character in str(row["cal_date"]) if character.isdigit())
+        if len(digits) >= 8:
+            dates.add(f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}")
+    return tuple(sorted(dates))
 
 
 def _calendar_dates(start: str, end: str) -> list[str]:
