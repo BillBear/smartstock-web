@@ -2,7 +2,9 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from app.evaluation.full_market_ml import config as config_module
 from app.evaluation.full_market_ml.config import load_full_market_ml_config
 from tests.full_market_ml_fixtures import full_market_ml_config_data
 
@@ -17,6 +19,25 @@ class FullMarketMLConfigTests(unittest.TestCase):
         self.assertEqual(config.splits.embargo_trade_days, 20)
         self.assertEqual(config.training.seeds, (17, 42, 73))
         self.assertEqual(config.sha256, hashlib.sha256(path.read_bytes()).hexdigest())
+
+    def test_hashes_the_validated_byte_snapshot_when_file_changes_after_parse(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "config.toml"
+            path.write_text(_to_toml(full_market_ml_config_data()), encoding="utf-8")
+            validated_bytes = path.read_bytes()
+            replacement_bytes = validated_bytes.replace(b"minimum_daily_symbols = 4500", b"minimum_daily_symbols = 4501")
+            original_load = config_module.tomllib.load
+
+            def load_then_replace(config_file):
+                parsed = original_load(config_file)
+                path.write_bytes(replacement_bytes)
+                return parsed
+
+            with patch.object(config_module.tomllib, "load", side_effect=load_then_replace):
+                config = load_full_market_ml_config(path)
+
+        self.assertEqual(config.sample.minimum_daily_symbols, 4500)
+        self.assertEqual(config.sha256, hashlib.sha256(validated_bytes).hexdigest())
 
     def test_rejects_missing_sections(self):
         data = full_market_ml_config_data()

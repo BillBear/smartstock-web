@@ -57,8 +57,9 @@ def config_sha256(path: str | Path) -> str:
 
 def load_full_market_ml_config(path: str | Path) -> FullMarketMLConfig:
     config_path = Path(path)
-    with config_path.open("rb") as config_file:
-        raw_config = tomllib.load(config_file)
+    config_bytes = config_path.read_bytes()
+    config_digest = hashlib.sha256(config_bytes).hexdigest()
+    raw_config = tomllib.loads(config_bytes.decode("utf-8"))
 
     _require_sections(raw_config)
     dates = _load_dates(_section(raw_config, "dates"))
@@ -82,7 +83,7 @@ def load_full_market_ml_config(path: str | Path) -> FullMarketMLConfig:
         splits=splits,
         training=training,
         resources=resources,
-        sha256=config_sha256(config_path),
+        sha256=config_digest,
     )
 
 
