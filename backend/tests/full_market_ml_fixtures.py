@@ -6,6 +6,8 @@ from datetime import datetime
 
 import pandas as pd
 
+from app.evaluation.full_market_ml.splits import SplitPlan, WalkForwardFold
+
 
 FULL_MARKET_ML_CONFIG = {
     "dates": {
@@ -62,6 +64,69 @@ def long_calendar_fixture() -> pd.DataFrame:
 
 def frame(rows=None, **kwargs):
     return pd.DataFrame(rows, **kwargs)
+
+
+def monotonic_fixture() -> pd.DataFrame:
+    """Small development panel where ``signal`` ranks the forward return each day."""
+    dates = pd.bdate_range("2025-01-02", periods=9)
+    rows = []
+    for date_index, trade_date in enumerate(dates):
+        for symbol_index in range(10):
+            signal = float(symbol_index + 1)
+            rows.append(
+                {
+                    "trade_date": trade_date.strftime("%Y-%m-%d"),
+                    "symbol": f"000{symbol_index + 1:03d}",
+                    "signal": signal,
+                    "correlated_signal": signal * 2.0,
+                    "future_return_10d": signal / 100.0 + date_index / 10_000.0,
+                    "net_mf_amount": signal if symbol_index < 8 else None,
+                }
+            )
+    return frame(rows)
+
+
+def three_fold_split_fixture() -> SplitPlan:
+    """Three deterministic development folds for feature-audit unit tests."""
+    dates = tuple(pd.bdate_range("2025-01-02", periods=9).strftime("%Y-%m-%d"))
+    symbols = tuple(f"000{index + 1:03d}" for index in range(10))
+    folds = tuple(
+        WalkForwardFold(
+            fold=index + 1,
+            training_dates=dates[: index + 2],
+            validation_dates=(dates[index + 2],),
+            training_symbols=symbols,
+            train_start=dates[0],
+            train_end=dates[index + 1],
+            validation_start=dates[index + 2],
+            validation_end=dates[index + 2],
+        )
+        for index in range(3)
+    )
+    return SplitPlan(
+        development_dates=dates,
+        final_dates=("2025-02-03",),
+        stock_holdout_symbols=(),
+        A_dev_train_symbols=symbols,
+        B_final_train_symbols=symbols,
+        C_dev_unseen_symbols=(),
+        D_final_unseen_symbols=(),
+        walk_forward=folds,
+        stratum_counts_before={},
+        stratum_counts_after={},
+        split_sha256="fixture-split-sha256",
+    )
+
+
+def sealed_split_fixture() -> SplitPlan:
+    return three_fold_split_fixture().seal_final_holdout("frozen-model-sha256")
+
+
+def dataset_with_final_rows_exposed() -> pd.DataFrame:
+    dataset = monotonic_fixture()
+    final_rows = dataset.loc[dataset["trade_date"].eq(dataset["trade_date"].iloc[-1])].copy()
+    final_rows["trade_date"] = "2025-02-03"
+    return pd.concat([dataset, final_rows], ignore_index=True)
 
 
 def two_day_split_fixture() -> dict:
