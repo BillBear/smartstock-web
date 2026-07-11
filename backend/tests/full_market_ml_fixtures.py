@@ -284,6 +284,102 @@ def mixed_typed_suspension_interval_fixture() -> dict:
     return values
 
 
+def evaluator_daily_fixture() -> pd.DataFrame:
+    """Two uneven cross sections that expose row-pooled ranking mistakes."""
+    rows = [
+        {
+            "trade_date": "2025-01-02",
+            "symbol": "000001",
+            "score": 0.9,
+            "relevance_grade_10d": 4,
+            "label_strong_path_10d": True,
+            "future_return_10d": 0.10,
+        }
+    ]
+    rows.extend(
+        {
+            "trade_date": "2025-01-03",
+            "symbol": f"000{index:03d}",
+            "score": float(10 - index),
+            "relevance_grade_10d": 0,
+            "label_strong_path_10d": False,
+            "future_return_10d": -0.01,
+        }
+        for index in range(1, 10)
+    )
+    return frame(rows)
+
+
+def perfect_two_day_ranking_fixture() -> pd.DataFrame:
+    rows = []
+    for trade_date in ("2025-01-02", "2025-01-03"):
+        rows.extend(
+            {
+                "trade_date": trade_date,
+                "symbol": f"{trade_date[-2:]}{index:04d}",
+                "score": float(10 - index),
+                "relevance_grade_10d": 4 if index < 5 else 0,
+                "label_strong_path_10d": index < 5,
+                "future_return_10d": 0.10 if index < 5 else -0.01,
+            }
+            for index in range(10)
+        )
+    return frame(rows)
+
+
+def calibration_fixture() -> pd.DataFrame:
+    return frame(
+        {
+            "trade_date": "2025-01-02" if index < 10 else "2025-01-03",
+            "score": (index + 1) / 21.0,
+            "label_strong_path_10d": index % 2 == 0,
+        }
+        for index in range(20)
+    )
+
+
+def bootstrap_date_fixture() -> pd.DataFrame:
+    rows = []
+    for trade_date, model_strong, baseline_strong in (
+        ("2025-01-02", True, False),
+        ("2025-01-03", False, True),
+    ):
+        rows.extend(
+            [
+                {
+                    "trade_date": trade_date,
+                    "symbol": f"{trade_date[-2:]}{index:04d}",
+                    "score": float(10 - index),
+                    "baseline_score": float(index),
+                    "label_strong_path_10d": model_strong if index == 0 else baseline_strong if index == 9 else False,
+                    "relevance_grade_10d": 4 if (model_strong and index == 0) or (baseline_strong and index == 9) else 0,
+                }
+                for index in range(10)
+            ]
+        )
+    return frame(rows)
+
+
+def overlapping_portfolio_fixture() -> pd.DataFrame:
+    rows = []
+    for trade_date, entry, exit_price in (
+        ("2025-01-02", 100.0, 110.0),
+        ("2025-01-03", 100.0, 120.0),
+    ):
+        rows.extend(
+            {
+                "trade_date": trade_date,
+                "symbol": f"{trade_date[-2:]}{index:04d}",
+                "score": float(10 - index),
+                "adjusted_next_open": entry,
+                "adjusted_exit_close": exit_price,
+                "exit_trade_date": "2025-01-06",
+            }
+            for index in range(5)
+        )
+    return frame(rows)
+
+
 def twenty_session_panel_fixture(*, final_adj_factor=None) -> dict:
     open_dates = pd.bdate_range("2025-01-02", periods=20)
     daily = []
