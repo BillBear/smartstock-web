@@ -264,15 +264,22 @@ def _assign_full_market_date_labels(shards: Mapping[str, pd.DataFrame], eligible
     bottom_rank = returns.rank(ascending=True, method="max", pct=True)
     market_median = float(returns.median())
     market_state = "weak" if market_median <= 0.0 else "normal"
-    severe = bottom_rank.le(0.10) | eligible["sl_before_tp_10d"].eq(True) | pd.to_numeric(eligible["future_limit_down_count_10d"], errors="coerce").gt(0)
+    mae = pd.to_numeric(eligible["mae_10d"], errors="coerce")
+    mfe = pd.to_numeric(eligible["mfe_10d"], errors="coerce")
+    severe = (
+        bottom_rank.le(0.10)
+        | eligible["sl_before_tp_10d"].eq(True)
+        | pd.to_numeric(eligible["future_limit_down_count_10d"], errors="coerce").gt(0)
+        | mae.le(SEVERE_DRAWDOWN + 1e-12)
+    )
     grades = pd.Series(0, index=eligible.index, dtype="int64")
     grades.loc[top_rank.le(0.50)] = 1
-    grades.loc[top_rank.le(0.20)] = 2
-    grades.loc[top_rank.le(0.10)] = 3
+    grades.loc[top_rank.le(0.20) & returns.gt(0)] = 2
+    grades.loc[top_rank.le(0.10) & mfe.ge(0.06 - 1e-12) & mae.gt(SEVERE_DRAWDOWN + 1e-12)] = 3
     # The contract is strict: an exact -6% MAE is not grade 4 despite binary-float noise.
-    grades.loc[top_rank.le(0.05) & pd.to_numeric(eligible["mae_10d"], errors="coerce").gt(STOP_LOSS + 1e-12)] = 4
+    grades.loc[top_rank.le(0.05) & mfe.ge(0.08 - 1e-12) & mae.gt(STOP_LOSS + 1e-12)] = 4
     grades.loc[severe] = 0
-    strong = grades.ge(3) & eligible["tp_before_sl_10d"].eq(True) & ~eligible["path_ambiguous_10d"].eq(True) & ~severe
+    strong = grades.ge(3)
     industry_medians = eligible.groupby("industry_l1", dropna=True)["future_return_10d"].median()
     for row_index, row in eligible.iterrows():
         shard = shards[str(row["_shard_key"])]

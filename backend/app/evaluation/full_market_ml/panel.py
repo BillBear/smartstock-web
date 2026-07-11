@@ -42,7 +42,7 @@ FUTURE_EXECUTION_COLUMNS = (
     "next_adjusted_open",
     "next_valid_ohlc",
     "next_is_suspended",
-    "next_at_up_limit",
+    "next_at_up_limit_open",
     "entry_tradeable",
 )
 
@@ -169,7 +169,7 @@ def _build_base_panel(
         & panel["adj_factor"].gt(0)
     )
     limits = _deduplicate_market_rows(_frame(frames, "stk_limit"), "stk_limit")
-    panel["at_up_limit"] = _up_limit_flags(panel, limits)
+    panel["at_up_limit"], panel["at_down_limit"], panel["at_up_limit_open"] = _limit_flags(panel, limits)
     panel["next_open_date"] = _next_open_dates(panel, _frame(frames, "trade_cal"))
     return panel.sort_values(["symbol", "trade_date"], kind="stable").reset_index(drop=True)
 
@@ -180,19 +180,19 @@ def _finalize_symbol_panel(panel: pd.DataFrame) -> pd.DataFrame:
     panel = panel.sort_values(["symbol", "trade_date"], kind="stable").reset_index(drop=True).copy()
     grouped = panel.groupby("symbol", sort=False)
     panel["median_amount_20d"] = grouped["amount_cny"].transform(lambda values: values.rolling(20, min_periods=20).median())
-    next_session = panel[["symbol", "trade_date", "adjusted_open", "valid_ohlc", "is_suspended", "at_up_limit"]].rename(
+    next_session = panel[["symbol", "trade_date", "adjusted_open", "valid_ohlc", "is_suspended", "at_up_limit_open"]].rename(
         columns={
             "trade_date": "next_open_date",
             "adjusted_open": "next_adjusted_open",
             "valid_ohlc": "next_valid_ohlc",
             "is_suspended": "next_is_suspended",
-            "at_up_limit": "next_at_up_limit",
+            "at_up_limit_open": "next_at_up_limit_open",
         }
     )
     panel = panel.merge(next_session, on=["symbol", "next_open_date"], how="left", validate="many_to_one")
     next_valid = panel["next_valid_ohlc"].eq(True)
     next_suspended = panel["next_is_suspended"].eq(True) | panel["next_is_suspended"].isna()
-    next_at_up_limit = panel["next_at_up_limit"].eq(True) | panel["next_at_up_limit"].isna()
+    next_at_up_limit = panel["next_at_up_limit_open"].eq(True) | panel["next_at_up_limit_open"].isna()
     panel["entry_tradeable"] = next_valid & ~next_suspended & ~next_at_up_limit & panel["next_adjusted_open"].notna()
     panel["eligible_signal_day"] = (
         panel["listing_age_trade_days"].ge(20)
@@ -351,14 +351,20 @@ def _listing_ages(panel: pd.DataFrame, stock_basic: pd.DataFrame, calendar_looku
     return ages.fillna(0).astype("int64")
 
 
-def _up_limit_flags(panel: pd.DataFrame, limits: pd.DataFrame) -> pd.Series:
-    if limits.empty or "up_limit" not in limits:
-        return pd.Series(False, index=panel.index)
+def _limit_flags(panel: pd.DataFrame, limits: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Series]:
+    if limits.empty:
+        empty = pd.Series(False, index=panel.index)
+        return empty, empty.copy(), empty.copy()
     limits = limits.copy()
     limits["symbol"] = _symbols(limits)
     limits["trade_date"] = limits["trade_date"].map(_date_text)
-    values = {(symbol, trade_date): up for symbol, trade_date, up in zip(limits.symbol, limits.trade_date, pd.to_numeric(limits.up_limit, errors="coerce"))}
-    return pd.Series([pd.notna(values.get((symbol, trade_date))) and opening >= values[(symbol, trade_date)] for symbol, trade_date, opening in zip(panel.symbol, panel.trade_date, panel.open)], index=panel.index)
+    up_limits = dict(zip(zip(limits.symbol, limits.trade_date), pd.to_numeric(limits.get("up_limit"), errors="coerce")))
+    down_limits = dict(zip(zip(limits.symbol, limits.trade_date), pd.to_numeric(limits.get("down_limit"), errors="coerce")))
+    keys = list(zip(panel.symbol, panel.trade_date))
+    up_close = pd.Series([pd.notna(up_limits.get(key)) and close >= up_limits[key] for key, close in zip(keys, panel.close)], index=panel.index)
+    down_close = pd.Series([pd.notna(down_limits.get(key)) and close <= down_limits[key] for key, close in zip(keys, panel.close)], index=panel.index)
+    up_open = pd.Series([pd.notna(up_limits.get(key)) and opening >= up_limits[key] for key, opening in zip(keys, panel.open)], index=panel.index)
+    return up_close, down_close, up_open
 
 
 def _load_static_frames(root: Path, manifest: CollectionManifest) -> dict[str, pd.DataFrame]:

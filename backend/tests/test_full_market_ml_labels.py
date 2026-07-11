@@ -138,6 +138,39 @@ class FullMarketMLLabelTests(FullMarketMLTestCase):
         self.assertEqual(row["future_limit_down_count_10d"], 1)
         self.assertTrue(bool(row["label_severe_negative_10d"]))
 
+    def test_mae_at_or_below_negative_eight_percent_is_severe_negative(self):
+        panels = []
+        for index in range(20):
+            panel = next_open_gap_fixture(signal_close=10, next_open=20, day10_close=20.0 * (0.80 + index * 0.02))
+            panel["symbol"] = f"{index + 1:06d}"
+            panel.loc[1:, "adjusted_low"] = 19.0
+            panels.append(panel)
+        panels[-1].loc[1, ["adjusted_high", "adjusted_low"]] = [22.0, 18.4]
+
+        labeled = pd.concat(self._aggregate(pd.concat(panels, ignore_index=True)).values(), ignore_index=True)
+        top = labeled[(labeled["trade_date"] == "2025-01-02") & (labeled["symbol"] == "000020")].iloc[0]
+
+        self.assertAlmostEqual(top["mae_10d"], -0.08)
+        self.assertTrue(bool(top["label_severe_negative_10d"]))
+        self.assertEqual(top["relevance_grade_10d"], 0)
+
+    def test_grade_thresholds_require_mfe_and_strong_equals_grade_three_or_higher(self):
+        returns = [-0.20, -0.18, -0.16, -0.14, -0.12, -0.10, -0.08, -0.06, -0.04, -0.02, 0.00, 0.01, 0.02, 0.03, 0.04, 0.045, 0.05, 0.05, 0.06, 0.07]
+        panels = []
+        for index, future_return in enumerate(returns):
+            panel = next_open_gap_fixture(signal_close=10, next_open=20, day10_close=20.0 * (1.0 + future_return))
+            panel["symbol"] = f"{index + 1:06d}"
+            panel.loc[1:, "adjusted_low"] = 19.0
+            panels.append(panel)
+
+        labeled = pd.concat(self._aggregate(pd.concat(panels, ignore_index=True)).values(), ignore_index=True)
+        signal = labeled.query("trade_date == '2025-01-02'").set_index("symbol")
+
+        self.assertEqual(signal.loc["000020", "relevance_grade_10d"], 3)  # Top 5%, MFE 7%: below grade-4 8% gate.
+        self.assertTrue(bool(signal.loc["000020", "label_strong_path_10d"]))
+        self.assertEqual(signal.loc["000019", "relevance_grade_10d"], 3)  # Top 10%, MFE 6%.
+        self.assertEqual(signal.loc["000018", "relevance_grade_10d"], 2)  # Top 20%, positive, but MFE below 6%.
+
     def test_percent_rank_grades_use_top5_top10_top20_and_median_bands(self):
         panels = []
         for index in range(20):

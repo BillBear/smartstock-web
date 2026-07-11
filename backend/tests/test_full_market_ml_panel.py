@@ -192,6 +192,26 @@ class FullMarketMLPanelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "conflicting duplicate stk_limit"):
             build_panel_from_frames(conflicting)
 
+    def test_end_of_day_limit_flags_use_close_while_entry_uses_open_flag(self):
+        fixtures = two_day_split_fixture()
+        fixtures["daily"].loc[0, ["open", "high", "low", "close"]] = [10.0, 11.0, 9.0, 11.0]
+        fixtures["daily"].loc[1, ["open", "high", "low", "close"]] = [10.0, 11.0, 9.0, 9.0]
+        fixtures["stk_limit"] = frame(
+            [
+                {"ts_code": "000001.SZ", "trade_date": "20250102", "up_limit": 11.0, "down_limit": 9.0},
+                {"ts_code": "000001.SZ", "trade_date": "20250103", "up_limit": 11.0, "down_limit": 9.0},
+            ]
+        )
+
+        panel = build_panel_from_frames(fixtures)
+        up_close = panel.loc[panel.trade_date == "2025-01-02"].iloc[0]
+        down_close = panel.loc[panel.trade_date == "2025-01-03"].iloc[0]
+
+        self.assertTrue(bool(up_close["at_up_limit"]))
+        self.assertFalse(bool(up_close["at_up_limit_open"]))
+        self.assertTrue(bool(down_close["at_down_limit"]))
+        self.assertFalse(bool(down_close["at_up_limit_open"]))
+
     def test_mixed_typed_dates_normalize_before_suspension_interval_comparison(self):
         panel = build_panel_from_frames(mixed_typed_suspension_interval_fixture())
 
