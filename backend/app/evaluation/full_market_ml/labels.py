@@ -36,7 +36,8 @@ def build_forward_labels(config: FullMarketMLConfig, panel_shard: pd.DataFrame) 
         values: list[dict[str, Any]] = []
         for _, rows in labeled.groupby("symbol", sort=False):
             symbol_rows = rows.reset_index(drop=True)
-            values.extend(_forward_outcome(symbol_rows, offset, horizon) for offset in range(len(symbol_rows)))
+            date_index = {str(row.trade_date): row for row in symbol_rows.itertuples(index=False)}
+            values.extend(_forward_outcome(symbol_rows, offset, horizon, date_index) for offset in range(len(symbol_rows)))
         outcomes = pd.DataFrame(values, index=labeled.index)
         for column in outcomes:
             labeled[column] = outcomes[column]
@@ -164,9 +165,9 @@ def _normalize_panel(panel_shard: pd.DataFrame) -> pd.DataFrame:
     return panel.sort_values(["symbol", "trade_date"], kind="stable").reset_index(drop=True)
 
 
-def _forward_outcome(rows: pd.DataFrame, offset: int, horizon: int) -> dict[str, Any]:
+def _forward_outcome(rows: pd.DataFrame, offset: int, horizon: int, date_index: dict[str, Any]) -> dict[str, Any]:
     prefix = f"{horizon}d"
-    window = _calendar_exact_window(rows, offset, horizon)
+    window = _calendar_exact_window(rows, offset, horizon, date_index)
     available = window is not None and _valid_adjusted_window(window)
     current = rows.iloc[offset]
     eligible = bool(current["eligible_signal_day"] and current["entry_tradeable"] and available)
@@ -195,14 +196,13 @@ def _forward_outcome(rows: pd.DataFrame, offset: int, horizon: int) -> dict[str,
     }
 
 
-def _calendar_exact_window(rows: pd.DataFrame, offset: int, horizon: int) -> pd.DataFrame | None:
-    by_date = {str(row.trade_date): row for row in rows.itertuples(index=False)}
+def _calendar_exact_window(rows: pd.DataFrame, offset: int, horizon: int, date_index: dict[str, Any]) -> pd.DataFrame | None:
     expected_date = rows.iloc[offset]["next_open_date"]
     window = []
     for step in range(horizon):
         if pd.isna(expected_date) or not expected_date:
             return None
-        row = by_date.get(str(expected_date))
+        row = date_index.get(str(expected_date))
         if row is None:
             return None
         window.append(row._asdict())
