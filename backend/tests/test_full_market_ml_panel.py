@@ -67,6 +67,42 @@ class FullMarketMLPanelTests(unittest.TestCase):
                     replace(config, dates=replace(config.dates, signal_start="2025-01-02", signal_end="2025-01-03")), root, "tampered"
                 )
 
+    def test_full_build_blocks_tampered_optional_manifest_partition(self):
+        config = load_full_market_ml_config(Path(__file__).parents[1] / "config" / "ml_full_market_v1.toml")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixtures = two_day_split_fixture()
+            fixtures["moneyflow"] = frame(
+                [{"ts_code": "000001.SZ", "trade_date": "20250102", "net_mf_amount": 1.0}]
+            )
+            manifest = self._write_raw_fixture(root, config, "tampered-optional", fixtures)
+            moneyflow_path = root / manifest.partition("moneyflow", "20250102").path
+            table = pq.ParquetFile(moneyflow_path).read()
+            pq.write_table(table.append_column("tampered", pa.array([True] * table.num_rows)), moneyflow_path)
+
+            with self.assertRaisesRegex(ValueError, "manifest partition integrity"):
+                build_full_market_panel(
+                    replace(config, dates=replace(config.dates, signal_start="2025-01-02", signal_end="2025-01-03")),
+                    root,
+                    "tampered-optional",
+                )
+
+    def test_full_build_excludes_failed_optional_manifest_partition(self):
+        config = load_full_market_ml_config(Path(__file__).parents[1] / "config" / "ml_full_market_v1.toml")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = self._write_raw_fixture(root, config, "failed-optional", two_day_split_fixture())
+            manifest.partitions.append(
+                PartitionRecord("moneyflow", "20250102", "raw/endpoint=moneyflow/trade_date=20250102/data.parquet", 0, "", "", "failed")
+            )
+            save_manifest(root, manifest)
+
+            result = build_full_market_panel(
+                replace(config, dates=replace(config.dates, signal_start="2025-01-02", signal_end="2025-01-03")), root, "failed-optional"
+            )
+
+            self.assertEqual(result.row_count, 2)
+
     def test_suspend_interval_uses_suspend_and_resume_dates(self):
         panel = build_panel_from_frames(suspension_interval_fixture())
 

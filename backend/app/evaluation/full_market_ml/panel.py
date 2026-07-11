@@ -61,6 +61,7 @@ def build_full_market_panel(config: FullMarketMLConfig, runtime_root: str | Path
     manifest = load_manifest(root, stage, config.sha256, config.collection.request_pacing_seconds)
     if not manifest.ready:
         raise ValueError("collection manifest is not ready for panel construction")
+    _validate_ready_manifest_partitions(root, manifest)
 
     output = root / "panel" / f"stage={stage}"
     if output.exists():
@@ -100,6 +101,12 @@ def build_historical_universe(stock_basic: pd.DataFrame, trade_dates: Iterable[s
         included = basic[(basic["list_date"] <= trade_date) & ((basic["delist_date"] == "") | (basic["delist_date"] >= trade_date))]
         rows.extend({"trade_date": trade_date, "symbol": symbol} for symbol in included["symbol"].tolist())
     return pd.DataFrame(rows, columns=["trade_date", "symbol"])
+
+
+def _validate_ready_manifest_partitions(root: Path, manifest: CollectionManifest) -> None:
+    for record in manifest.partitions:
+        if record.status != "failed":
+            validate_partition(root, record)
 
 
 def build_panel_from_frames(
