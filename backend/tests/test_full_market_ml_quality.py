@@ -74,7 +74,8 @@ class FullMarketMLQualityTests(unittest.TestCase):
         report = audit_panel_quality(self.config, panel, valid_manifest(self.config))
 
         self.assertIn("listing_coverage_incomplete", report.blocking_codes)
-        self.assertIn("industry_coverage_incomplete", report.blocking_codes)
+        self.assertNotIn("industry_coverage_incomplete", report.blocking_codes)
+        self.assertIn("industry_relative", report.disabled_feature_groups)
         self.assertIn("board_coverage_incomplete", report.blocking_codes)
         self.assertIn("insufficient_training_samples", report.blocking_codes)
         self.assertEqual(report.sample_estimates["eligible_signal_rows"], 0)

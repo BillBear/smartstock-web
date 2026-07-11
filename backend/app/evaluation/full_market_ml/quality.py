@@ -141,9 +141,9 @@ def audit_panel_quality(config: FullMarketMLConfig, panel_dataset: pd.DataFrame,
         exclusions.add("duplicate:trade_date,symbol")
 
     missingness = {column: _missing_ratio(panel[column]) for column in REQUIRED_VALUE_COLUMNS}
-    required_value_columns = tuple(
-        column for column in REQUIRED_VALUE_COLUMNS if column != "industry_l1" or "industry_relative" not in disabled_groups
-    )
+    # Industry membership is historical-but-optional: preserve missing flags and
+    # disable the group when coverage is absent instead of blocking core training.
+    required_value_columns = tuple(column for column in REQUIRED_VALUE_COLUMNS if column != "industry_l1")
     if any(missingness[column] > 0 for column in required_value_columns):
         blocking_codes.add("required_feature_missingness")
         exclusions.update(f"missing:{column}" for column in required_value_columns if missingness[column] > 0)
@@ -202,9 +202,10 @@ def audit_panel_quality(config: FullMarketMLConfig, panel_dataset: pd.DataFrame,
         exclusions.update(f"daily_board_missing:{trade_date}:{board}" for trade_date in incomplete_board_dates for board in REQUIRED_BOARDS if per_date_board_coverage[trade_date][board] <= 0.0)
 
     industry_coverage = _non_missing_ratio(panel["industry_l1"])
-    if "industry_relative" not in disabled_groups and industry_coverage < 1.0:
-        blocking_codes.add("industry_coverage_incomplete")
-        exclusions.add("industry_missing")
+    if industry_coverage <= 0.0:
+        disabled_groups.add("industry_relative")
+    elif industry_coverage < 1.0:
+        exclusions.add("industry_missing_flagged")
 
     moneyflow_coverage = _moneyflow_coverage(panel)
     if moneyflow_coverage is None or moneyflow_coverage < OPTIONAL_MONEYFLOW_MINIMUM_COVERAGE:
