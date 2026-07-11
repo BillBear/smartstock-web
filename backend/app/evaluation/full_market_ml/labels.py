@@ -5,6 +5,7 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from .config import FullMarketMLConfig
@@ -36,8 +37,8 @@ def build_forward_labels(config: FullMarketMLConfig, panel_shard: pd.DataFrame) 
         values: list[dict[str, Any]] = []
         for _, rows in labeled.groupby("symbol", sort=False):
             symbol_rows = rows.reset_index(drop=True)
-            date_index = {str(row.trade_date): row for row in symbol_rows.itertuples(index=False)}
-            values.extend(_forward_outcome(symbol_rows, offset, horizon, date_index) for offset in range(len(symbol_rows)))
+            data = _symbol_arrays(symbol_rows)
+            values.extend(_forward_outcome(data, offset, horizon) for offset in range(len(symbol_rows)))
         outcomes = pd.DataFrame(values, index=labeled.index)
         for column in outcomes:
             labeled[column] = outcomes[column]
@@ -165,12 +166,27 @@ def _normalize_panel(panel_shard: pd.DataFrame) -> pd.DataFrame:
     return panel.sort_values(["symbol", "trade_date"], kind="stable").reset_index(drop=True)
 
 
-def _forward_outcome(rows: pd.DataFrame, offset: int, horizon: int, date_index: dict[str, Any]) -> dict[str, Any]:
+def _symbol_arrays(rows: pd.DataFrame) -> dict[str, Any]:
+    dates = rows["trade_date"].astype(str).tolist()
+    date_index = {value: index for index, value in enumerate(dates)}
+    return {
+        "next_index": np.asarray([date_index.get(str(value), -1) for value in rows["next_open_date"]], dtype=np.int64),
+        "open": rows["adjusted_open"].to_numpy(dtype=float),
+        "high": rows["adjusted_high"].to_numpy(dtype=float),
+        "low": rows["adjusted_low"].to_numpy(dtype=float),
+        "close": rows["adjusted_close"].to_numpy(dtype=float),
+        "up": rows["at_up_limit"].to_numpy(dtype=bool),
+        "down": rows["at_down_limit"].to_numpy(dtype=bool),
+        "eligible": rows["eligible_signal_day"].to_numpy(dtype=bool),
+        "tradeable": rows["entry_tradeable"].to_numpy(dtype=bool),
+    }
+
+
+def _forward_outcome(data: dict[str, Any], offset: int, horizon: int) -> dict[str, Any]:
     prefix = f"{horizon}d"
-    window = _calendar_exact_window(rows, offset, horizon, date_index)
-    available = window is not None and _valid_adjusted_window(window)
-    current = rows.iloc[offset]
-    eligible = bool(current["eligible_signal_day"] and current["entry_tradeable"] and available)
+    indices = _calendar_exact_indices(data["next_index"], offset, horizon)
+    available = indices is not None and _valid_adjusted_indices(data, indices)
+    eligible = bool(data["eligible"][offset] and data["tradeable"][offset] and available)
     base = {f"horizon_available_{prefix}": bool(available), f"eligible_for_training_{prefix}": bool(eligible)}
     if not available:
         return {
@@ -184,44 +200,40 @@ def _forward_outcome(rows: pd.DataFrame, offset: int, horizon: int, date_index: 
             f"sl_before_tp_{prefix}": pd.NA,
             f"path_ambiguous_{prefix}": pd.NA,
         }
-    entry = float(window.iloc[0]["adjusted_open"])
+    entry = float(data["open"][indices[0]])
     return {
         **base,
-        f"future_return_{prefix}": float(window.iloc[-1]["adjusted_close"]) / entry - 1.0,
-        f"mfe_{prefix}": float(window["adjusted_high"].max()) / entry - 1.0,
-        f"mae_{prefix}": float(window["adjusted_low"].min()) / entry - 1.0,
-        f"future_limit_up_count_{prefix}": int(window["at_up_limit"].sum()),
-        f"future_limit_down_count_{prefix}": int(window["at_down_limit"].sum()),
-        **_path_flags(window, entry, prefix),
+        f"future_return_{prefix}": float(data["close"][indices[-1]]) / entry - 1.0,
+        f"mfe_{prefix}": float(data["high"][indices].max()) / entry - 1.0,
+        f"mae_{prefix}": float(data["low"][indices].min()) / entry - 1.0,
+        f"future_limit_up_count_{prefix}": int(data["up"][indices].sum()),
+        f"future_limit_down_count_{prefix}": int(data["down"][indices].sum()),
+        **_path_flags(data, indices, entry, prefix),
     }
 
 
-def _calendar_exact_window(rows: pd.DataFrame, offset: int, horizon: int, date_index: dict[str, Any]) -> pd.DataFrame | None:
-    expected_date = rows.iloc[offset]["next_open_date"]
-    window = []
+def _calendar_exact_indices(next_index: np.ndarray, offset: int, horizon: int) -> np.ndarray | None:
+    expected = int(next_index[offset])
+    indices: list[int] = []
     for step in range(horizon):
-        if pd.isna(expected_date) or not expected_date:
+        if expected < 0:
             return None
-        row = date_index.get(str(expected_date))
-        if row is None:
-            return None
-        window.append(row._asdict())
+        indices.append(expected)
         if step < horizon - 1:
-            expected_date = row.next_open_date
-    return pd.DataFrame(window)
+            expected = int(next_index[expected])
+    return np.asarray(indices, dtype=np.int64)
 
 
-def _valid_adjusted_window(window: pd.DataFrame) -> bool:
-    values = window[["adjusted_open", "adjusted_high", "adjusted_low", "adjusted_close"]]
-    return bool(values.notna().all().all() and values.gt(0).all().all())
+def _valid_adjusted_indices(data: dict[str, Any], indices: np.ndarray) -> bool:
+    return bool(all(np.isfinite(data[name][indices]).all() and (data[name][indices] > 0).all() for name in ("open", "high", "low", "close")))
 
 
-def _path_flags(window: pd.DataFrame, entry: float, prefix: str) -> dict[str, Any]:
+def _path_flags(data: dict[str, Any], indices: np.ndarray, entry: float, prefix: str) -> dict[str, Any]:
     take_profit_price = entry * (1.0 + TAKE_PROFIT)
     stop_loss_price = entry * (1.0 + STOP_LOSS)
-    for row in window.itertuples(index=False):
-        hit_tp = float(row.adjusted_high) >= take_profit_price
-        hit_sl = float(row.adjusted_low) <= stop_loss_price
+    for index in indices:
+        hit_tp = float(data["high"][index]) >= take_profit_price
+        hit_sl = float(data["low"][index]) <= stop_loss_price
         if hit_tp and hit_sl:
             return {f"tp_before_sl_{prefix}": False, f"sl_before_tp_{prefix}": False, f"path_ambiguous_{prefix}": True}
         if hit_tp:
