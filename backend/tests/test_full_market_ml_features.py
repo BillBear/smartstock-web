@@ -9,7 +9,9 @@ from app.evaluation.full_market_ml.features import (
     FEATURE_NAMES,
     FeatureLeakageError,
     assert_leak_free_schema,
+    build_cross_section_features,
     build_features_for_date,
+    build_time_series_features,
 )
 from tests.test_full_market_ml_collector import FullMarketMLTestCase
 
@@ -40,9 +42,25 @@ class FullMarketMLFeatureTests(FullMarketMLTestCase):
         pd.testing.assert_frame_equal(left[FEATURE_NAMES], right[FEATURE_NAMES])
 
     def test_next_day_tradeability_is_rejected_from_feature_schema(self):
-        for name in ("entry_tradeable", "next_adjusted_open", "future_return_10d", "label_strong_path_10d", "relevance_grade_10d", "tp_before_sl_10d", "sl_before_tp_10d", "path_ambiguous_10d", "return_t+1", "entry_price_t_plus_1"):
+        for name in (
+            "entry_tradeable", "eligible_for_training", "next_adjusted_open", "next_at_up_limit_open",
+            "future_return_10d", "future_limit_down_count_10d", "horizon_available_10d",
+            "mfe_10d", "mae_10d", "market_median_future_return_10d",
+            "industry_median_future_return_10d", "market_state_10d", "label_strong_path_10d",
+            "label_severe_negative_10d", "relevance_grade_10d", "tp_before_sl_10d",
+            "sl_before_tp_10d", "path_ambiguous_10d", "return_t+1", "entry_price_t_plus_1",
+        ):
             with self.subTest(name=name), self.assertRaises(FeatureLeakageError):
                 assert_leak_free_schema(["adjusted_return_20d_rank", name])
+
+    def test_supplied_model_schema_is_checked_before_features_are_returned(self):
+        with self.assertRaises(FeatureLeakageError):
+            build_features_for_date(
+                self.config,
+                feature_fixture(),
+                "2025-01-10",
+                feature_schema=["adjusted_return_20d_rank", "future_return_10d"],
+            )
 
     def test_panel_execution_metadata_is_not_a_model_feature(self):
         panel = feature_fixture()
@@ -70,6 +88,27 @@ class FullMarketMLFeatureTests(FullMarketMLTestCase):
         self.assertIn("adjusted_return_20d_rank", matrix.columns)
         self.assertIn("adjusted_return_20d_robust_z", matrix.columns)
         self.assertTrue(matrix["adjusted_return_20d_rank"].between(0, 1).all())
+
+    def test_cross_section_ranks_are_aggregated_across_all_supplied_shards(self):
+        time_series = build_time_series_features(self.config, feature_fixture())
+        shards = {
+            "left": time_series[time_series.symbol.isin(["000001", "000002"])].copy(),
+            "right": time_series[time_series.symbol.isin(["000003", "000004"])].copy(),
+        }
+
+        featured = build_cross_section_features(self.config, shards)
+        rows = pd.concat(featured.values(), ignore_index=True)
+        signal_rows = rows[rows.trade_date.eq("2025-01-10")].sort_values("symbol")
+
+        self.assertEqual(signal_rows["adjusted_return_20d_rank"].tolist(), [0.25, 0.5, 0.75, 1.0])
+
+    def test_missing_industry_keeps_relative_features_null_and_sets_availability_flag(self):
+        panel = feature_fixture().drop(columns="industry_l1")
+
+        matrix = build_features_for_date(self.config, panel, "2025-01-10")
+
+        self.assertTrue(matrix["industry_available_flag"].eq(0).all())
+        self.assertTrue(matrix["industry_return_20d_rank"].isna().all())
 
 
 if __name__ == "__main__":

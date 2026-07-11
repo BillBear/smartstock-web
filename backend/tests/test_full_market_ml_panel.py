@@ -106,6 +106,34 @@ class FullMarketMLPanelTests(unittest.TestCase):
 
             self.assertEqual(result.row_count, 2)
 
+    def test_full_build_joins_daily_basic_and_moneyflow_raw_fields_by_symbol_and_date(self):
+        config = load_full_market_ml_config(Path(__file__).parents[1] / "config" / "ml_full_market_v1.toml")
+        fixtures = two_day_split_fixture()
+        fixtures["daily_basic"] = frame(
+            [
+                {"ts_code": "000001.SZ", "trade_date": "20250102", "turnover_rate": 2.5, "total_mv": 100.0, "circ_mv": 80.0, "pe": 10.0, "pb": 1.5, "ps": 2.0},
+                {"ts_code": "000001.SZ", "trade_date": "20250103", "turnover_rate": 3.0, "total_mv": 110.0, "circ_mv": 85.0, "pe": 11.0, "pb": 1.6, "ps": 2.1},
+            ]
+        )
+        fixtures["moneyflow"] = frame(
+            [
+                {"ts_code": "000001.SZ", "trade_date": "20250102", "net_mf_amount": 12.0, "net_mf_vol": 3.0},
+                {"ts_code": "000001.SZ", "trade_date": "20250103", "net_mf_amount": -4.0, "net_mf_vol": -1.0},
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_raw_fixture(root, config, "joined-raw", fixtures)
+            result = build_full_market_panel(
+                replace(config, dates=replace(config.dates, signal_start="2025-01-02", signal_end="2025-01-03")), root, "joined-raw"
+            )
+            panel = self._read_shards(result.shard_paths)
+            first = panel.loc[panel.trade_date.eq("2025-01-02")].iloc[0]
+            self.assertEqual(first["turnover_rate"], 2.5)
+            self.assertEqual(first["total_mv"], 100.0)
+            self.assertEqual(first["net_mf_amount"], 12.0)
+            self.assertEqual(first["net_mf_vol"], 3.0)
+
     def test_missing_or_nonpositive_adj_factor_invalidates_adjusted_rows_and_prior_entry(self):
         for name, factor in (("missing", None), ("zero", 0.0)):
             with self.subTest(name=name):

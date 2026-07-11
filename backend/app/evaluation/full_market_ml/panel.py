@@ -36,6 +36,14 @@ ALLOWED_FEATURE_COLUMNS = (
     "valid_ohlc",
     "at_up_limit",
     "median_amount_20d",
+    "turnover_rate",
+    "total_mv",
+    "circ_mv",
+    "pe",
+    "pb",
+    "ps",
+    "net_mf_amount",
+    "net_mf_vol",
 )
 FUTURE_EXECUTION_COLUMNS = (
     "next_open_date",
@@ -140,6 +148,18 @@ def _build_base_panel(
     daily = daily.merge(historical_universe, on=["symbol", "trade_date"], how="inner")
     if daily.empty:
         return pd.DataFrame()
+    daily = _join_daily_endpoint_fields(
+        daily,
+        _frame(frames, "daily_basic"),
+        "daily_basic",
+        ("turnover_rate", "total_mv", "circ_mv", "pe", "pb", "ps"),
+    )
+    daily = _join_daily_endpoint_fields(
+        daily,
+        _frame(frames, "moneyflow"),
+        "moneyflow",
+        ("net_mf_amount", "net_mf_vol"),
+    )
     adjustments = _deduplicate_market_rows(_frame(frames, "adj_factor"), "adj_factor")
     if not adjustments.empty:
         adjustments["symbol"] = _symbols(adjustments)
@@ -217,6 +237,24 @@ def _deduplicate_market_rows(frame: pd.DataFrame, endpoint: str) -> pd.DataFrame
             raise ValueError(f"conflicting duplicate {endpoint} rows for trade_date,symbol")
         retained.append(rows.iloc[-1])
     return pd.DataFrame(retained).drop(columns=["symbol"], errors="ignore")
+
+
+def _join_daily_endpoint_fields(
+    daily: pd.DataFrame, endpoint_rows: pd.DataFrame, endpoint: str, fields: tuple[str, ...]
+) -> pd.DataFrame:
+    """Left join raw same-day endpoint values; absent optional rows remain explicit nulls."""
+    values = _deduplicate_market_rows(endpoint_rows, endpoint)
+    if values.empty:
+        result = daily.copy()
+        for field in fields:
+            result[field] = pd.NA
+        return result
+    values["symbol"] = _symbols(values)
+    values["trade_date"] = values["trade_date"].map(_date_text)
+    for field in fields:
+        if field not in values:
+            values[field] = pd.NA
+    return daily.merge(values[["symbol", "trade_date", *fields]], on=["symbol", "trade_date"], how="left", validate="many_to_one")
 
 
 def _row_signature(row: pd.Series) -> str:
@@ -376,7 +414,7 @@ def _load_static_frames(root: Path, manifest: CollectionManifest) -> dict[str, p
 
 def _load_daily_frames(root: Path, manifest: CollectionManifest, trade_date: str) -> dict[str, pd.DataFrame]:
     compact = trade_date.replace("-", "")
-    endpoints = {"daily", "adj_factor", "stk_limit"}
+    endpoints = {"daily", "daily_basic", "adj_factor", "stk_limit", "moneyflow"}
     return {
         endpoint: _read_partitions(root, [record for record in manifest.partitions if record.endpoint == endpoint and record.key == compact])
         for endpoint in endpoints

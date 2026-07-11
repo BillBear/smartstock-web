@@ -20,11 +20,11 @@ This read-only research contract contains only signal-day and historical inputs.
 | `price_to_sma_10d` | trend | adjusted_close / mean(adjusted_close, 10) - 1 | daily+adj_factor | adjusted | 10 | null | time_series |
 | `price_to_sma_20d` | trend | adjusted_close / mean(adjusted_close, 20) - 1 | daily+adj_factor | adjusted | 20 | null | time_series |
 | `price_to_sma_60d` | trend | adjusted_close / mean(adjusted_close, 60) - 1 | daily+adj_factor | adjusted | 60 | null | time_series |
-| `sma_5d_to_sma_20d` | trend | mean(close, 5) / mean(close, 20) - 1 | daily+adj_factor | adjusted | 20 | null | time_series |
-| `sma_20d_to_sma_60d` | trend | mean(close, 20) / mean(close, 60) - 1 | daily+adj_factor | adjusted | 60 | null | time_series |
+| `sma_5d_to_sma_20d` | trend | mean(adjusted_close, 5) / mean(adjusted_close, 20) - 1 | daily+adj_factor | adjusted | 20 | null | time_series |
+| `sma_20d_to_sma_60d` | trend | mean(adjusted_close, 20) / mean(adjusted_close, 60) - 1 | daily+adj_factor | adjusted | 60 | null | time_series |
 | `price_to_ema_12d` | trend | adjusted_close / ewm(adjusted_close, 12) - 1 | daily+adj_factor | adjusted | 12 | null | time_series |
 | `price_to_ema_26d` | trend | adjusted_close / ewm(adjusted_close, 26) - 1 | daily+adj_factor | adjusted | 26 | null | time_series |
-| `macd_line` | trend | ewm(close, 12) - ewm(close, 26) | daily+adj_factor | adjusted | 26 | null | time_series |
+| `macd_line` | trend | ewm(adjusted_close, 12) - ewm(adjusted_close, 26) | daily+adj_factor | adjusted | 26 | null | time_series |
 | `macd_signal_gap` | trend | macd_line - ewm(macd_line, 9) | daily+adj_factor | adjusted | 34 | null | time_series |
 | `realized_volatility_5d` | volatility | std(return_1d, 5) | daily+adj_factor | adjusted | 6 | null | time_series |
 | `realized_volatility_10d` | volatility | std(return_1d, 10) | daily+adj_factor | adjusted | 11 | null | time_series |
@@ -58,8 +58,8 @@ This read-only research contract contains only signal-day and historical inputs.
 | `pb_missing` | valuation_liquidity | isnull(pb) | daily_basic | raw | 0 | 1 if absent | time_series |
 | `ps` | valuation_liquidity | ps | daily_basic | raw | 0 | null+flag | time_series |
 | `ps_missing` | valuation_liquidity | isnull(ps) | daily_basic | raw | 0 | 1 if absent | time_series |
-| `main_net_inflow_ratio` | moneyflow | main_net_inflow_ratio | moneyflow | raw | 0 | null+flag | time_series |
-| `main_net_inflow_ratio_missing` | moneyflow | isnull(main_net_inflow_ratio) | moneyflow | raw | 0 | 1 if absent | time_series |
+| `main_net_inflow_ratio` | moneyflow | net_mf_amount / amount_cny | moneyflow+daily | raw | 0 | null+flag | time_series |
+| `main_net_inflow_ratio_missing` | moneyflow | isnull(net_mf_amount) or amount_cny <= 0 | moneyflow+daily | raw | 0 | 1 if absent | time_series |
 | `net_mf_amount_log` | moneyflow | signed_log1p(net_mf_amount) | moneyflow | raw | 0 | null+flag | time_series |
 | `net_mf_amount_missing` | moneyflow | isnull(net_mf_amount) | moneyflow | raw | 0 | 1 if absent | time_series |
 | `net_mf_amount_ratio_20d` | moneyflow | net_mf_amount / mean(abs(net_mf_amount), 20) | moneyflow | raw | 20 | null+flag | time_series |

@@ -57,3 +57,43 @@ no matches.
 
 This task defines and verifies a read-only feature contract only. Integration
 with shard orchestration and later model training remains outside this task.
+
+## Review Revision
+
+The Task7 review found that the original schema gate did not reject every
+known label/execution field, and that daily ranks could be computed from one
+symbol shard instead of the complete market date. It also found that the panel
+did not carry the collected `daily_basic` and `moneyflow` endpoint values into
+feature input rows.
+
+TDD RED command:
+
+```bash
+cd backend
+PYTHONWARNINGS=error .venv-ml/bin/python -m unittest \
+  tests.test_full_market_ml_features tests.test_full_market_ml_panel -v
+```
+
+Before the revision, the new assertions failed because the denylist accepted
+multiple forward-label names, supplied schemas were not accepted, a mapping of
+shards was unsupported, missing `industry_l1` raised `KeyError`, and panel
+output omitted raw endpoint values.
+
+The revision adds a supplied-schema gate, a per-date all-shard aggregation API,
+null industry-relative features with an availability flag, and raw joins for
+`daily_basic` and `moneyflow`. The feature dictionary was regenerated so its
+trend formulas consistently name `adjusted_close` and its moneyflow ratio names
+the raw numerator and daily amount denominator.
+
+Revision verification:
+
+```bash
+cd backend
+PYTHONWARNINGS=error .venv-ml/bin/python -m unittest \
+  tests.test_full_market_ml_features tests.test_full_market_ml_panel -v
+.venv-ml/bin/python -m py_compile \
+  app/evaluation/full_market_ml/features.py \
+  app/evaluation/full_market_ml/panel.py
+```
+
+Key output: `Ran 31 tests in 3.275s`, `OK`.

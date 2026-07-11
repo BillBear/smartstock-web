@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Iterable
+from typing import Iterable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -50,11 +50,11 @@ CORE_FEATURE_SPECS = (
     _spec("price_to_sma_10d", "adjusted_close / mean(adjusted_close, 10) - 1", "daily+adj_factor", "adjusted", 10, "null", "trend"),
     _spec("price_to_sma_20d", "adjusted_close / mean(adjusted_close, 20) - 1", "daily+adj_factor", "adjusted", 20, "null", "trend"),
     _spec("price_to_sma_60d", "adjusted_close / mean(adjusted_close, 60) - 1", "daily+adj_factor", "adjusted", 60, "null", "trend"),
-    _spec("sma_5d_to_sma_20d", "mean(close, 5) / mean(close, 20) - 1", "daily+adj_factor", "adjusted", 20, "null", "trend"),
-    _spec("sma_20d_to_sma_60d", "mean(close, 20) / mean(close, 60) - 1", "daily+adj_factor", "adjusted", 60, "null", "trend"),
+    _spec("sma_5d_to_sma_20d", "mean(adjusted_close, 5) / mean(adjusted_close, 20) - 1", "daily+adj_factor", "adjusted", 20, "null", "trend"),
+    _spec("sma_20d_to_sma_60d", "mean(adjusted_close, 20) / mean(adjusted_close, 60) - 1", "daily+adj_factor", "adjusted", 60, "null", "trend"),
     _spec("price_to_ema_12d", "adjusted_close / ewm(adjusted_close, 12) - 1", "daily+adj_factor", "adjusted", 12, "null", "trend"),
     _spec("price_to_ema_26d", "adjusted_close / ewm(adjusted_close, 26) - 1", "daily+adj_factor", "adjusted", 26, "null", "trend"),
-    _spec("macd_line", "ewm(close, 12) - ewm(close, 26)", "daily+adj_factor", "adjusted", 26, "null", "trend"),
+    _spec("macd_line", "ewm(adjusted_close, 12) - ewm(adjusted_close, 26)", "daily+adj_factor", "adjusted", 26, "null", "trend"),
     _spec("macd_signal_gap", "macd_line - ewm(macd_line, 9)", "daily+adj_factor", "adjusted", 34, "null", "trend"),
     _spec("realized_volatility_5d", "std(return_1d, 5)", "daily+adj_factor", "adjusted", 6, "null", "volatility"),
     _spec("realized_volatility_10d", "std(return_1d, 10)", "daily+adj_factor", "adjusted", 11, "null", "volatility"),
@@ -88,8 +88,8 @@ CORE_FEATURE_SPECS = (
     _spec("pb_missing", "isnull(pb)", "daily_basic", "raw", 0, "1 if absent", "valuation_liquidity"),
     _spec("ps", "ps", "daily_basic", "raw", 0, "null+flag", "valuation_liquidity"),
     _spec("ps_missing", "isnull(ps)", "daily_basic", "raw", 0, "1 if absent", "valuation_liquidity"),
-    _spec("main_net_inflow_ratio", "main_net_inflow_ratio", "moneyflow", "raw", 0, "null+flag", "moneyflow"),
-    _spec("main_net_inflow_ratio_missing", "isnull(main_net_inflow_ratio)", "moneyflow", "raw", 0, "1 if absent", "moneyflow"),
+    _spec("main_net_inflow_ratio", "net_mf_amount / amount_cny", "moneyflow+daily", "raw", 0, "null+flag", "moneyflow"),
+    _spec("main_net_inflow_ratio_missing", "isnull(net_mf_amount) or amount_cny <= 0", "moneyflow+daily", "raw", 0, "1 if absent", "moneyflow"),
     _spec("net_mf_amount_log", "signed_log1p(net_mf_amount)", "moneyflow", "raw", 0, "null+flag", "moneyflow"),
     _spec("net_mf_amount_missing", "isnull(net_mf_amount)", "moneyflow", "raw", 0, "1 if absent", "moneyflow"),
     _spec("net_mf_amount_ratio_20d", "net_mf_amount / mean(abs(net_mf_amount), 20)", "moneyflow", "raw", 20, "null+flag", "moneyflow"),
@@ -135,12 +135,16 @@ OPTIONAL_FEATURE_SPECS = (
 )
 
 FEATURE_NAMES = [spec.name for spec in CORE_FEATURE_SPECS]
-_DENIED_EXACT = {"entry_tradeable"}
-_DENIED_PREFIXES = ("next_", "future_", "label_", "relevance_", "tp_", "sl_", "path_ambiguous")
+_DENIED_EXACT = {"entry_tradeable", "eligible_for_training", "eligible_signal_day"}
+_DENIED_PREFIXES = (
+    "next_", "future_", "label_", "relevance_", "tp_", "sl_", "path_ambiguous",
+    "horizon_available_", "eligible_for_training_", "mfe_", "mae_", "market_median_",
+    "industry_median_", "market_state_",
+)
 
 
 def assert_leak_free_schema(columns: Iterable[str]) -> None:
-    """Reject direct and conventionally named post-signal fields from model inputs."""
+    """Reject all known label and execution fields from a supplied model schema."""
     denied = []
     for value in columns:
         name = str(value).lower()
@@ -149,6 +153,15 @@ def assert_leak_free_schema(columns: Iterable[str]) -> None:
             denied.append(str(value))
     if denied:
         raise FeatureLeakageError("post-signal columns are forbidden: " + ", ".join(sorted(denied)))
+
+
+def _model_schema(feature_schema: Iterable[str] | None) -> list[str]:
+    schema = list(FEATURE_NAMES if feature_schema is None else feature_schema)
+    assert_leak_free_schema(schema)
+    unknown = sorted(set(schema) - set(FEATURE_NAMES))
+    if unknown:
+        raise ValueError("feature schema contains unknown features: " + ", ".join(unknown))
+    return schema
 
 
 def build_time_series_features(config: FullMarketMLConfig, panel_shard: pd.DataFrame) -> pd.DataFrame:
@@ -205,39 +218,46 @@ def build_time_series_features(config: FullMarketMLConfig, panel_shard: pd.DataF
     return result
 
 
-def build_cross_section_features(config: FullMarketMLConfig, time_series_shard: pd.DataFrame) -> pd.DataFrame:
-    """Compute daily peer statistics after all symbol-local history is available."""
+def build_cross_section_features(
+    config: FullMarketMLConfig, time_series_shards: Mapping[str, pd.DataFrame]
+) -> dict[str, pd.DataFrame]:
+    """Aggregate each date across all supplied symbol shards before assigning peer features."""
     del config
-    result = time_series_shard.copy()
-    if result.empty:
-        return result
-    for source in ("adjusted_return_5d", "adjusted_return_10d", "adjusted_return_20d", "volume_log", "amount_log", "turnover_rate", "total_mv_log", "main_net_inflow_ratio", "net_mf_amount_log"):
-        if source not in result:
-            result[source] = np.nan
-        result[f"{source}_rank"] = result.groupby("trade_date", sort=False)[source].rank(pct=True)
-        result[f"{source}_robust_z"] = result.groupby("trade_date", sort=False)[source].transform(_robust_z)
-    for source in ("pe", "pb", "ps", "float_market_value_ratio"):
-        result[f"{source}_rank"] = result.groupby("trade_date", sort=False)[source].rank(pct=True)
-    industry = result.get("industry_l1", pd.Series(pd.NA, index=result.index))
-    for window in (5, 20):
-        source = f"adjusted_return_{window}d"
-        valid = industry.notna()
-        result[f"industry_return_{window}d_rank"] = np.nan
-        result[f"industry_return_{window}d_excess"] = np.nan
-        result.loc[valid, f"industry_return_{window}d_rank"] = result.loc[valid].groupby(["trade_date", "industry_l1"], sort=False)[source].rank(pct=True)
-        median = result.loc[valid].groupby(["trade_date", "industry_l1"], sort=False)[source].transform("median")
-        result.loc[valid, f"industry_return_{window}d_excess"] = result.loc[valid, source] - median
+    if not isinstance(time_series_shards, Mapping):
+        raise TypeError("time_series_shards must be a mapping of shard keys to pandas DataFrames")
+    result = {str(key): value.copy() for key, value in time_series_shards.items()}
+    dates = sorted({str(date) for shard in result.values() if not shard.empty for date in shard.get("trade_date", pd.Series(dtype=str)).dropna().unique()})
+    for trade_date in dates:
+        daily_rows = []
+        for shard_key, shard in result.items():
+            rows = shard.loc[shard["trade_date"].eq(trade_date)].copy()
+            if not rows.empty:
+                rows["_shard_key"] = shard_key
+                rows["_source_index"] = rows.index
+                daily_rows.append(rows)
+        if not daily_rows:
+            continue
+        market = _cross_section_for_date(pd.concat(daily_rows, ignore_index=True))
+        output_columns = [name for name in FEATURE_NAMES if name in market]
+        for shard_key, shard in result.items():
+            rows = market.loc[market["_shard_key"].eq(shard_key)]
+            if not rows.empty:
+                shard.loc[rows["_source_index"].tolist(), output_columns] = rows[output_columns].to_numpy()
     return result
 
 
-def build_features_for_date(config: FullMarketMLConfig, panel_shard: pd.DataFrame, trade_date: str) -> pd.DataFrame:
+def build_features_for_date(
+    config: FullMarketMLConfig, panel_shard: pd.DataFrame, trade_date: str, *, feature_schema: Iterable[str] | None = None
+) -> pd.DataFrame:
     """Convenience test and batch helper returning the leak-free model matrix for one date."""
-    result = build_cross_section_features(config, build_time_series_features(config, panel_shard))
+    requested_schema = _model_schema(feature_schema)
+    time_series = build_time_series_features(config, panel_shard)
+    result = build_cross_section_features(config, {"full_market": time_series})["full_market"]
     result = result.loc[result["trade_date"].eq(_date_text(trade_date))].copy()
-    for name in FEATURE_NAMES:
+    for name in requested_schema:
         if name not in result:
             result[name] = np.nan
-    return result[["trade_date", "symbol", *FEATURE_NAMES]].reset_index(drop=True)
+    return result[["trade_date", "symbol", *requested_schema]].reset_index(drop=True)
 
 
 def write_feature_dictionary(path: str | Path) -> Path:
@@ -252,9 +272,10 @@ def write_feature_dictionary(path: str | Path) -> Path:
 
 
 def _add_optional_time_series(result: pd.DataFrame, grouped) -> None:
-    for source in ("turnover_rate", "total_mv", "circ_mv", "pe", "pb", "ps", "main_net_inflow_ratio", "net_mf_amount", "listing_age_trade_days"):
+    for source in ("turnover_rate", "total_mv", "circ_mv", "pe", "pb", "ps", "net_mf_amount", "listing_age_trade_days"):
         values = pd.to_numeric(result[source], errors="coerce") if source in result else pd.Series(np.nan, index=result.index)
         result[source] = values
+    result["main_net_inflow_ratio"] = result["net_mf_amount"] / result["amount_cny"].where(result["amount_cny"].gt(0))
     for source in ("turnover_rate", "total_mv", "circ_mv", "pe", "pb", "ps", "main_net_inflow_ratio", "net_mf_amount", "listing_age_trade_days"):
         flag = f"{source}_missing"
         if flag in FEATURE_NAMES:
@@ -270,6 +291,36 @@ def _add_optional_time_series(result: pd.DataFrame, grouped) -> None:
     result["listing_age_log"] = np.log1p(result["listing_age_trade_days"].where(result["listing_age_trade_days"] >= 0))
     result["valid_ohlc_flag"] = result.get("valid_ohlc", pd.Series(False, index=result.index)).eq(True).astype("int8")
     result["industry_available_flag"] = result.get("industry_l1", pd.Series(pd.NA, index=result.index)).notna().astype("int8")
+
+
+def _cross_section_for_date(market: pd.DataFrame) -> pd.DataFrame:
+    result = market.copy()
+    ranked_sources = (
+        "adjusted_return_5d", "adjusted_return_10d", "adjusted_return_20d", "volume_log",
+        "amount_log", "turnover_rate", "total_mv_log", "main_net_inflow_ratio", "net_mf_amount_log",
+    )
+    for source in ranked_sources:
+        values = result[source] if source in result else pd.Series(np.nan, index=result.index)
+        result[f"{source}_rank"] = values.rank(pct=True)
+        result[f"{source}_robust_z"] = _robust_z(values)
+    for source in ("pe", "pb", "ps", "float_market_value_ratio"):
+        values = result[source] if source in result else pd.Series(np.nan, index=result.index)
+        result[f"{source}_rank"] = values.rank(pct=True)
+    if "industry_l1" not in result:
+        result["industry_l1"] = pd.NA
+    for window in (5, 20):
+        source = f"adjusted_return_{window}d"
+        rank_name = f"industry_return_{window}d_rank"
+        excess_name = f"industry_return_{window}d_excess"
+        result[rank_name] = np.nan
+        result[excess_name] = np.nan
+        valid = result["industry_l1"].notna()
+        if valid.any():
+            industry_rows = result.loc[valid]
+            result.loc[valid, rank_name] = industry_rows.groupby("industry_l1", sort=False)[source].rank(pct=True)
+            median = industry_rows.groupby("industry_l1", sort=False)[source].transform("median")
+            result.loc[valid, excess_name] = industry_rows[source] - median
+    return result
 
 
 def _normalize_panel(panel_shard: pd.DataFrame) -> pd.DataFrame:
