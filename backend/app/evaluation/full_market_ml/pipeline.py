@@ -116,6 +116,34 @@ class FullMarketMLPipeline:
         self._write_json(self._state_path(stage), aborted)
         return aborted
 
+    def recover_stale_stages(self, *, max_idle_seconds: int, now: str | None = None) -> list[str]:
+        """Mark abandoned running stages as timeouts without touching their artifacts."""
+        current = datetime.fromisoformat(now) if now else datetime.now(timezone.utc)
+        recovered = []
+        for stage in STAGES:
+            existing = self._load_state(stage)
+            if not existing or existing.get("status") != "running":
+                continue
+            heartbeat = str(existing.get("heartbeat_at") or existing.get("started_at") or "")
+            try:
+                idle_seconds = (current - datetime.fromisoformat(heartbeat)).total_seconds()
+            except ValueError:
+                idle_seconds = float("inf")
+            if idle_seconds <= max(0, int(max_idle_seconds)):
+                continue
+            timeout = self._state(
+                stage,
+                "timeout",
+                existing.get("input_hashes", {}),
+                existing.get("artifacts", {}),
+                started_at=str(existing.get("started_at", _timestamp())),
+                ended_at=current.isoformat(),
+                failure_details={"type": "StageTimeout", "message": f"heartbeat_idle_seconds={int(idle_seconds)}"},
+            )
+            self._write_json(self._state_path(stage), timeout)
+            recovered.append(stage)
+        return recovered
+
     def _run_stage(self, stage: str, inputs: dict[str, str], states: Mapping[str, dict[str, Any]]) -> dict[str, Any]:
         started = _timestamp()
         running = self._state(stage, "running", inputs, {}, started_at=started)

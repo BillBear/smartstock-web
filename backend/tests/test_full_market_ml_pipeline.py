@@ -67,6 +67,17 @@ class FullMarketMLPipelineTests(FullMarketMLTestCase):
         self.assertIn("performance_budget_exceeded", state["failure_details"]["message"])
         self.assertIsNotNone(state["ended_at"])
 
+    def test_stale_running_stage_is_recovered_as_timeout(self):
+        pipeline = FullMarketMLPipeline(self.config, self.temp_path, fake_pipeline_services())
+        running = pipeline._state("preflight", "running", {}, {}, started_at="2026-07-01T00:00:00+00:00")
+        running["heartbeat_at"] = "2026-07-01T00:00:00+00:00"
+        pipeline._write_json(pipeline._state_path("preflight"), running)
+
+        recovered = pipeline.recover_stale_stages(max_idle_seconds=60, now="2026-07-01T00:02:00+00:00")
+
+        self.assertEqual(recovered, ["preflight"])
+        self.assertEqual(pipeline.stage_state("preflight")["status"], "timeout")
+
     def test_cli_has_no_status_override_option(self):
         script = Path(__file__).parents[1] / "scripts" / "run_full_market_ml_pipeline.py"
 
