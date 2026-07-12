@@ -203,6 +203,15 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
                 frozen_model_sha=candidate.frozen_model_sha256,
                 final_fit=fitted,
             )
+        with self.assertRaisesRegex(FinalHoldoutAccessError, "loaded final fit"):
+            run_final_holdout_evaluation(
+                self.config,
+                complete,
+                split,
+                candidate,
+                frozen_model_sha=candidate.frozen_model_sha256,
+                final_fit=replace(fitted, artifact_manifest_sha256="forged"),
+            )
         final_fit_dir = self.temp_path / "final-fit"
         save_final_fit(fitted, final_fit_dir)
         persisted_fit = load_final_fit(final_fit_dir, candidate.frozen_model_sha256)
@@ -293,6 +302,18 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
         with self.assertRaises(FinalHoldoutAccessError):
             fit_final_candidate(
                 contaminated,
+                self._split(),
+                candidate,
+                frozen_model_sha=candidate.frozen_model_sha256,
+            )
+
+    def test_failed_development_candidate_cannot_be_final_fitted_or_evaluated_by_library_callers(self):
+        dataset = random_label_fixture(seed=42)
+        candidate = run_development_training(self.config, dataset, self._split())
+
+        with self.assertRaisesRegex(FinalHoldoutAccessError, "development gate"):
+            fit_final_candidate(
+                dataset,
                 self._split(),
                 candidate,
                 frozen_model_sha=candidate.frozen_model_sha256,

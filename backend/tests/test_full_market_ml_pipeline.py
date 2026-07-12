@@ -101,6 +101,19 @@ class FullMarketMLPipelineTests(FullMarketMLTestCase):
         self.assertEqual(observed["status"], "running")
         self.assertIn("heartbeat_at", observed)
 
+    def test_status_report_and_stage_log_expose_recoverable_run_state(self):
+        pipeline = FullMarketMLPipeline(self.config, self.temp_path, fake_pipeline_services())
+
+        pipeline.run("preflight")
+        report = pipeline.status_report()
+        log_lines = (self.temp_path / "stages" / "preflight" / "stage.log").read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(report["run_id"], self.temp_path.name)
+        self.assertEqual(report["stages"]["preflight"]["status"], "complete")
+        self.assertEqual(report["stages"]["probe"]["status"], "not_started")
+        self.assertTrue(any('"event": "started"' in line for line in log_lines))
+        self.assertTrue(any('"event": "complete"' in line for line in log_lines))
+
     def test_stage_budget_times_out_and_writes_timeout_state(self):
         services = fake_pipeline_services()
         services["preflight"] = lambda _config, _root, _artifacts: time.sleep(0.05)
@@ -120,6 +133,8 @@ class FullMarketMLPipelineTests(FullMarketMLTestCase):
         self.assertIn("--run-id", result.stdout)
         self.assertIn("--abort-stage", result.stdout)
         self.assertIn("--backup-root", result.stdout)
+        self.assertIn("--status", result.stdout)
+        self.assertIn("--recover-stale-seconds", result.stdout)
         self.assertNotIn("override", result.stdout.lower())
 
     def test_resume_rejects_a_tampered_file_artifact(self):

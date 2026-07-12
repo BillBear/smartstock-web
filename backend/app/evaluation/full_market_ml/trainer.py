@@ -38,6 +38,7 @@ FIXED_RANKER_GRID = tuple(
 RISK_ALPHAS = (0.0, 0.1, 0.2, 0.3)
 _GROUP_SEQUENCE = ("momentum", "amount_turnover", "technical", "risk", "market_industry", "moneyflow")
 _GROUPS = {spec.name: spec.feature_group for spec in CORE_FEATURE_SPECS}
+_LOADED_FINAL_FITS: dict[int, tuple[Path, str]] = {}
 
 
 @dataclass(frozen=True)
@@ -210,7 +211,7 @@ def load_final_fit(source: str | Path, frozen_model_sha: str) -> FinalFit:
     missing = sorted(field for field in contract_fields if field not in manifest)
     if missing:
         raise ValueError("final fit manifest missing prediction contract: " + ", ".join(missing))
-    return FinalFit(
+    fitted = FinalFit(
         frozen_model_sha256=frozen_model_sha,
         split_sha256=str(manifest["split_sha256"]),
         selected_features=tuple(str(feature) for feature in manifest["selected_features"]),
@@ -223,6 +224,8 @@ def load_final_fit(source: str | Path, frozen_model_sha: str) -> FinalFit:
         severe_constant=_optional_float(manifest.get("severe_constant")),
         artifact_manifest_sha256=_file_sha256(manifest_path),
     )
+    _LOADED_FINAL_FITS[id(fitted)] = (manifest_path, fitted.artifact_manifest_sha256)
+    return fitted
 
 
 def _save_booster_models(models: tuple[Any, ...], prefix: str, directory: Path) -> list[dict[str, str]]:
@@ -259,6 +262,17 @@ def _file_sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _verify_loaded_final_fit(final_fit: FinalFit) -> None:
+    registered = _LOADED_FINAL_FITS.get(id(final_fit))
+    if registered is None:
+        raise FinalHoldoutAccessError("final holdout requires a loaded final fit artifact")
+    manifest_path, expected_sha = registered
+    if final_fit.artifact_manifest_sha256 != expected_sha or not manifest_path.is_file():
+        raise FinalHoldoutAccessError("final holdout loaded final fit artifact is invalid")
+    if _file_sha256(manifest_path) != expected_sha:
+        raise FinalHoldoutAccessError("final holdout loaded final fit artifact was modified")
 
 
 def _optional_float(value: Any) -> float | None:
@@ -345,6 +359,8 @@ def fit_final_candidate(
     """Fit fixed models once without re-running model selection or walk-forward."""
     if frozen_model_sha != candidate.frozen_model_sha256:
         raise FinalHoldoutAccessError("final fit requires the exact frozen candidate SHA")
+    if not candidate.can_open_final_holdout:
+        raise FinalHoldoutAccessError("final fit is blocked because the development gate did not pass")
     sealed = split_plan.seal_final_holdout(frozen_model_sha)
     train = _development_dataset(dataset, sealed)
     missing_features = sorted(set(candidate.selected_features) - set(train.columns))
@@ -391,11 +407,14 @@ def run_final_holdout_evaluation(
     """
     if frozen_model_sha != candidate.frozen_model_sha256:
         raise FinalHoldoutAccessError("final holdout requires the exact frozen candidate SHA")
+    if not candidate.can_open_final_holdout:
+        raise FinalHoldoutAccessError("final holdout is blocked because the development gate did not pass")
     sealed = split_plan.seal_final_holdout(frozen_model_sha)
     if final_fit is not None and final_fit.frozen_model_sha256 != frozen_model_sha:
         raise FinalHoldoutAccessError("final holdout fit SHA does not match frozen candidate")
     if final_fit is None or final_fit.artifact_manifest_sha256 is None:
         raise FinalHoldoutAccessError("final holdout requires a persisted final fit artifact")
+    _verify_loaded_final_fit(final_fit)
     if final_fit is not None and (
         final_fit.split_sha256 != sealed.split_sha256
         or final_fit.selected_features != tuple(candidate.selected_features)

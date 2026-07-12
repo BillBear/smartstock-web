@@ -111,9 +111,92 @@ def backup_dataset_assets(
         raise
 
 
+def verify_dataset_backup(backup_root: str | Path, registry: Mapping[str, Any]) -> dict[str, Any]:
+    """Verify that immutable base data exists in an external backup before final fitting."""
+    dataset_id = str(registry["dataset_id"])
+    destination = Path(backup_root) / dataset_id
+    manifest_path = destination / "backup_manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"verified dataset backup manifest is required: {manifest_path}")
+    manifest = _load_json(manifest_path)
+    if manifest.get("dataset_id") != dataset_id or manifest.get("verification_status") != "verified":
+        raise ValueError("dataset backup manifest does not match the immutable dataset registry")
+    files = {str(item.get("path")): str(item.get("sha256")) for item in manifest.get("files", ()) if isinstance(item, Mapping)}
+    for asset in registry.get("assets", {}).values():
+        source_path = Path(str(asset.get("path", "")))
+        expected_sha = str(asset.get("sha256", ""))
+        relative = _backup_relative_asset_path(source_path)
+        if not relative or files.get(relative) != expected_sha:
+            raise ValueError(f"dataset backup is missing verified asset: {relative or source_path}")
+    return manifest
+
+
+def backup_stage_assets(
+    runtime_root: str | Path,
+    backup_root: str | Path,
+    registry: Mapping[str, Any],
+    *,
+    stage: str,
+    artifact_id: str,
+) -> dict[str, Any]:
+    """Back up one immutable model/evaluation stage below an already verified dataset."""
+    if not stage or not artifact_id:
+        raise ValueError("stage and artifact_id are required for derived artifact backup")
+    verify_dataset_backup(backup_root, registry)
+    source = Path(runtime_root) / "artifacts" / stage
+    destination = Path(backup_root) / str(registry["dataset_id"]) / "derived" / stage / str(artifact_id)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        manifest_path = destination / "backup_manifest.json"
+        if not manifest_path.is_file():
+            raise FileExistsError(f"derived artifact backup exists without a manifest: {destination}")
+        existing = _load_json(manifest_path)
+        if (
+            existing.get("dataset_id") != str(registry["dataset_id"])
+            or existing.get("stage") != stage
+            or existing.get("artifact_id") != str(artifact_id)
+            or existing.get("verification_status") != "verified"
+        ):
+            raise ValueError(f"derived artifact backup does not match the requested immutable artifact: {destination}")
+        return existing
+    if not source.is_dir():
+        raise FileNotFoundError(f"stage artifact directory is missing: {source}")
+    temporary = Path(tempfile.mkdtemp(prefix=f".{artifact_id}-", dir=destination.parent))
+    try:
+        copied = temporary / "artifacts" / stage
+        copied.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, copied, ignore=shutil.ignore_patterns("*.tmp"))
+        files = [_file_evidence(path, relative_to=temporary) for path in sorted(temporary.rglob("*")) if path.is_file()]
+        verification = {
+            "dataset_id": str(registry["dataset_id"]),
+            "stage": stage,
+            "artifact_id": str(artifact_id),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "file_count": len(files),
+            "total_bytes": sum(item["bytes"] for item in files),
+            "verification_status": "verified",
+            "files": files,
+        }
+        _write_json_atomic(temporary / "backup_manifest.json", verification)
+        os.replace(temporary, destination)
+        return verification
+    except Exception:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+
+
 def _feature_schema(root: Path) -> Any:
     path = root / "panel" / "stage=full-build" / "feature_contract.json"
     return _load_json(path) if path.is_file() else {}
+
+
+def _backup_relative_asset_path(source_path: Path) -> str | None:
+    """Map registered run paths to their stable relative location inside a backup."""
+    parts = source_path.parts
+    for marker in ("manifests", "artifacts"):
+        if marker in parts:
+            return str(Path(*parts[parts.index(marker):]))
+    return None
 
 
 def _label_schema(dataset_path: Path) -> dict[str, list[str]]:

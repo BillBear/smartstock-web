@@ -5,7 +5,12 @@ import json
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from app.evaluation.full_market_ml.assets import backup_dataset_assets, build_dataset_registry
+from app.evaluation.full_market_ml.assets import (
+    backup_dataset_assets,
+    backup_stage_assets,
+    build_dataset_registry,
+    verify_dataset_backup,
+)
 from tests.test_full_market_ml_collector import FullMarketMLTestCase
 
 
@@ -53,3 +58,35 @@ class FullMarketMLAssetTests(FullMarketMLTestCase):
         self.assertTrue((target / registry["dataset_id"] / "raw" / "endpoint=daily" / "trade_date=20260102" / "data.parquet").is_file())
         self.assertTrue((target / registry["dataset_id"] / "artifacts" / "full-build" / "dataset.parquet").is_file())
         self.assertEqual(result["verification_status"], "verified")
+
+    def test_verified_backup_is_required_before_a_formal_final_fit(self):
+        runtime = self._runtime()
+        registry = build_dataset_registry(runtime, code_revision="commit-sha", environment={})
+        target = self.temp_path / "backup"
+
+        with self.assertRaisesRegex(FileNotFoundError, "backup manifest"):
+            verify_dataset_backup(target, registry)
+
+        backup_dataset_assets(runtime, target, registry)
+        evidence = verify_dataset_backup(target, registry)
+
+        self.assertEqual(evidence["dataset_id"], registry["dataset_id"])
+        self.assertEqual(evidence["verification_status"], "verified")
+
+    def test_derived_model_artifacts_are_backed_up_under_the_verified_dataset(self):
+        runtime = self._runtime()
+        registry = build_dataset_registry(runtime, code_revision="commit-sha", environment={})
+        target = self.temp_path / "backup"
+        backup_dataset_assets(runtime, target, registry)
+        source = runtime / "artifacts" / "final-fit" / "model"
+        source.mkdir(parents=True)
+        (source / "rank_00.txt").write_text("model", encoding="utf-8")
+
+        evidence = backup_stage_assets(runtime, target, registry, stage="final-fit", artifact_id="frozen-sha")
+        second = backup_stage_assets(runtime, target, registry, stage="final-fit", artifact_id="frozen-sha")
+
+        destination = target / registry["dataset_id"] / "derived" / "final-fit" / "frozen-sha"
+        self.assertEqual(evidence["verification_status"], "verified")
+        self.assertEqual(second, evidence)
+        self.assertTrue((destination / "artifacts" / "final-fit" / "model" / "rank_00.txt").is_file())
+        self.assertTrue((destination / "backup_manifest.json").is_file())

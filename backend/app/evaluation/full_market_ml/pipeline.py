@@ -123,6 +123,30 @@ class FullMarketMLPipeline:
             raise FileNotFoundError(self._state_path(stage))
         return state
 
+    def status_report(self) -> dict[str, Any]:
+        """Return a read-only, machine-readable view of this run's recovery state."""
+        return self.inspect_runtime(self.runtime_root)
+
+    @classmethod
+    def inspect_runtime(cls, runtime_root: str | Path) -> dict[str, Any]:
+        """Read status without constructing services or touching data providers."""
+        root = Path(runtime_root)
+        registry_path = root / "artifacts" / "full-build" / "dataset_registry.json"
+        progress_path = root / "progress.json"
+        registry = json.loads(registry_path.read_text(encoding="utf-8")) if registry_path.is_file() else {}
+        progress = json.loads(progress_path.read_text(encoding="utf-8")) if progress_path.is_file() else None
+        stages = {}
+        for stage in STAGES:
+            path = root / "stages" / stage / "stage_state.json"
+            stages[stage] = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"status": "not_started"}
+        return {
+            "run_id": root.name,
+            "runtime_root": str(root),
+            "dataset_id": registry.get("dataset_id"),
+            "progress": progress,
+            "stages": stages,
+        }
+
     def abort_stage(self, stage: str, *, reason: str) -> dict[str, Any]:
         """Close an interrupted stage without deleting its immutable inputs."""
         existing = self.stage_state(stage)
@@ -139,6 +163,7 @@ class FullMarketMLPipeline:
         )
         self._write_json(self._state_path(stage), aborted)
         self._write_progress(aborted)
+        self._append_stage_log(stage, "aborted", aborted)
         return aborted
 
     def recover_stale_stages(self, *, max_idle_seconds: int, now: str | None = None) -> list[str]:
@@ -167,6 +192,7 @@ class FullMarketMLPipeline:
             )
             self._write_json(self._state_path(stage), timeout)
             self._write_progress(timeout)
+            self._append_stage_log(stage, "timeout", timeout)
             recovered.append(stage)
         return recovered
 
@@ -175,6 +201,7 @@ class FullMarketMLPipeline:
         running = self._state(stage, "running", inputs, {}, started_at=started)
         self._write_json(self._state_path(stage), running)
         self._write_progress(running)
+        self._append_stage_log(stage, "started", running)
         stop_heartbeat = threading.Event()
         heartbeat = threading.Thread(
             target=self._heartbeat_until_stopped,
@@ -201,6 +228,7 @@ class FullMarketMLPipeline:
             complete = self._state(stage, "complete", inputs, output, started_at=started, ended_at=_timestamp())
             self._write_json(self._state_path(stage), complete)
             self._write_progress(complete)
+            self._append_stage_log(stage, "complete", complete)
             return complete
         except TimeoutError as error:
             timeout = self._state(
@@ -214,6 +242,7 @@ class FullMarketMLPipeline:
             )
             self._write_json(self._state_path(stage), timeout)
             self._write_progress(timeout)
+            self._append_stage_log(stage, "timeout", timeout)
             raise
         except Exception as error:
             blocked = self._state(
@@ -227,6 +256,7 @@ class FullMarketMLPipeline:
             )
             self._write_json(self._state_path(stage), blocked)
             self._write_progress(blocked)
+            self._append_stage_log(stage, "blocked", blocked)
             raise
         finally:
             self._stop_stage_timer(previous_alarm)
@@ -317,17 +347,58 @@ class FullMarketMLPipeline:
         return self.runtime_root / "stages" / stage / "stage_state.json"
 
     def _write_progress(self, state: Mapping[str, Any]) -> None:
+        stage = str(state.get("stage") or "")
+        started_at = str(state.get("started_at") or "")
+        timeout_seconds = self.stage_timeouts_seconds.get(stage)
+        estimated_remaining_seconds = None
+        if state.get("status") == "running" and timeout_seconds and started_at:
+            try:
+                elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(started_at)).total_seconds()
+                estimated_remaining_seconds = max(0, int(float(timeout_seconds) - elapsed))
+            except ValueError:
+                estimated_remaining_seconds = None
         progress = {
+            "run_id": self.runtime_root.name,
+            "dataset_id": self._dataset_id(),
             "stage": state.get("stage"),
             "status": state.get("status"),
+            "substep": state.get("stage"),
             "started_at": state.get("started_at"),
             "heartbeat_at": state.get("heartbeat_at"),
             "ended_at": state.get("ended_at"),
             "pid": state.get("pid"),
             "peak_rss_bytes": state.get("peak_rss_bytes"),
+            "current_partition": None,
+            "processed_rows": None,
+            "total_rows": None,
+            "estimated_remaining_seconds": estimated_remaining_seconds,
+            "retry_count": 0,
             "failure_details": state.get("failure_details"),
         }
         self._write_json(self.runtime_root / "progress.json", progress)
+
+    def _dataset_id(self) -> str | None:
+        path = self.runtime_root / "artifacts" / "full-build" / "dataset_registry.json"
+        if not path.is_file():
+            return None
+        try:
+            return str(json.loads(path.read_text(encoding="utf-8")).get("dataset_id") or "") or None
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+
+    def _append_stage_log(self, stage: str, event: str, state: Mapping[str, Any]) -> None:
+        path = self._state_path(stage).parent / "stage.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "at": _timestamp(),
+            "event": event,
+            "status": state.get("status"),
+            "stage": stage,
+            "pid": state.get("pid"),
+            "failure_details": state.get("failure_details"),
+        }
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(entry, ensure_ascii=True, sort_keys=True) + "\n")
 
     def _load_state(self, stage: str) -> dict[str, Any] | None:
         path = self._state_path(stage)

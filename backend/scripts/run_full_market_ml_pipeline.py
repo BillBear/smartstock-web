@@ -14,7 +14,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.evaluation.full_market_ml.config import load_full_market_ml_config
 from app.evaluation.full_market_ml.pipeline import FullMarketMLPipeline, STAGES, select_probe_dates
-from app.evaluation.full_market_ml.assets import backup_dataset_assets, build_dataset_registry, write_dataset_registry
+from app.evaluation.full_market_ml.assets import (
+    backup_dataset_assets,
+    backup_stage_assets,
+    build_dataset_registry,
+    verify_dataset_backup,
+    write_dataset_registry,
+)
 
 
 RUN_ID = "fm_rank_10d_20260710_r1"
@@ -235,22 +241,37 @@ def default_services():
         })
         return {"quality_ready": True, "status": "research_only_failed_gate", "skipped": str(output)}
 
+    def verified_backup(root):
+        backup_root = os.environ.get("ML_BACKUP_ROOT", "").strip()
+        if not backup_root:
+            raise ValueError("ML_BACKUP_ROOT is required before formal final-fit")
+        registry_path = artifact(root, "full-build") / "dataset_registry.json"
+        if not registry_path.is_file():
+            raise FileNotFoundError("dataset registry is required before formal final-fit")
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        verify_dataset_backup(backup_root, registry)
+        return Path(backup_root), registry
+
     def final_fit(_config, root, _artifacts):
         frozen_sha, candidate = frozen_candidate(root)
         if not candidate.can_open_final_holdout:
             return write_development_gate_skip(root, "final-fit", candidate, frozen_sha)
+        backup_root, registry = verified_backup(root)
         split = load_split(root)
         dataset_path = artifact(root, "full-build") / "dataset.parquet"
         development = pd.read_parquet(dataset_path, filters=[("trade_date", "in", list(split.development_dates))])
         fitted = fit_final_candidate(development, split, candidate, frozen_model_sha=frozen_sha)
         output = artifact(root, "final-fit") / "model"
         save_final_fit(fitted, output)
+        backup_stage_assets(root, backup_root, registry, stage="final-fit", artifact_id=frozen_sha)
+        backup_manifest = backup_root / registry["dataset_id"] / "derived" / "final-fit" / frozen_sha / "backup_manifest.json"
         manifest_path = output / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         result = {
             "quality_ready": True,
             "status": "complete",
             "final_fit_manifest": str(manifest_path),
+            "backup_manifest": str(backup_manifest),
         }
         for group in ("rank_models", "strong_models", "severe_models"):
             for index, model in enumerate(manifest[group]):
@@ -263,6 +284,7 @@ def default_services():
         frozen_sha, candidate = frozen_candidate(root)
         if not candidate.can_open_final_holdout:
             return write_development_gate_skip(root, "final-holdout-evaluate", candidate, frozen_sha)
+        backup_root, registry = verified_backup(root)
         dates = pd.read_parquet(dataset_path, columns=["trade_date", "eligible_for_training"])
         dates["trade_date"] = pd.to_datetime(dates["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d")
         labelable_final_dates = dates.loc[
@@ -331,6 +353,8 @@ def default_services():
             feature_schema_sha256=feature_schema_sha256(candidate),
         )
         write_json(output / "candidate_manifest.json", manifest)
+        backup_stage_assets(root, backup_root, registry, stage="final-holdout-evaluate", artifact_id=frozen_sha)
+        backup_manifest = backup_root / registry["dataset_id"] / "derived" / "final-holdout-evaluate" / frozen_sha / "backup_manifest.json"
         return {
             "quality_ready": True,
             "model_status": evaluation.model_status,
@@ -338,6 +362,7 @@ def default_services():
             "model_metrics": str(output / "model_metrics.json"),
             "model_card": str(output / "model_card.md"),
             "predictions": str(predictions_path),
+            "backup_manifest": str(backup_manifest),
             **{f"prediction_{quadrant}": str(path) for quadrant, path in sorted(quadrant_paths.items())},
         }
 
@@ -346,7 +371,7 @@ def default_services():
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True)
+    parser.add_argument("--config")
     parser.add_argument("--stage", choices=STAGES)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--frozen-model-sha")
@@ -355,10 +380,21 @@ def main() -> int:
     parser.add_argument("--abort-reason", default="operator_requested_abort")
     parser.add_argument("--register-assets", action="store_true")
     parser.add_argument("--backup-root")
+    parser.add_argument("--status", action="store_true")
+    parser.add_argument("--recover-stale-seconds", type=int)
     arguments = parser.parse_args()
-    config = load_full_market_ml_config(arguments.config)
     root = Path(__file__).resolve().parents[2] / "runtime" / "ml_full_market" / "runs" / arguments.run_id
+    if arguments.status:
+        print(json.dumps(FullMarketMLPipeline.inspect_runtime(root), ensure_ascii=True, sort_keys=True))
+        return 0
+    if not arguments.config:
+        parser.error("--config is required unless --status is supplied")
+    config = load_full_market_ml_config(arguments.config)
     pipeline = FullMarketMLPipeline(config, root, default_services())
+    if arguments.recover_stale_seconds is not None:
+        recovered = pipeline.recover_stale_stages(max_idle_seconds=arguments.recover_stale_seconds)
+        print(json.dumps({"recovered_stages": recovered}, ensure_ascii=True, sort_keys=True))
+        return 0
     if arguments.abort_stage:
         state = pipeline.abort_stage(arguments.abort_stage, reason=arguments.abort_reason)
         print(json.dumps({"stage": arguments.abort_stage, "status": state["status"]}, ensure_ascii=True, sort_keys=True))
@@ -373,7 +409,7 @@ def main() -> int:
             print(json.dumps({"dataset_id": registry["dataset_id"], "registry": str(registry_path)}, ensure_ascii=True, sort_keys=True))
         return 0
     if not arguments.stage:
-        parser.error("--stage is required unless --abort-stage or --register-assets is supplied")
+        parser.error("--stage is required unless --abort-stage, --register-assets, --status, or --recover-stale-seconds is supplied")
     result = pipeline.run(
         arguments.stage, resume=arguments.resume, frozen_model_sha=arguments.frozen_model_sha
     )
