@@ -80,15 +80,25 @@ def bootstrap_uplift(
     baseline_score_col: str | None = None,
     iterations: int = 1000,
     seed: int = 42,
+    block_length: int = 10,
 ) -> dict[str, Any]:
-    """Bootstrap metric uplift by resampling complete trade-date cross sections."""
+    """Bootstrap metric uplift by resampling circular blocks of trade dates."""
     data = _validated_predictions(predictions, score_col, {_GRADE, _STRONG}, require_symbol=True)
     baseline_score_col = baseline_score_col or score_col
     if baseline_score_col not in data:
         raise ValueError(f"predictions missing baseline score column: {baseline_score_col}")
     dates = tuple(sorted(data[_DATE].unique()))
+    block_length = max(1, int(block_length))
     if not dates:
-        return {"resample_unit": _DATE, "source_date_count": 0, "iterations": 0, "precision_at_5_uplift_ci_low": 0.0, "precision_at_5_uplift_ci_high": 0.0}
+        return {
+            "resample_unit": _DATE,
+            "bootstrap_method": "circular_block",
+            "block_length": block_length,
+            "source_date_count": 0,
+            "iterations": 0,
+            "precision_at_5_uplift_ci_low": 0.0,
+            "precision_at_5_uplift_ci_high": 0.0,
+        }
 
     rng = np.random.default_rng(seed)
     uplifts = []
@@ -102,11 +112,13 @@ def bootstrap_uplift(
         for date, rows in by_date.items()
     }
     for _ in range(iterations):
-        sampled_dates = rng.choice(dates, size=len(dates), replace=True)
+        sampled_dates = _sample_trade_date_block(dates, rng, block_length)
         uplifts.append(float(mean(daily_uplifts[str(date)] for date in sampled_dates)))
     low, high = np.quantile(np.asarray(uplifts, dtype=float), [0.025, 0.975])
     return {
         "resample_unit": _DATE,
+        "bootstrap_method": "circular_block",
+        "block_length": block_length,
         "source_date_count": len(dates),
         "iterations": iterations,
         "precision_at_5_uplift": float(mean(uplifts)),
@@ -125,37 +137,64 @@ def simulate_daily_topk_portfolio(
     slippage: float = 0.001,
 ) -> dict[str, Any]:
     """Simulate equal-weight daily Top-K cohorts entered next open and exited at horizon."""
-    required = {"adjusted_next_open", "adjusted_exit_close", "exit_trade_date"}
+    execution_columns = _execution_columns(predictions)
+    required = set(execution_columns)
     data = _validated_predictions(predictions, score_col, required, require_symbol=True)
     top_k = max(1, int(top_k))
     commission, slippage = max(0.0, float(commission)), max(0.0, float(slippage))
     cohorts = []
+    ambiguous_exit_count = 0
+    untradeable_entry_count = 0
+    unavailable_exit_count = 0
     for trade_date, rows in data.groupby(_DATE, sort=True):
         selected = rows.sort_values([score_col, "symbol"], ascending=[False, True], kind="stable").head(top_k)
         returns = []
         exit_dates = []
         for row in selected.itertuples(index=False):
-            entry = _finite_positive(getattr(row, "adjusted_next_open"))
-            exit_price = _finite_positive(getattr(row, "adjusted_exit_close"))
+            if _row_flag(row, "path_ambiguous", "path_ambiguous_10d"):
+                ambiguous_exit_count += 1
+                continue
+            if hasattr(row, "entry_tradeable") and not _row_flag(row, "entry_tradeable"):
+                untradeable_entry_count += 1
+                continue
+            if hasattr(row, "horizon_available_10d") and not _row_flag(row, "horizon_available_10d"):
+                unavailable_exit_count += 1
+                continue
+            entry = _finite_positive(getattr(row, execution_columns[0]))
+            exit_price = _finite_positive(getattr(row, execution_columns[1]))
             if entry is None or exit_price is None:
+                unavailable_exit_count += 1
                 continue
             net_return = ((exit_price * (1.0 - slippage)) / (entry * (1.0 + slippage))) * (1.0 - commission) ** 2 - 1.0
             returns.append(float(net_return))
-            exit_dates.append(str(getattr(row, "exit_trade_date")))
+            exit_date = getattr(row, execution_columns[2])
+            if pd.isna(exit_date):
+                unavailable_exit_count += 1
+                returns.pop()
+                continue
+            exit_dates.append(str(exit_date))
         if returns:
             cohorts.append({"trade_date": str(trade_date), "exit_trade_date": max(exit_dates), "return": float(mean(returns)), "trade_count": len(returns)})
     if not cohorts:
-        return _empty_portfolio_result()
+        result = _empty_portfolio_result()
+        result.update(
+            {
+                "ambiguous_exit_count": ambiguous_exit_count,
+                "untradeable_entry_count": untradeable_entry_count,
+                "unavailable_exit_count": unavailable_exit_count,
+            }
+        )
+        return result
 
     cohort_returns = [cohort["return"] for cohort in cohorts]
-    total_return = float(mean(cohort_returns))
     daily_returns = pd.DataFrame(cohorts).groupby("exit_trade_date", sort=True)["return"].mean().to_numpy(dtype=float)
     equity = np.cumprod(1.0 + daily_returns)
+    total_return = float(equity[-1] - 1.0)
     peaks = np.maximum.accumulate(equity)
     maximum_drawdown = float(np.min(equity / peaks - 1.0)) if len(equity) else 0.0
     daily_std = float(np.std(daily_returns, ddof=1)) if len(daily_returns) > 1 else 0.0
     sharpe = float(np.mean(daily_returns) / daily_std * math.sqrt(252)) if daily_std > 0 else 0.0
-    annualized = float((1.0 + total_return) ** (252 / max(1, len(daily_returns))) - 1.0)
+    annualized = float(equity[-1] ** (252 / max(1, len(daily_returns))) - 1.0)
     return {
         "total_return": total_return,
         "annualized_return": annualized,
@@ -164,6 +203,9 @@ def simulate_daily_topk_portfolio(
         "turnover": float(2.0 * sum(cohort["trade_count"] for cohort in cohorts) / len(cohorts)),
         "cohort_count": len(cohorts),
         "closed_trade_count": int(sum(cohort["trade_count"] for cohort in cohorts)),
+        "ambiguous_exit_count": ambiguous_exit_count,
+        "untradeable_entry_count": untradeable_entry_count,
+        "unavailable_exit_count": unavailable_exit_count,
         "hold_days": max(1, int(hold_days)),
     }
 
@@ -178,7 +220,8 @@ def _daily_ranking_metrics(
     ranked = rows.sort_values([score_col, "symbol"], ascending=[False, True], kind="stable").reset_index(drop=True)
     strong = ranked[strong_col].astype(bool).to_numpy()
     grades = pd.to_numeric(ranked[grade_col], errors="coerce").fillna(0.0).clip(lower=0.0).to_numpy()
-    returns = pd.to_numeric(ranked.get(_RETURN, pd.Series(0.0, index=ranked.index)), errors="coerce").fillna(0.0).to_numpy()
+    return_column = _first_existing(ranked, ("net_return_after_cost", "net_return_after_cost_10d", _RETURN))
+    returns = pd.to_numeric(ranked.get(return_column, pd.Series(0.0, index=ranked.index)), errors="coerce").fillna(0.0).to_numpy()
     top = lambda size: slice(0, min(size, len(ranked)))
     denominator = lambda size: max(1, min(size, len(ranked)))
     ideal = np.sort(grades)[::-1][:10]
@@ -198,7 +241,11 @@ def _daily_ranking_metrics(
         "top_5_median_return": float(np.median(top5_returns)) if len(top5_returns) else 0.0,
         "top_5_positive_rate": float(np.mean(top5_returns > 0.0)) if len(top5_returns) else 0.0,
     }
-    for column, key in (("market_median_future_return_10d", "market_excess_return"), ("industry_median_future_return_10d", "industry_excess_return")):
+    for columns, key in (
+        (("market_median_net_return_10d", "market_median_future_return_10d"), "market_excess_return"),
+        (("industry_median_net_return_10d", "industry_median_future_return_10d"), "industry_excess_return"),
+    ):
+        column = _first_existing(ranked, columns)
         if column in ranked:
             benchmark = pd.to_numeric(ranked[column], errors="coerce").to_numpy()[top(5)]
             valid = np.isfinite(benchmark)
@@ -233,6 +280,42 @@ def _validated_predictions(
     return data.loc[data[_DATE].notna() & data[score_col].notna()].copy()
 
 
+def _execution_columns(predictions: pd.DataFrame) -> tuple[str, str, str]:
+    canonical = ("entry_price", "exit_price", "exit_trade_date")
+    suffixed = ("entry_price_10d", "exit_price_10d", "exit_trade_date_10d")
+    legacy = ("adjusted_next_open", "adjusted_exit_close", "exit_trade_date")
+    for columns in (canonical, suffixed, legacy):
+        if set(columns).issubset(predictions.columns):
+            return columns
+    raise ValueError(
+        "predictions missing canonical execution fields: entry_price, exit_price, exit_trade_date"
+    )
+
+
+def _sample_trade_date_block(dates: tuple[Any, ...], rng: np.random.Generator, block_length: int) -> list[Any]:
+    if not dates:
+        return []
+    sampled = []
+    while len(sampled) < len(dates):
+        start = int(rng.integers(0, len(dates)))
+        sampled.extend(dates[(start + offset) % len(dates)] for offset in range(block_length))
+    return sampled[: len(dates)]
+
+
+def _first_existing(frame: pd.DataFrame, columns: tuple[str, ...]) -> str:
+    return next((column for column in columns if column in frame), "")
+
+
+def _row_flag(row: Any, *names: str) -> bool:
+    for name in names:
+        if hasattr(row, name):
+            value = getattr(row, name)
+            if pd.isna(value):
+                return False
+            return bool(value)
+    return False
+
+
 def _mean_metric(values: Any) -> float:
     return float(mean(values))
 
@@ -250,4 +333,16 @@ def _empty_ranking_result() -> dict[str, Any]:
 
 
 def _empty_portfolio_result() -> dict[str, Any]:
-    return {"total_return": 0.0, "annualized_return": 0.0, "maximum_drawdown": 0.0, "sharpe": 0.0, "turnover": 0.0, "cohort_count": 0, "closed_trade_count": 0, "hold_days": 10}
+    return {
+        "total_return": 0.0,
+        "annualized_return": 0.0,
+        "maximum_drawdown": 0.0,
+        "sharpe": 0.0,
+        "turnover": 0.0,
+        "cohort_count": 0,
+        "closed_trade_count": 0,
+        "ambiguous_exit_count": 0,
+        "untradeable_entry_count": 0,
+        "unavailable_exit_count": 0,
+        "hold_days": 10,
+    }

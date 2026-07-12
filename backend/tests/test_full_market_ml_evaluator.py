@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pandas as pd
 from unittest.mock import patch
 
 from app.evaluation.full_market_ml import evaluator as evaluator_module
@@ -69,6 +70,8 @@ class FullMarketMLEvaluatorTests(FullMarketMLTestCase):
         )
 
         self.assertEqual(result["resample_unit"], "trade_date")
+        self.assertEqual(result["bootstrap_method"], "circular_block")
+        self.assertEqual(result["block_length"], 10)
         self.assertEqual(result["source_date_count"], 2)
         self.assertLessEqual(result["precision_at_5_uplift_ci_low"], 0)
         self.assertGreaterEqual(result["precision_at_5_uplift_ci_high"], 0)
@@ -96,6 +99,44 @@ class FullMarketMLEvaluatorTests(FullMarketMLTestCase):
         self.assertAlmostEqual(gross["total_return"], 0.15, places=6)
         expected_net = (((110.0 / 100.0) * 0.999 / 1.001 * 0.9997**2 - 1.0) + ((120.0 / 100.0) * 0.999 / 1.001 * 0.9997**2 - 1.0)) / 2
         self.assertAlmostEqual(net["total_return"], expected_net, places=6)
+
+    def test_portfolio_accepts_canonical_label_execution_fields(self):
+        dataset = overlapping_portfolio_fixture().rename(
+            columns={"adjusted_next_open": "entry_price", "adjusted_exit_close": "exit_price"}
+        )
+        dataset["path_ambiguous_10d"] = False
+
+        result = simulate_daily_topk_portfolio(dataset, hold_days=2, commission=0.0, slippage=0.0)
+
+        self.assertEqual(result["closed_trade_count"], 10)
+        self.assertAlmostEqual(result["total_return"], 0.15, places=6)
+
+    def test_portfolio_total_return_is_compounded_and_drawdown_is_realized(self):
+        dataset = pd.DataFrame(
+            [
+                {"trade_date": "2025-01-02", "symbol": "000001", "score": 2.0, "entry_price": 100.0, "exit_price": 110.0, "exit_trade_date": "2025-01-03"},
+                {"trade_date": "2025-01-03", "symbol": "000002", "score": 2.0, "entry_price": 100.0, "exit_price": 80.0, "exit_trade_date": "2025-01-04"},
+            ]
+        )
+
+        result = simulate_daily_topk_portfolio(dataset, top_k=1, commission=0.0, slippage=0.0)
+
+        self.assertAlmostEqual(result["total_return"], -0.12, places=6)
+        self.assertAlmostEqual(result["maximum_drawdown"], -0.2, places=6)
+
+    def test_ambiguous_or_untradeable_entries_are_not_counted_as_closed_trades(self):
+        dataset = pd.DataFrame(
+            [
+                {"trade_date": "2025-01-02", "symbol": "000001", "score": 2.0, "entry_price": 100.0, "exit_price": 110.0, "exit_trade_date": "2025-01-03", "path_ambiguous_10d": True},
+                {"trade_date": "2025-01-03", "symbol": "000002", "score": 2.0, "entry_price": 100.0, "exit_price": 110.0, "exit_trade_date": "2025-01-04", "entry_tradeable": False},
+            ]
+        )
+
+        result = simulate_daily_topk_portfolio(dataset, top_k=1, commission=0.0, slippage=0.0)
+
+        self.assertEqual(result["closed_trade_count"], 0)
+        self.assertEqual(result["ambiguous_exit_count"], 1)
+        self.assertEqual(result["untradeable_entry_count"], 1)
 
 
 if __name__ == "__main__":

@@ -14,9 +14,10 @@ from app.evaluation.full_market_ml.trainer import (
     run_development_training,
     run_final_holdout_evaluation,
     save_final_fit,
+    _portfolio_or_empty,
 )
 from app.evaluation.full_market_ml.splits import FinalHoldoutAccessError, SplitPlan
-from tests.full_market_ml_fixtures import predictive_fixture, random_label_fixture, sealed_split_fixture
+from tests.full_market_ml_fixtures import overlapping_portfolio_fixture, predictive_fixture, random_label_fixture, sealed_split_fixture
 from tests.test_full_market_ml_collector import FullMarketMLTestCase
 
 
@@ -24,6 +25,15 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
     @staticmethod
     def _split():
         return sealed_split_fixture(symbols_per_date=220)
+
+    def test_portfolio_ablation_accepts_canonical_execution_fields(self):
+        dataset = overlapping_portfolio_fixture().rename(
+            columns={"adjusted_next_open": "entry_price", "adjusted_exit_close": "exit_price"}
+        )
+
+        portfolio = _portfolio_or_empty(dataset)
+
+        self.assertEqual(portfolio["closed_trade_count"], 10)
 
     def test_model_selection_uses_only_oof_development_predictions(self):
         candidate = run_development_training(self.config, predictive_fixture(), self._split())

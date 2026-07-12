@@ -877,8 +877,14 @@ def _audit_allows(group, audit):
 
 
 def _portfolio_or_empty(predictions):
-    required = {"adjusted_next_open", "adjusted_exit_close", "exit_trade_date"}
-    return simulate_daily_topk_portfolio(predictions) if required.issubset(predictions.columns) else {"maximum_drawdown": 0.0}
+    execution_contracts = (
+        {"entry_price", "exit_price", "exit_trade_date"},
+        {"entry_price_10d", "exit_price_10d", "exit_trade_date_10d"},
+        {"adjusted_next_open", "adjusted_exit_close", "exit_trade_date"},
+    )
+    if any(contract.issubset(predictions.columns) for contract in execution_contracts):
+        return simulate_daily_topk_portfolio(predictions)
+    return {"maximum_drawdown": 0.0}
 
 
 def _feature_importance(data, split_plan, features, params, seeds):
