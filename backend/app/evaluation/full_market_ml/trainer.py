@@ -59,6 +59,11 @@ class FrozenCandidate:
     group_ablations: list[dict[str, Any]]
     selected_features: tuple[str, ...]
 
+    @property
+    def can_open_final_holdout(self) -> bool:
+        """Final holdout is reserved for development candidates that passed every fixed gate."""
+        return self.preliminary_status == "research_only_candidate" and not self.failed_gates
+
     def manifest(self, *, config_sha256: str, data_sha256: str, feature_schema_sha256: str) -> dict[str, Any]:
         """Return the complete, non-model-binary contract required for one final evaluation."""
         return {

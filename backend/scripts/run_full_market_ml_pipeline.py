@@ -214,6 +214,19 @@ def default_services():
         dataset_path = artifact(root, "full-build") / "dataset.parquet"
         split = load_split(root)
         frozen_sha = str(json.loads((root / "frozen_model_manifest.json").read_text(encoding="utf-8"))["frozen_model_sha"])
+        candidate_manifest = json.loads((artifact(root, "dev-train") / "candidate_manifest.json").read_text(encoding="utf-8"))
+        candidate = FrozenCandidate.from_manifest(candidate_manifest)
+        if candidate.frozen_model_sha256 != frozen_sha:
+            raise ValueError("frozen candidate manifest SHA does not match the sealed manifest")
+        if not candidate.can_open_final_holdout:
+            output = artifact(root, "final-holdout-evaluate") / "skipped.json"
+            write_json(output, {
+                "status": "research_only_failed_gate",
+                "reason": "development_gate_failed",
+                "failed_gates": candidate.failed_gates,
+                "frozen_model_sha": frozen_sha,
+            })
+            return {"quality_ready": True, "status": "research_only_failed_gate", "skipped": str(output)}
         dates = pd.read_parquet(dataset_path, columns=["trade_date", "eligible_for_training"])
         dates["trade_date"] = pd.to_datetime(dates["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d")
         labelable_final_dates = dates.loc[
@@ -224,10 +237,6 @@ def default_services():
                 f"final holdout has only {labelable_final_dates} labelable trade dates; requires at least 40 before opening the sealed holdout"
             )
         dataset = pd.read_parquet(dataset_path)
-        candidate_manifest = json.loads((artifact(root, "dev-train") / "candidate_manifest.json").read_text(encoding="utf-8"))
-        candidate = FrozenCandidate.from_manifest(candidate_manifest)
-        if candidate.frozen_model_sha256 != frozen_sha:
-            raise ValueError("frozen candidate manifest SHA does not match the sealed manifest")
         evaluation = run_final_holdout_evaluation(
             config,
             dataset,

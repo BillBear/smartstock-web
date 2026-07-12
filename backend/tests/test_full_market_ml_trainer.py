@@ -83,6 +83,11 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
         self.assertEqual(restored.selected_ranker_params, candidate.selected_ranker_params)
         self.assertEqual(restored.calibrators, candidate.calibrators)
 
+    def test_failed_development_candidate_cannot_open_final_holdout(self):
+        candidate = run_development_training(self.config, random_label_fixture(seed=42), self._split())
+
+        self.assertFalse(candidate.can_open_final_holdout)
+
     def test_final_holdout_evaluation_requires_exactly_frozen_candidate_and_reports_all_quadrants(self):
         development = predictive_fixture(symbols_per_date=300)
         base_split = self._split()
