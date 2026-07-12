@@ -233,13 +233,15 @@ def _deduplicate_market_rows(frame: pd.DataFrame, endpoint: str) -> pd.DataFrame
     result = frame.copy()
     result["symbol"] = _symbols(result)
     result["trade_date"] = result["trade_date"].map(_date_text)
-    retained = []
-    for _, rows in result.groupby(["trade_date", "symbol"], sort=False, dropna=False):
-        signatures = {_row_signature(row) for _, row in rows.iterrows()}
-        if len(signatures) > 1:
+    key_columns = ["trade_date", "symbol"]
+    comparison_columns = [
+        column for column in result.columns if column not in {"_source_order", "source_row_id", *key_columns}
+    ]
+    if comparison_columns:
+        distinct = result.groupby(key_columns, sort=False, dropna=False)[comparison_columns].nunique(dropna=False)
+        if bool((distinct > 1).any(axis=None)):
             raise ValueError(f"conflicting duplicate {endpoint} rows for trade_date,symbol")
-        retained.append(rows.iloc[-1])
-    return pd.DataFrame(retained).drop(columns=["symbol"], errors="ignore")
+    return result.drop_duplicates(key_columns, keep="last").drop(columns=["symbol"], errors="ignore")
 
 
 def _join_daily_endpoint_fields(
@@ -286,19 +288,6 @@ def _join_market_context_fields(daily: pd.DataFrame, index_daily: pd.DataFrame) 
         }
     )
     return daily.merge(context, on="trade_date", how="left", validate="many_to_one")
-
-
-def _row_signature(row: pd.Series) -> str:
-    payload = {key: _json_scalar(value) for key, value in row.items() if key not in {"_source_order", "source_row_id"}}
-    return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-
-
-def _json_scalar(value):
-    if pd.isna(value):
-        return None
-    if hasattr(value, "item"):
-        value = value.item()
-    return str(value) if not isinstance(value, (str, int, float, bool)) else value
 
 
 def _frame(frames: Mapping[str, pd.DataFrame], name: str) -> pd.DataFrame:

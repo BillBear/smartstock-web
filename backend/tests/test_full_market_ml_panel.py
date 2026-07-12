@@ -336,6 +336,15 @@ class FullMarketMLPanelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "conflicting duplicate"):
             build_panel_from_frames(conflicting)
 
+    def test_equivalent_daily_duplicates_are_deduplicated_without_changing_units(self):
+        fixtures = two_day_split_fixture()
+        fixtures["daily"] = pd.concat([fixtures["daily"], fixtures["daily"].iloc[[0]]], ignore_index=True)
+
+        panel = build_panel_from_frames(fixtures)
+
+        self.assertEqual(len(panel), 2)
+        self.assertEqual(panel.loc[panel.trade_date == "2025-01-02", "amount_cny"].iloc[0], 3000.0)
+
     def test_industry_disabled_keeps_industry_null(self):
         panel = build_panel_from_frames(historical_industry_fixture(), industry_relative_enabled=False)
         self.assertTrue(panel["industry_l1"].isna().all())
