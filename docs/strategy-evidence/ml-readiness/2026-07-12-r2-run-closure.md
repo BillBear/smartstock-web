@@ -37,8 +37,10 @@ ndcg_at_10_not_meaningfully_above_random
 precision_at_5_not_meaningfully_above_random
 ```
 
-The pipeline now prevents this candidate from opening a costly final holdout
-evaluation. Its final-holdout artifact records `development_gate_failed`.
+The pipeline and the library boundary now prevent this candidate from opening
+final fitting or a costly final-holdout evaluation. Its `final-fit` and
+`final-holdout-evaluate` stages record `development_gate_failed`; callers
+cannot bypass this by directly constructing a final-fit object.
 
 ## Runtime Defect and Recovery
 
@@ -46,9 +48,25 @@ The original final-holdout attempt was terminated and recorded as an aborted
 performance defect. The root causes were repeated daily sorting inside
 bootstrap and a second development OOF training pass during final evaluation.
 
-The bootstrap now precomputes daily score uplifts before resampling. Final
-evaluation restores the frozen candidate manifest and no longer reruns grid
-search, feature ablation, or walk-forward selection.
+The bootstrap now precomputes daily score uplifts before resampling. A future
+qualifying candidate uses a separately persisted `final-fit` artifact trained
+only on A-quadrant development rows. The holdout runner only loads that
+artifact; it cannot rerun grid search, feature ablation, walk-forward
+selection, or final fitting.
+
+## Operational Safeguards Added After Closure
+
+- Every stage now writes a heartbeat, structured stage log, and recoverable
+  status record. `--status` and `--recover-stale-seconds` do not require a
+  TuShare client or a training configuration.
+- A future formal final fit requires a base dataset backup under
+  `ML_BACKUP_ROOT` on an external `/Volumes/...` mount. The backup manifests
+  are re-hashed before use; model and final-holdout artifacts are copied to the
+  same immutable dataset backup after they are produced.
+- Development runs now retain seed-sensitivity metrics, ranked severe-loss
+  error samples, feature gain importance, group ablation output, and the full
+  development report. These are evidence artifacts for the next single
+  pre-registered research hypothesis, not evidence that R2 is viable.
 
 ## Reproduction
 
