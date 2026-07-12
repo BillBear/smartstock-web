@@ -5,8 +5,11 @@ from dataclasses import replace
 from app.evaluation.full_market_ml.trainer import (
     FIXED_RANKER_GRID,
     FIXED_SEEDS,
+    fit_final_candidate,
+    load_final_fit,
     run_development_training,
     run_final_holdout_evaluation,
+    save_final_fit,
 )
 from app.evaluation.full_market_ml.splits import FinalHoldoutAccessError, SplitPlan
 from tests.full_market_ml_fixtures import predictive_fixture, random_label_fixture, sealed_split_fixture
@@ -120,12 +123,14 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
                 frozen_model_sha="wrong-frozen-sha",
             )
 
+        final_fit = fit_final_candidate(development, split, candidate, frozen_model_sha=candidate.frozen_model_sha256)
         report = run_final_holdout_evaluation(
             self.config,
             complete,
             split,
             candidate,
             frozen_model_sha=candidate.frozen_model_sha256,
+            final_fit=final_fit,
         )
 
         self.assertEqual(report.selection_sources, ["A_walk_forward_oof"])
@@ -133,6 +138,125 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
         self.assertEqual(report.quadrant_metrics["B_time_holdout"]["date_count"], 1)
         self.assertEqual(report.quadrant_metrics["D_joint_holdout"]["date_count"], 1)
         self.assertTrue(report.predictions["quadrant"].isin({"B_time_holdout", "C_stock_holdout", "D_joint_holdout"}).all())
+
+    def test_final_holdout_evaluation_requires_a_persisted_final_fit(self):
+        development = predictive_fixture(symbols_per_date=300)
+        base_split = self._split()
+        train_symbols = tuple(f"{index + 1:06d}" for index in range(240))
+        unseen_symbols = tuple(f"{index + 1:06d}" for index in range(240, 300))
+        split = SplitPlan(
+            development_dates=base_split.development_dates,
+            final_dates=("2025-02-03",),
+            stock_holdout_symbols=unseen_symbols,
+            A_dev_train_symbols=train_symbols,
+            B_final_train_symbols=train_symbols,
+            C_dev_unseen_symbols=unseen_symbols,
+            D_final_unseen_symbols=unseen_symbols,
+            walk_forward=tuple(replace(fold, training_symbols=train_symbols) for fold in base_split.walk_forward),
+            stratum_counts_before={}, stratum_counts_after={}, split_sha256="missing-final-fit-fixture",
+        )
+        candidate = run_development_training(self.config, development, split)
+        final_rows = development.loc[development["trade_date"].eq(development["trade_date"].iloc[-1])].copy()
+        final_rows["trade_date"] = "2025-02-03"
+        complete = __import__("pandas").concat([development, final_rows], ignore_index=True)
+
+        with self.assertRaisesRegex(FinalHoldoutAccessError, "requires an explicit final fit"):
+            run_final_holdout_evaluation(
+                self.config,
+                complete,
+                split,
+                candidate,
+                frozen_model_sha=candidate.frozen_model_sha256,
+            )
+
+    def test_final_fit_is_reusable_by_holdout_evaluation(self):
+        development = predictive_fixture(symbols_per_date=300)
+        base_split = self._split()
+        train_symbols = tuple(f"{index + 1:06d}" for index in range(240))
+        unseen_symbols = tuple(f"{index + 1:06d}" for index in range(240, 300))
+        split = SplitPlan(
+            development_dates=base_split.development_dates,
+            final_dates=("2025-02-03",),
+            stock_holdout_symbols=unseen_symbols,
+            A_dev_train_symbols=train_symbols,
+            B_final_train_symbols=train_symbols,
+            C_dev_unseen_symbols=unseen_symbols,
+            D_final_unseen_symbols=unseen_symbols,
+            walk_forward=tuple(replace(fold, training_symbols=train_symbols) for fold in base_split.walk_forward),
+            stratum_counts_before={}, stratum_counts_after={}, split_sha256="final-fit-fixture",
+        )
+        candidate = run_development_training(self.config, development, split)
+        final_rows = development.loc[development["trade_date"].eq(development["trade_date"].iloc[-1])].copy()
+        final_rows["trade_date"] = "2025-02-03"
+        complete = __import__("pandas").concat([development, final_rows], ignore_index=True)
+
+        fitted = fit_final_candidate(development, split, candidate, frozen_model_sha=candidate.frozen_model_sha256)
+        report = run_final_holdout_evaluation(self.config, complete, split, candidate, frozen_model_sha=candidate.frozen_model_sha256, final_fit=fitted)
+
+        self.assertEqual(fitted.frozen_model_sha256, candidate.frozen_model_sha256)
+        self.assertEqual(report.quadrant_metrics["D_joint_holdout"]["date_count"], 1)
+
+    def test_final_fit_model_artifacts_round_trip(self):
+        candidate = run_development_training(self.config, predictive_fixture(), self._split())
+        fitted = fit_final_candidate(predictive_fixture(), self._split(), candidate, frozen_model_sha=candidate.frozen_model_sha256)
+        target = self.temp_path / "final-fit"
+
+        save_final_fit(fitted, target)
+        restored = load_final_fit(target, candidate.frozen_model_sha256)
+
+        self.assertEqual(restored.frozen_model_sha256, fitted.frozen_model_sha256)
+        self.assertEqual(len(restored.rank_models), len(fitted.rank_models))
+        self.assertEqual(restored.split_sha256, candidate.split_sha256)
+        self.assertEqual(restored.selected_features, candidate.selected_features)
+        self.assertEqual(restored.selected_risk_alpha, candidate.selected_risk_alpha)
+        self.assertEqual(restored.calibrators, candidate.calibrators)
+
+    def test_final_fit_rejects_final_holdout_rows(self):
+        development = predictive_fixture()
+        candidate = run_development_training(self.config, development, self._split())
+        final_rows = development.loc[development["trade_date"].eq(development["trade_date"].iloc[-1])].copy()
+        final_rows["trade_date"] = "2025-02-03"
+        contaminated = __import__("pandas").concat([development, final_rows], ignore_index=True)
+
+        with self.assertRaises(FinalHoldoutAccessError):
+            fit_final_candidate(
+                contaminated,
+                self._split(),
+                candidate,
+                frozen_model_sha=candidate.frozen_model_sha256,
+            )
+
+    def test_final_holdout_rejects_a_final_fit_with_a_changed_prediction_contract(self):
+        development = predictive_fixture(symbols_per_date=300)
+        base_split = self._split()
+        train_symbols = tuple(f"{index + 1:06d}" for index in range(240))
+        unseen_symbols = tuple(f"{index + 1:06d}" for index in range(240, 300))
+        split = SplitPlan(
+            development_dates=base_split.development_dates,
+            final_dates=("2025-02-03",),
+            stock_holdout_symbols=unseen_symbols,
+            A_dev_train_symbols=train_symbols,
+            B_final_train_symbols=train_symbols,
+            C_dev_unseen_symbols=unseen_symbols,
+            D_final_unseen_symbols=unseen_symbols,
+            walk_forward=tuple(replace(fold, training_symbols=train_symbols) for fold in base_split.walk_forward),
+            stratum_counts_before={}, stratum_counts_after={}, split_sha256="changed-contract-fixture",
+        )
+        candidate = run_development_training(self.config, development, split)
+        final_rows = development.loc[development["trade_date"].eq(development["trade_date"].iloc[-1])].copy()
+        final_rows["trade_date"] = "2025-02-03"
+        complete = __import__("pandas").concat([development, final_rows], ignore_index=True)
+        fitted = fit_final_candidate(development, split, candidate, frozen_model_sha=candidate.frozen_model_sha256)
+
+        with self.assertRaisesRegex(FinalHoldoutAccessError, "prediction contract"):
+            run_final_holdout_evaluation(
+                self.config,
+                complete,
+                split,
+                candidate,
+                frozen_model_sha=candidate.frozen_model_sha256,
+                final_fit=replace(fitted, selected_risk_alpha=fitted.selected_risk_alpha + 0.1),
+            )
 
 
 if __name__ == "__main__":

@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from statistics import median
 from typing import Any
 
@@ -136,6 +140,129 @@ class FinalHoldoutEvaluation:
     failed_gates: list[str]
 
 
+@dataclass(frozen=True)
+class FinalFit:
+    """Models fitted once from a frozen candidate on A development rows only."""
+
+    frozen_model_sha256: str
+    split_sha256: str
+    selected_features: tuple[str, ...]
+    selected_risk_alpha: float
+    calibrators: dict[str, dict[str, Any]]
+    rank_models: tuple[Any, ...]
+    strong_models: tuple[Any, ...]
+    strong_constant: float | None
+    severe_models: tuple[Any, ...]
+    severe_constant: float | None
+
+
+def save_final_fit(final_fit: FinalFit, target: str | Path) -> Path:
+    """Persist one immutable final-fit artifact and return its directory.
+
+    The artifact is deliberately separate from the frozen-candidate manifest:
+    candidate selection is already complete at this point, while this stage
+    contains the single model fitting pass allowed before sealed evaluation.
+    """
+    destination = Path(target)
+    if destination.exists():
+        raise FileExistsError(f"final fit artifact already exists: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}.tmp-", dir=destination.parent))
+    try:
+        manifest = {
+            "schema_version": 1,
+            "frozen_model_sha": final_fit.frozen_model_sha256,
+            "split_sha256": final_fit.split_sha256,
+            "selected_features": list(final_fit.selected_features),
+            "selected_risk_alpha": final_fit.selected_risk_alpha,
+            "calibrators": final_fit.calibrators,
+            "rank_models": _save_booster_models(final_fit.rank_models, "rank", temporary),
+            "strong_models": _save_booster_models(final_fit.strong_models, "strong", temporary),
+            "strong_constant": final_fit.strong_constant,
+            "severe_models": _save_booster_models(final_fit.severe_models, "severe", temporary),
+            "severe_constant": final_fit.severe_constant,
+        }
+        (temporary / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, destination)
+    except Exception:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    return destination
+
+
+def load_final_fit(source: str | Path, frozen_model_sha: str) -> FinalFit:
+    """Load a persisted final fit only when it belongs to the frozen candidate."""
+    directory = Path(source)
+    manifest_path = directory / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise FileNotFoundError(f"final fit manifest is missing: {manifest_path}") from error
+    if manifest.get("schema_version") != 1:
+        raise ValueError("unsupported final fit artifact schema")
+    if manifest.get("frozen_model_sha") != frozen_model_sha:
+        raise FinalHoldoutAccessError("final fit artifact SHA does not match frozen candidate")
+    contract_fields = {"split_sha256", "selected_features", "selected_risk_alpha", "calibrators"}
+    missing = sorted(field for field in contract_fields if field not in manifest)
+    if missing:
+        raise ValueError("final fit manifest missing prediction contract: " + ", ".join(missing))
+    return FinalFit(
+        frozen_model_sha256=frozen_model_sha,
+        split_sha256=str(manifest["split_sha256"]),
+        selected_features=tuple(str(feature) for feature in manifest["selected_features"]),
+        selected_risk_alpha=float(manifest["selected_risk_alpha"]),
+        calibrators=dict(manifest["calibrators"]),
+        rank_models=tuple(_load_booster_models(directory, manifest.get("rank_models"), "rank")),
+        strong_models=tuple(_load_booster_models(directory, manifest.get("strong_models"), "strong")),
+        strong_constant=_optional_float(manifest.get("strong_constant")),
+        severe_models=tuple(_load_booster_models(directory, manifest.get("severe_models"), "severe")),
+        severe_constant=_optional_float(manifest.get("severe_constant")),
+    )
+
+
+def _save_booster_models(models: tuple[Any, ...], prefix: str, directory: Path) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    for index, model in enumerate(models):
+        filename = f"{prefix}_{index:02d}.txt"
+        path = directory / filename
+        model.save_model(str(path))
+        entries.append({"file": filename, "sha256": _file_sha256(path)})
+    return entries
+
+
+def _load_booster_models(directory: Path, entries: Any, prefix: str) -> list[Any]:
+    if not isinstance(entries, list):
+        raise ValueError(f"final fit manifest has invalid {prefix} model list")
+    models = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise ValueError(f"final fit manifest has invalid {prefix} model entry")
+        filename = entry.get("file")
+        expected = f"{prefix}_{index:02d}.txt"
+        if filename != expected:
+            raise ValueError(f"final fit manifest has unexpected {prefix} model filename")
+        path = directory / filename
+        if not path.is_file() or _file_sha256(path) != entry.get("sha256"):
+            raise ValueError(f"final fit {prefix} model checksum mismatch: {filename}")
+        models.append(lgb.Booster(model_file=str(path)))
+    return models
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _optional_float(value: Any) -> float | None:
+    return None if value is None else float(value)
+
+
 def run_development_training(
     config: Any,
     dataset: pd.DataFrame,
@@ -206,6 +333,45 @@ def run_development_training(
     )
 
 
+def fit_final_candidate(
+    dataset: pd.DataFrame,
+    split_plan: SplitPlan,
+    candidate: FrozenCandidate,
+    *,
+    frozen_model_sha: str,
+) -> FinalFit:
+    """Fit fixed models once without re-running model selection or walk-forward."""
+    if frozen_model_sha != candidate.frozen_model_sha256:
+        raise FinalHoldoutAccessError("final fit requires the exact frozen candidate SHA")
+    sealed = split_plan.seal_final_holdout(frozen_model_sha)
+    train = _development_dataset(dataset, sealed)
+    missing_features = sorted(set(candidate.selected_features) - set(train.columns))
+    if missing_features:
+        raise ValueError("final fit dataset missing selected features: " + ", ".join(missing_features))
+    rank_models = tuple(
+        _train_ranker(train, candidate.selected_features, candidate.selected_ranker_params, seed)
+        for seed in candidate.seeds
+    )
+    strong_models, strong_constant = _train_classifier_models(
+        train, candidate.selected_features, "label_strong_path_10d", candidate.selected_ranker_params, candidate.seeds
+    )
+    severe_models, severe_constant = _train_classifier_models(
+        train, candidate.selected_features, "label_severe_negative_10d", candidate.selected_ranker_params, candidate.seeds
+    )
+    return FinalFit(
+        frozen_model_sha256=frozen_model_sha,
+        split_sha256=sealed.split_sha256,
+        selected_features=tuple(candidate.selected_features),
+        selected_risk_alpha=candidate.selected_risk_alpha,
+        calibrators=dict(candidate.calibrators),
+        rank_models=rank_models,
+        strong_models=tuple(strong_models),
+        strong_constant=strong_constant,
+        severe_models=tuple(severe_models),
+        severe_constant=severe_constant,
+    )
+
+
 def run_final_holdout_evaluation(
     config: Any,
     dataset: pd.DataFrame,
@@ -213,6 +379,7 @@ def run_final_holdout_evaluation(
     candidate: FrozenCandidate,
     *,
     frozen_model_sha: str,
+    final_fit: FinalFit | None = None,
 ) -> FinalHoldoutEvaluation:
     """Fit the frozen candidate on development A and evaluate B/C/D exactly once.
 
@@ -222,27 +389,23 @@ def run_final_holdout_evaluation(
     if frozen_model_sha != candidate.frozen_model_sha256:
         raise FinalHoldoutAccessError("final holdout requires the exact frozen candidate SHA")
     sealed = split_plan.seal_final_holdout(frozen_model_sha)
-    train_symbols = set(sealed.A_dev_train_symbols)
+    if final_fit is not None and final_fit.frozen_model_sha256 != frozen_model_sha:
+        raise FinalHoldoutAccessError("final holdout fit SHA does not match frozen candidate")
+    if final_fit is not None and (
+        final_fit.split_sha256 != sealed.split_sha256
+        or final_fit.selected_features != tuple(candidate.selected_features)
+        or final_fit.selected_risk_alpha != candidate.selected_risk_alpha
+        or final_fit.calibrators != candidate.calibrators
+    ):
+        raise FinalHoldoutAccessError("final holdout final fit prediction contract does not match frozen candidate")
     quadrants = {
         "B_time_holdout": (set(sealed.load_quadrant("B", frozen_model_sha=frozen_model_sha)), set(sealed.final_dates)),
         "C_stock_holdout": (set(sealed.load_quadrant("C", frozen_model_sha=frozen_model_sha)), set(sealed.development_dates)),
         "D_joint_holdout": (set(sealed.load_quadrant("D", frozen_model_sha=frozen_model_sha)), set(sealed.final_dates)),
     }
     data = _final_evaluation_dataset(dataset, sealed, candidate.selected_features)
-    train = data.loc[data["trade_date"].isin(sealed.development_dates) & data["symbol"].isin(train_symbols)].copy()
-    if train.empty:
-        raise ValueError("final holdout evaluation has no eligible A-quadrant training rows")
-
-    rank_models = [
-        _train_ranker(train, candidate.selected_features, candidate.selected_ranker_params, seed)
-        for seed in candidate.seeds
-    ]
-    strong_models, strong_constant = _train_classifier_models(
-        train, candidate.selected_features, "label_strong_path_10d", candidate.selected_ranker_params, candidate.seeds
-    )
-    severe_models, severe_constant = _train_classifier_models(
-        train, candidate.selected_features, "label_severe_negative_10d", candidate.selected_ranker_params, candidate.seeds
-    )
+    if final_fit is None:
+        raise FinalHoldoutAccessError("final holdout requires an explicit final fit artifact")
 
     prediction_frames = []
     quadrant_metrics: dict[str, dict[str, Any]] = {}
@@ -257,11 +420,11 @@ def run_final_holdout_evaluation(
         predicted = _predict_frozen_candidate(
             rows,
             candidate,
-            rank_models,
-            strong_models,
-            strong_constant,
-            severe_models,
-            severe_constant,
+            final_fit.rank_models,
+            final_fit.strong_models,
+            final_fit.strong_constant,
+            final_fit.severe_models,
+            final_fit.severe_constant,
         )
         predicted["quadrant"] = quadrant
         prediction_frames.append(predicted)
