@@ -35,7 +35,7 @@ def default_services():
     from app.evaluation.full_market_ml.preflight import run_preflight
     from app.evaluation.full_market_ml.quality import audit_panel_quality
     from app.evaluation.full_market_ml.splits import SplitPlan, WalkForwardFold, build_split_plan
-    from app.evaluation.full_market_ml.trainer import run_development_training, run_final_holdout_evaluation
+    from app.evaluation.full_market_ml.trainer import FrozenCandidate, run_development_training, run_final_holdout_evaluation
 
     client = ts.pro_api(os.environ.get("TUSHARE_TOKEN", ""))
 
@@ -223,10 +223,10 @@ def default_services():
                 f"final holdout has only {labelable_final_dates} labelable trade dates; requires at least 40 before opening the sealed holdout"
             )
         dataset = pd.read_parquet(dataset_path)
-        development = dataset.loc[dataset["trade_date"].isin(split.development_dates)].copy()
-        candidate = run_development_training(config, development, split)
+        candidate_manifest = json.loads((artifact(root, "dev-train") / "candidate_manifest.json").read_text(encoding="utf-8"))
+        candidate = FrozenCandidate.from_manifest(candidate_manifest)
         if candidate.frozen_model_sha256 != frozen_sha:
-            raise ValueError("reconstructed frozen candidate SHA does not match the sealed manifest")
+            raise ValueError("frozen candidate manifest SHA does not match the sealed manifest")
         evaluation = run_final_holdout_evaluation(
             config,
             dataset,

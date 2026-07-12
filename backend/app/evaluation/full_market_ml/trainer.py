@@ -77,6 +77,45 @@ class FrozenCandidate:
             "failed_gates": list(self.failed_gates),
         }
 
+    @classmethod
+    def from_manifest(cls, manifest: dict[str, Any]) -> "FrozenCandidate":
+        """Restore the fixed candidate contract without rerunning development OOF selection."""
+        required = {
+            "frozen_model_sha",
+            "split_sha256",
+            "selection_sources",
+            "selected_features",
+            "selected_ranker_params",
+            "selected_risk_alpha",
+            "seeds",
+            "calibrators",
+            "preliminary_status",
+            "failed_gates",
+        }
+        missing = sorted(required - set(manifest))
+        if missing:
+            raise ValueError("frozen candidate manifest missing: " + ", ".join(missing))
+        return cls(
+            selection_sources=list(manifest["selection_sources"]),
+            oof_predictions=pd.DataFrame(),
+            oof_metrics={},
+            baselines={},
+            model_selection_report=[],
+            calibrators=dict(manifest["calibrators"]),
+            feature_importance={},
+            frozen_model_sha256=str(manifest["frozen_model_sha"]),
+            split_sha256=str(manifest["split_sha256"]),
+            preliminary_status=str(manifest["preliminary_status"]),
+            failed_gates=list(manifest["failed_gates"]),
+            fixed_ranker_grid=(),
+            seeds=tuple(int(seed) for seed in manifest["seeds"]),
+            risk_alphas=RISK_ALPHAS,
+            selected_risk_alpha=float(manifest["selected_risk_alpha"]),
+            selected_ranker_params={key: int(value) for key, value in dict(manifest["selected_ranker_params"]).items()},
+            group_ablations=[],
+            selected_features=tuple(str(feature) for feature in manifest["selected_features"]),
+        )
+
 @dataclass(frozen=True)
 class FinalHoldoutEvaluation:
     """One-shot sealed-quadrant evaluation of an already frozen candidate."""

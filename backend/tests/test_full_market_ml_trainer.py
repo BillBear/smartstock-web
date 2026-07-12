@@ -71,6 +71,18 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
         self.assertEqual(manifest["selected_features"], list(candidate.selected_features))
         self.assertEqual(manifest["selected_ranker_params"], candidate.selected_ranker_params)
 
+    def test_frozen_candidate_can_be_reconstructed_without_repeating_development_selection(self):
+        candidate = run_development_training(self.config, predictive_fixture(), self._split())
+        manifest = candidate.manifest(config_sha256="config", data_sha256="data", feature_schema_sha256="schema")
+
+        restored = candidate.from_manifest(manifest)
+
+        self.assertTrue(restored.oof_predictions.empty)
+        self.assertEqual(restored.frozen_model_sha256, candidate.frozen_model_sha256)
+        self.assertEqual(restored.selected_features, candidate.selected_features)
+        self.assertEqual(restored.selected_ranker_params, candidate.selected_ranker_params)
+        self.assertEqual(restored.calibrators, candidate.calibrators)
+
     def test_final_holdout_evaluation_requires_exactly_frozen_candidate_and_reports_all_quadrants(self):
         development = predictive_fixture(symbols_per_date=300)
         base_split = self._split()
