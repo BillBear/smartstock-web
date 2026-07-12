@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,10 +60,18 @@ StageService = Callable[[Any, Path, Mapping[str, Any]], Mapping[str, Any] | None
 class FullMarketMLPipeline:
     """Run immutable stages in order, refusing hash or quality-gate bypasses."""
 
-    def __init__(self, config: Any, runtime_root: str | Path, services: Mapping[str, StageService]):
+    def __init__(
+        self,
+        config: Any,
+        runtime_root: str | Path,
+        services: Mapping[str, StageService],
+        *,
+        heartbeat_interval_seconds: float = 30.0,
+    ):
         self.config = config
         self.runtime_root = Path(runtime_root)
         self.services = dict(services)
+        self.heartbeat_interval_seconds = max(0.001, float(heartbeat_interval_seconds))
         missing = [stage for stage in STAGES if stage not in self.services]
         if missing:
             raise ValueError("missing pipeline stage services: " + ", ".join(missing))
@@ -114,6 +123,7 @@ class FullMarketMLPipeline:
             failure_details={"type": "AbortedStage", "message": str(reason)},
         )
         self._write_json(self._state_path(stage), aborted)
+        self._write_progress(aborted)
         return aborted
 
     def recover_stale_stages(self, *, max_idle_seconds: int, now: str | None = None) -> list[str]:
@@ -141,6 +151,7 @@ class FullMarketMLPipeline:
                 failure_details={"type": "StageTimeout", "message": f"heartbeat_idle_seconds={int(idle_seconds)}"},
             )
             self._write_json(self._state_path(stage), timeout)
+            self._write_progress(timeout)
             recovered.append(stage)
         return recovered
 
@@ -148,6 +159,15 @@ class FullMarketMLPipeline:
         started = _timestamp()
         running = self._state(stage, "running", inputs, {}, started_at=started)
         self._write_json(self._state_path(stage), running)
+        self._write_progress(running)
+        stop_heartbeat = threading.Event()
+        heartbeat = threading.Thread(
+            target=self._heartbeat_until_stopped,
+            args=(stage, stop_heartbeat),
+            name=f"ml-heartbeat-{stage}",
+            daemon=True,
+        )
+        heartbeat.start()
         try:
             artifacts = {name: state.get("artifacts", {}) for name, state in states.items()}
             output = dict(self.services[stage](self.config, self.runtime_root, artifacts) or {})
@@ -164,6 +184,7 @@ class FullMarketMLPipeline:
                 self._write_json(self.runtime_root / "frozen_model_manifest.json", manifest)
             complete = self._state(stage, "complete", inputs, output, started_at=started, ended_at=_timestamp())
             self._write_json(self._state_path(stage), complete)
+            self._write_progress(complete)
             return complete
         except Exception as error:
             blocked = self._state(
@@ -176,7 +197,21 @@ class FullMarketMLPipeline:
                 failure_details={"type": type(error).__name__, "message": str(error)},
             )
             self._write_json(self._state_path(stage), blocked)
+            self._write_progress(blocked)
             raise
+        finally:
+            stop_heartbeat.set()
+            heartbeat.join(timeout=max(1.0, self.heartbeat_interval_seconds * 2))
+
+    def _heartbeat_until_stopped(self, stage: str, stop: threading.Event) -> None:
+        while not stop.wait(self.heartbeat_interval_seconds):
+            state = self._load_state(stage)
+            if state is None or state.get("status") != "running":
+                return
+            state["heartbeat_at"] = _timestamp()
+            state["peak_rss_bytes"] = _peak_rss_bytes()
+            self._write_json(self._state_path(stage), state)
+            self._write_progress(state)
 
     def _input_hashes(self, stage: str, states: Mapping[str, dict[str, Any]]) -> dict[str, str]:
         hashes = {"config_sha256": str(self.config.sha256)}
@@ -230,6 +265,19 @@ class FullMarketMLPipeline:
 
     def _state_path(self, stage: str) -> Path:
         return self.runtime_root / "stages" / stage / "stage_state.json"
+
+    def _write_progress(self, state: Mapping[str, Any]) -> None:
+        progress = {
+            "stage": state.get("stage"),
+            "status": state.get("status"),
+            "started_at": state.get("started_at"),
+            "heartbeat_at": state.get("heartbeat_at"),
+            "ended_at": state.get("ended_at"),
+            "pid": state.get("pid"),
+            "peak_rss_bytes": state.get("peak_rss_bytes"),
+            "failure_details": state.get("failure_details"),
+        }
+        self._write_json(self.runtime_root / "progress.json", progress)
 
     def _load_state(self, stage: str) -> dict[str, Any] | None:
         path = self._state_path(stage)

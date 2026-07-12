@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from app.evaluation.full_market_ml.pipeline import (
@@ -77,6 +78,24 @@ class FullMarketMLPipelineTests(FullMarketMLTestCase):
 
         self.assertEqual(recovered, ["preflight"])
         self.assertEqual(pipeline.stage_state("preflight")["status"], "timeout")
+
+    def test_running_stage_writes_heartbeat_and_progress(self):
+        services = fake_pipeline_services()
+        observed = {}
+
+        def preflight(_config, root, _artifacts):
+            time.sleep(0.03)
+            observed.update(__import__("json").loads((root / "progress.json").read_text(encoding="utf-8")))
+            return {"quality_ready": True}
+
+        services["preflight"] = preflight
+        pipeline = FullMarketMLPipeline(self.config, self.temp_path, services, heartbeat_interval_seconds=0.005)
+
+        pipeline.run("preflight")
+
+        self.assertEqual(observed["stage"], "preflight")
+        self.assertEqual(observed["status"], "running")
+        self.assertIn("heartbeat_at", observed)
 
     def test_cli_has_no_status_override_option(self):
         script = Path(__file__).parents[1] / "scripts" / "run_full_market_ml_pipeline.py"
