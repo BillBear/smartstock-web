@@ -99,6 +99,23 @@ class FullMarketMLPipeline:
             raise FileNotFoundError(self._state_path(stage))
         return state
 
+    def abort_stage(self, stage: str, *, reason: str) -> dict[str, Any]:
+        """Close an interrupted stage without deleting its immutable inputs."""
+        existing = self.stage_state(stage)
+        if existing.get("status") != "running":
+            raise ValueError(f"only a running stage can be aborted: {stage}")
+        aborted = self._state(
+            stage,
+            "aborted",
+            existing.get("input_hashes", {}),
+            existing.get("artifacts", {}),
+            started_at=str(existing.get("started_at", _timestamp())),
+            ended_at=_timestamp(),
+            failure_details={"type": "AbortedStage", "message": str(reason)},
+        )
+        self._write_json(self._state_path(stage), aborted)
+        return aborted
+
     def _run_stage(self, stage: str, inputs: dict[str, str], states: Mapping[str, dict[str, Any]]) -> dict[str, Any]:
         started = _timestamp()
         running = self._state(stage, "running", inputs, {}, started_at=started)
@@ -177,6 +194,8 @@ class FullMarketMLPipeline:
             "artifacts": dict(artifacts),
             "started_at": started_at,
             "ended_at": ended_at,
+            "heartbeat_at": _timestamp() if status == "running" else ended_at,
+            "pid": os.getpid(),
             "peak_rss_bytes": _peak_rss_bytes(),
             "failure_details": dict(failure_details) if failure_details else None,
         }

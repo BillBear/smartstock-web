@@ -55,6 +55,18 @@ class FullMarketMLPipelineTests(FullMarketMLTestCase):
         self.assertIn("ended_at", state)
         self.assertIn("peak_rss_bytes", state)
 
+    def test_running_stage_can_be_explicitly_aborted_with_recovery_evidence(self):
+        pipeline = FullMarketMLPipeline(self.config, self.temp_path, fake_pipeline_services())
+        running = pipeline._state("preflight", "running", {}, {}, started_at="2026-07-12T00:00:00+00:00")
+        pipeline._write_json(pipeline._state_path("preflight"), running)
+
+        state = pipeline.abort_stage("preflight", reason="performance_budget_exceeded")
+
+        self.assertEqual(state["status"], "aborted")
+        self.assertEqual(state["failure_details"]["type"], "AbortedStage")
+        self.assertIn("performance_budget_exceeded", state["failure_details"]["message"])
+        self.assertIsNotNone(state["ended_at"])
+
     def test_cli_has_no_status_override_option(self):
         script = Path(__file__).parents[1] / "scripts" / "run_full_market_ml_pipeline.py"
 
