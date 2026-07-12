@@ -16,19 +16,28 @@ TAKE_PROFIT = 0.08
 STOP_LOSS = -0.06
 SEVERE_DRAWDOWN = -0.08
 MIN_DAILY_INVARIANT_ELIGIBLE = 1000
+DEFAULT_COMMISSION = 0.0003
+DEFAULT_SLIPPAGE = 0.001
 
 
 class LabelDistributionError(ValueError):
     """Raised when a full-market label distribution violates its fixed bounds."""
 
 
-def build_forward_labels(config: FullMarketMLConfig, panel_shard: pd.DataFrame) -> pd.DataFrame:
+def build_forward_labels(
+    config: FullMarketMLConfig,
+    panel_shard: pd.DataFrame,
+    *,
+    commission: float = DEFAULT_COMMISSION,
+    slippage: float = DEFAULT_SLIPPAGE,
+) -> pd.DataFrame:
     """Build shard-local outcomes; call ``aggregate_full_market_labels`` for grades.
 
     ``next_open_date`` is an immutable panel calendar contract. Following that
     chain prevents an absent session from being silently replaced by a later bar.
     """
     del config
+    commission, slippage = _validate_execution_costs(commission, slippage)
     panel = _normalize_panel(panel_shard)
     if panel.empty:
         return panel
@@ -38,7 +47,10 @@ def build_forward_labels(config: FullMarketMLConfig, panel_shard: pd.DataFrame) 
         for _, rows in labeled.groupby("symbol", sort=False):
             symbol_rows = rows.reset_index(drop=True)
             data = _symbol_arrays(symbol_rows)
-            values.extend(_forward_outcome(data, offset, horizon) for offset in range(len(symbol_rows)))
+            values.extend(
+                _forward_outcome(data, offset, horizon, commission=commission, slippage=slippage)
+                for offset in range(len(symbol_rows))
+            )
         outcomes = pd.DataFrame(values, index=labeled.index)
         for column in outcomes:
             labeled[column] = outcomes[column]
@@ -170,6 +182,7 @@ def _symbol_arrays(rows: pd.DataFrame) -> dict[str, Any]:
     dates = rows["trade_date"].astype(str).tolist()
     date_index = {value: index for index, value in enumerate(dates)}
     return {
+        "dates": dates,
         "next_index": np.asarray([date_index.get(str(value), -1) for value in rows["next_open_date"]], dtype=np.int64),
         "open": rows["adjusted_open"].to_numpy(dtype=float),
         "high": rows["adjusted_high"].to_numpy(dtype=float),
@@ -182,16 +195,27 @@ def _symbol_arrays(rows: pd.DataFrame) -> dict[str, Any]:
     }
 
 
-def _forward_outcome(data: dict[str, Any], offset: int, horizon: int) -> dict[str, Any]:
+def _forward_outcome(
+    data: dict[str, Any], offset: int, horizon: int, *, commission: float, slippage: float
+) -> dict[str, Any]:
     prefix = f"{horizon}d"
     indices = _calendar_exact_indices(data["next_index"], offset, horizon)
     available = indices is not None and _valid_adjusted_indices(data, indices)
     eligible = bool(data["eligible"][offset] and data["tradeable"][offset] and available)
-    base = {f"horizon_available_{prefix}": bool(available), f"eligible_for_training_{prefix}": bool(eligible)}
+    base = {
+        f"horizon_available_{prefix}": bool(available),
+        f"eligible_for_training_{prefix}": bool(eligible),
+        f"entry_tradeable_{prefix}": bool(data["tradeable"][offset]),
+    }
     if not available:
-        return {
+        outcome = {
             **base,
             f"future_return_{prefix}": math.nan,
+            f"gross_return_{prefix}": math.nan,
+            f"net_return_after_cost_{prefix}": math.nan,
+            f"entry_price_{prefix}": math.nan,
+            f"exit_price_{prefix}": math.nan,
+            f"exit_trade_date_{prefix}": pd.NA,
             f"mfe_{prefix}": math.nan,
             f"mae_{prefix}": math.nan,
             f"future_limit_up_count_{prefix}": pd.NA,
@@ -200,23 +224,33 @@ def _forward_outcome(data: dict[str, Any], offset: int, horizon: int) -> dict[st
             f"sl_before_tp_{prefix}": pd.NA,
             f"path_ambiguous_{prefix}": pd.NA,
         }
+        return _add_canonical_ten_day_aliases(outcome, prefix)
     entry = float(data["open"][indices[0]])
-    return {
+    exit_price = float(data["close"][indices[-1]])
+    gross_return = exit_price / entry - 1.0
+    net_return = _net_execution_return(entry, exit_price, commission, slippage)
+    outcome = {
         **base,
-        f"future_return_{prefix}": float(data["close"][indices[-1]]) / entry - 1.0,
+        f"future_return_{prefix}": gross_return,
+        f"gross_return_{prefix}": gross_return,
+        f"net_return_after_cost_{prefix}": net_return,
+        f"entry_price_{prefix}": entry,
+        f"exit_price_{prefix}": exit_price,
+        f"exit_trade_date_{prefix}": str(data["dates"][indices[-1]]),
         f"mfe_{prefix}": float(data["high"][indices].max()) / entry - 1.0,
         f"mae_{prefix}": float(data["low"][indices].min()) / entry - 1.0,
         f"future_limit_up_count_{prefix}": int(data["up"][indices].sum()),
         f"future_limit_down_count_{prefix}": int(data["down"][indices].sum()),
         **_path_flags(data, indices, entry, prefix),
     }
+    return _add_canonical_ten_day_aliases(outcome, prefix)
 
 
 def _calendar_exact_indices(next_index: np.ndarray, offset: int, horizon: int) -> np.ndarray | None:
     expected = int(next_index[offset])
     indices: list[int] = []
     for step in range(horizon):
-        if expected < 0:
+        if expected < 0 or expected != offset + step + 1:
             return None
         indices.append(expected)
         if step < horizon - 1:
@@ -244,12 +278,21 @@ def _path_flags(data: dict[str, Any], indices: np.ndarray, entry: float, prefix:
 
 
 def _prepare_for_aggregation(shard: pd.DataFrame) -> pd.DataFrame:
-    required = {"trade_date", "symbol", "eligible_for_training", "future_return_10d", "mae_10d", "tp_before_sl_10d", "sl_before_tp_10d", "path_ambiguous_10d", "future_limit_down_count_10d"}
+    required = {
+        "trade_date", "symbol", "eligible_for_training", "future_return_10d", "net_return_after_cost_10d",
+        "entry_price", "exit_price", "exit_trade_date", "mae_10d", "tp_before_sl_10d",
+        "sl_before_tp_10d", "path_ambiguous_10d", "future_limit_down_count_10d",
+    }
     missing = sorted(required - set(shard.columns))
     if missing:
         raise ValueError("labeled shard missing columns: " + ", ".join(missing))
     result = shard.copy()
-    for column in ("market_median_future_return_10d", "industry_median_future_return_10d", "future_return_percent_rank_10d", "future_return_bottom_percent_rank_10d", "relevance_grade_10d", "label_strong_path_10d", "label_severe_negative_10d", "market_state_10d"):
+    for column in (
+        "market_median_future_return_10d", "market_median_net_return_10d", "industry_median_future_return_10d",
+        "industry_median_net_return_10d", "future_return_percent_rank_10d", "net_return_percent_rank_10d",
+        "future_return_bottom_percent_rank_10d", "relevance_grade_10d", "label_strong_path_10d",
+        "label_severe_negative_10d", "market_state_10d",
+    ):
         result[column] = pd.NA
     return result
 
@@ -271,11 +314,13 @@ def _eligible_rows_for_date(shards: Mapping[str, pd.DataFrame], trade_date: str)
 
 
 def _assign_full_market_date_labels(shards: Mapping[str, pd.DataFrame], eligible: pd.DataFrame, trade_date: str) -> None:
-    returns = pd.to_numeric(eligible["future_return_10d"], errors="coerce")
+    gross_returns = pd.to_numeric(eligible["future_return_10d"], errors="coerce")
+    returns = pd.to_numeric(eligible["net_return_after_cost_10d"], errors="coerce")
     top_rank = returns.rank(ascending=False, method="max", pct=True)
     bottom_rank = returns.rank(ascending=True, method="max", pct=True)
-    market_median = float(returns.median())
-    market_state = "weak" if market_median <= 0.0 else "normal"
+    market_median = float(gross_returns.median())
+    market_net_median = float(returns.median())
+    market_state = "weak" if market_net_median <= 0.0 else "normal"
     mae = pd.to_numeric(eligible["mae_10d"], errors="coerce")
     mfe = pd.to_numeric(eligible["mfe_10d"], errors="coerce")
     severe = (
@@ -292,12 +337,15 @@ def _assign_full_market_date_labels(shards: Mapping[str, pd.DataFrame], eligible
     grades.loc[top_rank.le(0.05) & mfe.ge(0.08 - 1e-12) & mae.gt(STOP_LOSS + 1e-12)] = 4
     grades.loc[severe] = 0
     strong = grades.ge(3)
-    industry_medians = eligible.groupby("industry_l1", dropna=True)["future_return_10d"].median()
+    industry_medians = eligible.assign(_gross_return=gross_returns).groupby("industry_l1", dropna=True)["_gross_return"].median()
+    industry_net_medians = eligible.assign(_net_return=returns).groupby("industry_l1", dropna=True)["_net_return"].median()
     for row_index, row in eligible.iterrows():
         shard = shards[str(row["_shard_key"])]
         index = row["_source_index"]
         shard.at[index, "market_median_future_return_10d"] = market_median
+        shard.at[index, "market_median_net_return_10d"] = market_net_median
         shard.at[index, "future_return_percent_rank_10d"] = float(top_rank.loc[row_index])
+        shard.at[index, "net_return_percent_rank_10d"] = float(top_rank.loc[row_index])
         shard.at[index, "future_return_bottom_percent_rank_10d"] = float(bottom_rank.loc[row_index])
         shard.at[index, "relevance_grade_10d"] = int(grades.loc[row_index])
         shard.at[index, "label_strong_path_10d"] = bool(strong.loc[row_index])
@@ -305,6 +353,7 @@ def _assign_full_market_date_labels(shards: Mapping[str, pd.DataFrame], eligible
         shard.at[index, "market_state_10d"] = market_state
         if pd.notna(row.get("industry_l1")):
             shard.at[index, "industry_median_future_return_10d"] = float(industry_medians.loc[row["industry_l1"]])
+            shard.at[index, "industry_median_net_return_10d"] = float(industry_net_medians.loc[row["industry_l1"]])
 
 
 def _combined_labeled_rows(labeled: pd.DataFrame | Mapping[str, pd.DataFrame]) -> pd.DataFrame:
@@ -312,3 +361,22 @@ def _combined_labeled_rows(labeled: pd.DataFrame | Mapping[str, pd.DataFrame]) -
         frames = list(labeled.values())
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     return labeled.copy() if isinstance(labeled, pd.DataFrame) else pd.DataFrame()
+
+
+def _add_canonical_ten_day_aliases(outcome: dict[str, Any], prefix: str) -> dict[str, Any]:
+    if prefix == "10d":
+        for name in ("entry_price", "exit_price", "exit_trade_date", "gross_return", "net_return_after_cost", "mfe", "mae"):
+            outcome[name] = outcome[f"{name}_{prefix}"]
+    return outcome
+
+
+def _net_execution_return(entry: float, exit_price: float, commission: float, slippage: float) -> float:
+    return ((exit_price * (1.0 - slippage)) / (entry * (1.0 + slippage))) * (1.0 - commission) ** 2 - 1.0
+
+
+def _validate_execution_costs(commission: float, slippage: float) -> tuple[float, float]:
+    commission = float(commission)
+    slippage = float(slippage)
+    if not math.isfinite(commission) or not math.isfinite(slippage) or commission < 0.0 or slippage < 0.0:
+        raise ValueError("commission and slippage must be finite and non-negative")
+    return commission, slippage

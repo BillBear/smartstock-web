@@ -47,6 +47,34 @@ class FullMarketMLLabelTests(FullMarketMLTestCase):
 
         self.assertEqual(labeled.iloc[0]["future_return_10d"], 0.0)
 
+    def test_ten_day_label_exposes_canonical_next_open_outcome(self):
+        labeled = build_forward_labels(
+            self.config,
+            self._calendar_exact(next_open_gap_fixture(signal_close=10, next_open=20, day10_close=22)),
+        )
+        row = labeled.iloc[0]
+        expected_net = ((22.0 * (1.0 - 0.001)) / (20.0 * (1.0 + 0.001))) * (1.0 - 0.0003) ** 2 - 1.0
+
+        self.assertEqual(row["entry_price"], 20.0)
+        self.assertEqual(row["exit_price"], 22.0)
+        self.assertEqual(row["exit_trade_date"], "2025-01-16")
+        self.assertAlmostEqual(row["gross_return"], 0.1)
+        self.assertAlmostEqual(row["net_return_after_cost"], expected_net)
+        self.assertAlmostEqual(row["net_return_after_cost_10d"], expected_net)
+
+    def test_negative_execution_cost_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "commission and slippage"):
+            build_forward_labels(self.config, self._calendar_exact(next_open_gap_fixture(signal_close=10, next_open=20, day10_close=20)), commission=-0.001)
+
+    def test_horizon_rejects_a_next_open_pointer_that_skips_an_observed_session(self):
+        panel = self._calendar_exact(next_open_gap_fixture(signal_close=10, next_open=20, day10_close=20))
+        panel.at[0, "next_open_date"] = panel.loc[2, "trade_date"]
+
+        labeled = build_forward_labels(self.config, panel)
+
+        self.assertFalse(bool(labeled.iloc[0]["horizon_available_10d"]))
+        self.assertTrue(pd.isna(labeled.iloc[0]["net_return_after_cost"]))
+
     def test_split_or_dividend_does_not_create_false_return(self):
         labeled = build_forward_labels(self.config, self._calendar_exact(corporate_action_fixture()))
 
@@ -89,6 +117,19 @@ class FullMarketMLLabelTests(FullMarketMLTestCase):
         self.assertEqual(len(eligible), 4)
         self.assertAlmostEqual(eligible.iloc[0]["market_median_future_return_10d"], 0.015)
         self.assertTrue(pd.isna(signal_rows.loc[signal_rows["symbol"] == "999999", "market_median_future_return_10d"].item()))
+
+    def test_grades_use_net_execution_return_contract(self):
+        panels = []
+        for index, future_return in enumerate((0.01, 0.02, 0.03, 0.04)):
+            panel = next_open_gap_fixture(signal_close=10, next_open=20, day10_close=20.0 * (1.0 + future_return))
+            panel["symbol"] = f"{index + 1:06d}"
+            panels.append(panel)
+
+        labeled = pd.concat(self._aggregate(pd.concat(panels, ignore_index=True)).values(), ignore_index=True)
+        signal = labeled.query("trade_date == '2025-01-02'")
+
+        expected = signal["net_return_after_cost"].median()
+        self.assertAlmostEqual(signal["market_median_net_return_10d"].dropna().iloc[0], expected)
 
     def test_report_exposes_distribution_and_path_ambiguity(self):
         labeled = self._aggregate(eligible_cross_section_fixture())["shard-0"]

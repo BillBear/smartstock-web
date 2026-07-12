@@ -137,9 +137,13 @@ OPTIONAL_FEATURE_SPECS = (
 FEATURE_NAMES = [spec.name for spec in CORE_FEATURE_SPECS]
 OPTIONAL_FEATURE_NAMES = [spec.name for spec in OPTIONAL_FEATURE_SPECS]
 ALL_FEATURE_NAMES = [*FEATURE_NAMES, *OPTIONAL_FEATURE_NAMES]
-_DENIED_EXACT = {"entry_tradeable", "eligible_for_training", "eligible_signal_day"}
+_DENIED_EXACT = {
+    "entry_tradeable", "eligible_for_training", "eligible_signal_day", "entry_price", "exit_price",
+    "exit_trade_date", "gross_return", "net_return_after_cost", "mfe", "mae",
+}
 _DENIED_PREFIXES = (
-    "next_", "future_", "label_", "relevance_", "tp_", "sl_", "path_ambiguous",
+    "next_", "future_", "label_", "relevance_", "tp_", "sl_", "path_ambiguous", "entry_tradeable_",
+    "entry_price_", "exit_price_", "exit_trade_date_", "gross_return_", "net_return_after_cost_",
     "horizon_available_", "eligible_for_training_", "mfe_", "mae_", "market_median_",
     "industry_median_", "market_state_",
 )
