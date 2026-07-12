@@ -15,7 +15,9 @@ from app.evaluation.full_market_ml.trainer import (
     run_final_holdout_evaluation,
     save_final_fit,
     _portfolio_or_empty,
+    _ranker_oof,
     _run_group_ablations,
+    _unseen_stock_oof,
 )
 from app.evaluation.full_market_ml.splits import FinalHoldoutAccessError, SplitPlan
 from tests.full_market_ml_fixtures import overlapping_portfolio_fixture, predictive_fixture, random_label_fixture, sealed_split_fixture
@@ -60,6 +62,54 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
         self.assertTrue(evaluated)
         self.assertTrue(all(len(row["without_group_features"]) < 2 for row in evaluated))
         self.assertEqual(retune.call_count, len(evaluated))
+
+    def test_outer_validation_rows_are_not_used_for_ranker_early_stopping(self):
+        dataset = predictive_fixture(symbols_per_date=220)
+        captured = []
+
+        class FakeModel:
+            def predict(self, rows, num_iteration=None):
+                return [0.0] * len(rows)
+
+        def fake_train(train, _features, _params, _seed, valid=None, **_kwargs):
+            captured.append((set(train["trade_date"]), set(valid["trade_date"]) if valid is not None else set()))
+            return FakeModel()
+
+        with patch("app.evaluation.full_market_ml.trainer._build_ranker_datasets", return_value=(object(), [])), patch(
+            "app.evaluation.full_market_ml.trainer._train_ranker", side_effect=fake_train
+        ):
+            _ranker_oof(dataset, self._split(), ("adjusted_return_20d",), FIXED_RANKER_GRID[0], (FIXED_SEEDS[0],))
+
+        outer_validation_dates = set().union(*(set(fold.validation_dates) for fold in self._split().walk_forward))
+        self.assertTrue(captured)
+        self.assertTrue(all(not valid_dates & outer_validation_dates for _train_dates, valid_dates in captured))
+
+    def test_development_unseen_stock_oof_outputs_c_quadrant(self):
+        dataset = predictive_fixture(symbols_per_date=220)
+        base = self._split()
+        train_symbols = tuple(f"{index + 1:06d}" for index in range(218))
+        unseen_symbols = ("000219", "000220")
+        split = replace(
+            base,
+            A_dev_train_symbols=train_symbols,
+            C_dev_unseen_symbols=unseen_symbols,
+            walk_forward=tuple(replace(fold, training_symbols=train_symbols) for fold in base.walk_forward),
+        )
+
+        class FakeModel:
+            def predict(self, rows, num_iteration=None):
+                return [0.0] * len(rows)
+
+        with patch("app.evaluation.full_market_ml.trainer._build_ranker_datasets", return_value=(object(), [])), patch(
+            "app.evaluation.full_market_ml.trainer._train_ranker", return_value=FakeModel()
+        ):
+            predictions = _unseen_stock_oof(
+                dataset, split, ("adjusted_return_20d",), FIXED_RANKER_GRID[0], (FIXED_SEEDS[0],)
+            )
+
+        self.assertFalse(predictions.empty)
+        self.assertTrue(predictions["quadrant"].eq("C_dev_unseen").all())
+        self.assertEqual(set(predictions["symbol"]), set(unseen_symbols))
 
     def test_model_selection_uses_only_oof_development_predictions(self):
         candidate = run_development_training(self.config, predictive_fixture(), self._split())

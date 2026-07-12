@@ -292,6 +292,11 @@ def run_development_training(
 ) -> FrozenCandidate:
     """Train only on A walk-forward folds and freeze an OOF-selected research candidate."""
     data = _development_dataset(dataset, split_plan)
+    development_with_unseen = _development_dataset(
+        dataset,
+        split_plan,
+        symbols=tuple(sorted(set(split_plan.A_dev_train_symbols) | set(split_plan.C_dev_unseen_symbols))),
+    )
     seeds = tuple(config.training.seeds)
     if seeds != FIXED_SEEDS:
         raise ValueError(f"training seeds must be fixed at {FIXED_SEEDS}")
@@ -318,6 +323,14 @@ def run_development_training(
     rank_predictions = _ranker_oof(
         data, split_plan, selected_features, selected["params"], seeds, dataset_cache=ranker_dataset_cache
     )
+    unseen_predictions = _unseen_stock_oof(
+        development_with_unseen,
+        split_plan,
+        selected_features,
+        selected["params"],
+        seeds,
+        dataset_cache=ranker_dataset_cache,
+    )
     strong_prob, strong_calibrator = _classifier_oof(data, split_plan, selected_features, "label_strong_path_10d", selected["params"], seeds)
     severe_prob, severe_calibrator = _classifier_oof(data, split_plan, selected_features, "label_severe_negative_10d", selected["params"], seeds)
     rank_predictions["strong_probability"] = strong_prob
@@ -331,6 +344,10 @@ def run_development_training(
     risk_selected = max(risk_trials, key=lambda row: (row["metrics"]["ndcg_at_10"], row["metrics"]["precision_at_5"], -row["alpha"]))
     rank_predictions["score"] = rank_predictions["score"] - risk_selected["alpha"] * rank_predictions["severe_negative_probability"]
     oof_metrics = evaluate_ranking(rank_predictions)
+    development_quadrant_metrics = {
+        "A_time_oof": oof_metrics,
+        "C_stock_oof": evaluate_ranking(unseen_predictions) if not unseen_predictions.empty else {"status": "unavailable"},
+    }
     seed_sensitivity = _seed_sensitivity(
         data, split_plan, selected_features, selected["params"], seeds, dataset_cache=ranker_dataset_cache
     )
@@ -343,14 +360,16 @@ def run_development_training(
         "params": selected["params"],
         "risk_alpha": risk_selected["alpha"],
         "oof_metrics": oof_metrics,
+        "development_quadrant_metrics": development_quadrant_metrics,
     }
     frozen_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str, separators=(",", ":")).encode()).hexdigest()
+    oof_output = pd.concat([rank_predictions, unseen_predictions], ignore_index=True, sort=False)
     return FrozenCandidate(
         selection_sources=["A_walk_forward_oof"],
-        oof_predictions=rank_predictions.sort_values(["trade_date", "symbol"], kind="stable").reset_index(drop=True),
+        oof_predictions=oof_output.sort_values(["quadrant", "trade_date", "symbol"], kind="stable").reset_index(drop=True),
         oof_metrics=oof_metrics,
         baselines=baselines,
-        model_selection_report=[*grid_reports, {"risk_alpha_trials": risk_trials}],
+        model_selection_report=[*grid_reports, {"risk_alpha_trials": risk_trials}, {"development_quadrant_metrics": development_quadrant_metrics}],
         calibrators={"strong": strong_calibrator, "severe_negative": severe_calibrator},
         feature_importance=importances,
         frozen_model_sha256=frozen_hash,
@@ -510,7 +529,9 @@ def run_final_holdout_evaluation(
     )
 
 
-def _development_dataset(dataset: pd.DataFrame, split_plan: SplitPlan) -> pd.DataFrame:
+def _development_dataset(
+    dataset: pd.DataFrame, split_plan: SplitPlan, *, symbols: tuple[str, ...] | None = None
+) -> pd.DataFrame:
     if not isinstance(split_plan, SplitPlan):
         raise TypeError("split_plan must be a SplitPlan")
     required = {"trade_date", "symbol", "future_return_10d", "relevance_grade_10d", "label_strong_path_10d", "label_severe_negative_10d"}
@@ -524,7 +545,8 @@ def _development_dataset(dataset: pd.DataFrame, split_plan: SplitPlan) -> pd.Dat
         raise FinalHoldoutAccessError("development training cannot read final holdout or unplanned dates")
     if "eligible_for_training" in data:
         data = data.loc[data["eligible_for_training"].eq(True)].copy()
-    data = data.loc[data["symbol"].isin(split_plan.A_dev_train_symbols)].copy()
+    allowed_symbols = set(split_plan.A_dev_train_symbols if symbols is None else symbols)
+    data = data.loc[data["symbol"].isin(allowed_symbols)].copy()
     if data.empty:
         raise ValueError("development dataset has no eligible A-quadrant rows")
     return data.sort_values(["trade_date", "symbol"], kind="stable").reset_index(drop=True)
@@ -668,32 +690,100 @@ def _ranker_oof(data, split_plan, features, params, seeds, *, dataset_cache=None
     features = list(features)
     rows = []
     for fold in split_plan.walk_forward:
-        train, valid = _fold_data(data, fold)
-        if train.empty or valid.empty:
+        train, outer_valid = _fold_data(data, fold)
+        if train.empty or outer_valid.empty:
             continue
+        fit_train, fit_valid = _inner_time_split(train)
         cache_key = (tuple(features), int(fold.fold))
         cached = None if dataset_cache is None else dataset_cache.get(cache_key)
         if cached is None:
-            cached = _build_ranker_datasets(train, valid, features)
+            cached = _build_ranker_datasets(fit_train, fit_valid, features)
             if dataset_cache is not None:
                 dataset_cache[cache_key] = cached
         train_set, validation_sets = cached
         scores = []
         for seed in seeds:
             model = _train_ranker(
-                train,
+                fit_train,
                 features,
                 params,
                 seed,
-                valid,
+                fit_valid,
                 train_set=train_set,
                 validation_sets=validation_sets,
             )
-            scores.append(model.predict(valid[features], num_iteration=model.best_iteration or model.current_iteration()))
-        rows.append(valid.assign(score=np.median(np.vstack(scores), axis=0), fold=fold.fold))
+            scores.append(model.predict(outer_valid[features], num_iteration=_model_iteration(model)))
+        rows.append(outer_valid.assign(score=np.median(np.vstack(scores), axis=0), fold=fold.fold, quadrant="A_time_oof"))
     if not rows:
         raise ValueError("walk-forward plan produced no OOF rows")
     return pd.concat(rows, ignore_index=True)
+
+
+def _unseen_stock_oof(data, split_plan, features, params, seeds, *, dataset_cache=None):
+    """Score development validation dates for symbols excluded from A training."""
+    features = list(features)
+    unseen_symbols = set(split_plan.C_dev_unseen_symbols)
+    if not unseen_symbols:
+        return data.iloc[0:0].copy().assign(
+            score=pd.Series(dtype=float), fold=pd.Series(dtype=int), quadrant=pd.Series(dtype=str)
+        )
+    rows = []
+    for fold in split_plan.walk_forward:
+        train = data.loc[data["trade_date"].isin(fold.training_dates) & data["symbol"].isin(fold.training_symbols)].copy()
+        outer_valid = data.loc[data["trade_date"].isin(fold.validation_dates) & data["symbol"].isin(unseen_symbols)].copy()
+        if train.empty or outer_valid.empty:
+            continue
+        fit_train, fit_valid = _inner_time_split(train)
+        cache_key = ("C_dev_unseen", tuple(features), int(fold.fold))
+        cached = None if dataset_cache is None else dataset_cache.get(cache_key)
+        if cached is None:
+            cached = _build_ranker_datasets(fit_train, fit_valid, features)
+            if dataset_cache is not None:
+                dataset_cache[cache_key] = cached
+        train_set, validation_sets = cached
+        scores = []
+        for seed in seeds:
+            model = _train_ranker(
+                fit_train,
+                features,
+                params,
+                seed,
+                fit_valid,
+                train_set=train_set,
+                validation_sets=validation_sets,
+            )
+            scores.append(model.predict(outer_valid[features], num_iteration=_model_iteration(model)))
+        rows.append(outer_valid.assign(score=np.median(np.vstack(scores), axis=0), fold=fold.fold, quadrant="C_dev_unseen"))
+    if not rows:
+        return data.iloc[0:0].copy().assign(
+            score=pd.Series(dtype=float), fold=pd.Series(dtype=int), quadrant=pd.Series(dtype=str)
+        )
+    return pd.concat(rows, ignore_index=True)
+
+
+def _inner_time_split(train: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+    """Create a time-only early-stopping split inside an outer training window."""
+    dates = tuple(sorted(train["trade_date"].dropna().unique()))
+    if len(dates) < 22:
+        return train.copy(), None
+    validation_count = max(1, len(dates) // 5)
+    validation_start = len(dates) - validation_count
+    train_end = validation_start - 20
+    if train_end <= 0:
+        return train.copy(), None
+    fit_dates = dates[:train_end]
+    validation_dates = dates[validation_start:]
+    fit_train = train.loc[train["trade_date"].isin(fit_dates)].copy()
+    fit_valid = train.loc[train["trade_date"].isin(validation_dates)].copy()
+    return fit_train, fit_valid if not fit_valid.empty else None
+
+
+def _model_iteration(model: Any) -> int | None:
+    best_iteration = getattr(model, "best_iteration", None)
+    if best_iteration:
+        return best_iteration
+    current_iteration = getattr(model, "current_iteration", None)
+    return current_iteration() if callable(current_iteration) else None
 
 
 def _seed_sensitivity(data, split_plan, features, params, seeds, *, dataset_cache=None) -> list[dict[str, Any]]:
