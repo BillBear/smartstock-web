@@ -97,6 +97,16 @@ class FullMarketMLPipelineTests(FullMarketMLTestCase):
         self.assertEqual(observed["status"], "running")
         self.assertIn("heartbeat_at", observed)
 
+    def test_stage_budget_times_out_and_writes_timeout_state(self):
+        services = fake_pipeline_services()
+        services["preflight"] = lambda _config, _root, _artifacts: time.sleep(0.05)
+        pipeline = FullMarketMLPipeline(self.config, self.temp_path, services, stage_timeouts_seconds={"preflight": 0.01})
+
+        with self.assertRaises(TimeoutError):
+            pipeline.run("preflight")
+
+        self.assertEqual(pipeline.stage_state("preflight")["status"], "timeout")
+
     def test_cli_has_no_status_override_option(self):
         script = Path(__file__).parents[1] / "scripts" / "run_full_market_ml_pipeline.py"
 

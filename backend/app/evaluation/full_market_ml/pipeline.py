@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -33,6 +34,16 @@ STAGES = (
     "final-evaluate",
     "final-holdout-evaluate",
 )
+DEFAULT_STAGE_TIMEOUTS_SECONDS = {
+    "preflight": 15 * 60,
+    "probe": 15 * 60,
+    "pilot-build": 90 * 60,
+    "full-build": 90 * 60,
+    "feature-audit": 60 * 60,
+    "dev-train": 45 * 60,
+    "final-evaluate": 15 * 60,
+    "final-holdout-evaluate": 30 * 60,
+}
 
 
 def select_probe_dates(open_dates: list[str] | tuple[str, ...], count: int = 5) -> tuple[str, ...]:
@@ -67,11 +78,13 @@ class FullMarketMLPipeline:
         services: Mapping[str, StageService],
         *,
         heartbeat_interval_seconds: float = 30.0,
+        stage_timeouts_seconds: Mapping[str, float] | None = None,
     ):
         self.config = config
         self.runtime_root = Path(runtime_root)
         self.services = dict(services)
         self.heartbeat_interval_seconds = max(0.001, float(heartbeat_interval_seconds))
+        self.stage_timeouts_seconds = {**DEFAULT_STAGE_TIMEOUTS_SECONDS, **dict(stage_timeouts_seconds or {})}
         missing = [stage for stage in STAGES if stage not in self.services]
         if missing:
             raise ValueError("missing pipeline stage services: " + ", ".join(missing))
@@ -168,6 +181,7 @@ class FullMarketMLPipeline:
             daemon=True,
         )
         heartbeat.start()
+        previous_alarm = self._start_stage_timer(stage)
         try:
             artifacts = {name: state.get("artifacts", {}) for name, state in states.items()}
             output = dict(self.services[stage](self.config, self.runtime_root, artifacts) or {})
@@ -186,6 +200,19 @@ class FullMarketMLPipeline:
             self._write_json(self._state_path(stage), complete)
             self._write_progress(complete)
             return complete
+        except TimeoutError as error:
+            timeout = self._state(
+                stage,
+                "timeout",
+                inputs,
+                {},
+                started_at=started,
+                ended_at=_timestamp(),
+                failure_details={"type": "StageTimeout", "message": str(error)},
+            )
+            self._write_json(self._state_path(stage), timeout)
+            self._write_progress(timeout)
+            raise
         except Exception as error:
             blocked = self._state(
                 stage,
@@ -200,6 +227,7 @@ class FullMarketMLPipeline:
             self._write_progress(blocked)
             raise
         finally:
+            self._stop_stage_timer(previous_alarm)
             stop_heartbeat.set()
             heartbeat.join(timeout=max(1.0, self.heartbeat_interval_seconds * 2))
 
@@ -212,6 +240,26 @@ class FullMarketMLPipeline:
             state["peak_rss_bytes"] = _peak_rss_bytes()
             self._write_json(self._state_path(stage), state)
             self._write_progress(state)
+
+    def _start_stage_timer(self, stage: str):
+        timeout = float(self.stage_timeouts_seconds.get(stage, 0))
+        if timeout <= 0 or threading.current_thread() is not threading.main_thread() or not hasattr(signal, "SIGALRM"):
+            return None
+        previous = signal.getsignal(signal.SIGALRM)
+
+        def raise_timeout(_signal_number, _frame):
+            raise TimeoutError(f"stage={stage} exceeded timeout_seconds={timeout}")
+
+        signal.signal(signal.SIGALRM, raise_timeout)
+        signal.setitimer(signal.ITIMER_REAL, timeout)
+        return previous
+
+    @staticmethod
+    def _stop_stage_timer(previous) -> None:
+        if previous is None or not hasattr(signal, "SIGALRM"):
+            return
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
     def _input_hashes(self, stage: str, states: Mapping[str, dict[str, Any]]) -> dict[str, str]:
         hashes = {"config_sha256": str(self.config.sha256)}
