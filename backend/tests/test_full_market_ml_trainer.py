@@ -15,6 +15,7 @@ from app.evaluation.full_market_ml.trainer import (
     run_final_holdout_evaluation,
     save_final_fit,
     _portfolio_or_empty,
+    _run_group_ablations,
 )
 from app.evaluation.full_market_ml.splits import FinalHoldoutAccessError, SplitPlan
 from tests.full_market_ml_fixtures import overlapping_portfolio_fixture, predictive_fixture, random_label_fixture, sealed_split_fixture
@@ -34,6 +35,31 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
         portfolio = _portfolio_or_empty(dataset)
 
         self.assertEqual(portfolio["closed_trade_count"], 10)
+
+    def test_group_ablation_is_leave_one_out_and_retunes_each_subset(self):
+        dataset = predictive_fixture(symbols_per_date=220)
+        calls = []
+
+        def fake_ranker(data, _split, features, _params, _seeds, *, dataset_cache=None):
+            calls.append(tuple(features))
+            return data.assign(score=data[features[0]])
+
+        with patch("app.evaluation.full_market_ml.trainer._ranker_oof", side_effect=fake_ranker), patch(
+            "app.evaluation.full_market_ml.trainer._select_ranker_params",
+            return_value=(dict(FIXED_RANKER_GRID[0]), [{"params": dict(FIXED_RANKER_GRID[0])}]),
+        ) as retune:
+            report = _run_group_ablations(
+                dataset,
+                self._split(),
+                ("adjusted_return_20d", "amount_log"),
+                dict(FIXED_RANKER_GRID[0]),
+                (FIXED_SEEDS[0],),
+            )
+
+        evaluated = [row for row in report if row.get("comparison") == "all_features_vs_leave_one_group_out"]
+        self.assertTrue(evaluated)
+        self.assertTrue(all(len(row["without_group_features"]) < 2 for row in evaluated))
+        self.assertEqual(retune.call_count, len(evaluated))
 
     def test_model_selection_uses_only_oof_development_predictions(self):
         candidate = run_development_training(self.config, predictive_fixture(), self._split())

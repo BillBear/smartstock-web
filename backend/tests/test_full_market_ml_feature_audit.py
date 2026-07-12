@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from app.evaluation.full_market_ml.feature_audit import _fold_correlations, audit_features
+from app.evaluation.full_market_ml.feature_audit import _audit_allowed_features, _fold_correlations, audit_features
 from app.evaluation.full_market_ml.splits import FinalHoldoutAccessError
 from tests.full_market_ml_fixtures import (
     dataset_with_final_rows_exposed,
@@ -79,9 +79,38 @@ class FullMarketMLFeatureAuditTests(FullMarketMLTestCase):
         spread = result.bucket_returns.query("feature == 'signal'")["top_bottom_spread"].median()
         self.assertGreater(spread, 0)
 
+    def test_stable_negative_feature_is_kept_with_explicit_direction(self):
+        dataset = monotonic_fixture()
+        dataset["inverse_signal"] = -dataset["signal"]
+
+        result = audit_features(dataset, three_fold_split_fixture(), feature_schema=["inverse_signal"])
+        row = result.ic.query("feature == 'inverse_signal'").iloc[0]
+
+        self.assertEqual(row["direction"], "negative")
+        self.assertEqual(row["selection"], "core_candidate")
+        self.assertEqual(row["direction_consistency"], 1.0)
+
+    def test_audit_separates_net_return_and_risk_targets(self):
+        dataset = monotonic_fixture()
+        dataset["net_return_after_cost"] = dataset["future_return_10d"] - 0.002
+        dataset["label_severe_negative_10d"] = dataset["signal"] < 5
+
+        result = audit_features(dataset, three_fold_split_fixture())
+
+        self.assertEqual(set(result.ic["target"]), {"net_return_after_cost", "label_severe_negative_10d"})
+        self.assertEqual(set(result.bucket_returns["target"]), {"net_return_after_cost", "label_severe_negative_10d"})
+
     def test_feature_audit_never_reads_final_holdout(self):
         with self.assertRaises(FinalHoldoutAccessError):
             audit_features(dataset_with_final_rows_exposed(), sealed_split_fixture())
+
+    def test_rejected_feature_is_not_allowed_into_candidate_schema(self):
+        audit = audit_features(monotonic_fixture(), three_fold_split_fixture(), feature_schema=["signal"])
+        rejected = audit.ic.copy()
+        rejected.loc[:, "selection"] = "exclude"
+        audit = audit.__class__(audit.coverage, rejected, audit.bucket_returns, audit.correlation, audit.drift, audit.group_eligibility)
+
+        self.assertEqual(_audit_allowed_features(("signal", "missing"), audit), ())
 
     def test_reports_high_correlation_psi_and_moneyflow_task_twelve_gate(self):
         result = audit_features(monotonic_fixture(), three_fold_split_fixture())

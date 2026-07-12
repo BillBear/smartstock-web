@@ -87,6 +87,10 @@ def audit_features(
     correlation_rows: list[dict] = []
     drift_rows: list[dict] = []
     prior_fold_values: dict[str, pd.Series] | None = None
+    return_target = "net_return_after_cost" if "net_return_after_cost" in dataset else TARGET_COLUMN
+    target_columns = [return_target]
+    if "label_severe_negative_10d" in dataset:
+        target_columns.append("label_severe_negative_10d")
 
     for fold in split_plan.walk_forward:
         fold_data = dataset.loc[
@@ -104,9 +108,13 @@ def audit_features(
                     "coverage": _ratio(values.notna().sum(), len(fold_data)),
                 }
             )
-            daily_ic, daily_buckets = _daily_feature_evidence(fold_data, feature)
-            bucket_rows.extend({"fold": fold.fold, "feature": feature, "feature_group": _feature_group(feature), **row} for row in daily_buckets)
-            ic_rows.append(_aggregate_ic(fold.fold, feature, _feature_group(feature), daily_ic))
+            for target in target_columns:
+                daily_ic, daily_buckets = _daily_feature_evidence(fold_data, feature, target)
+                bucket_rows.extend(
+                    {"fold": fold.fold, "feature": feature, "feature_group": _feature_group(feature), "target": target, **row}
+                    for row in daily_buckets
+                )
+                ic_rows.append(_aggregate_ic(fold.fold, feature, _feature_group(feature), target, daily_ic))
 
         correlation_rows.extend(_fold_correlations(fold.fold, fold_data, feature_names))
         current_values = {feature: pd.to_numeric(fold_data[feature], errors="coerce").dropna() for feature in feature_names}
@@ -119,10 +127,10 @@ def audit_features(
     return FeatureAuditResult(
         coverage=coverage,
         ic=ic,
-        bucket_returns=pd.DataFrame(bucket_rows, columns=["fold", "feature", "feature_group", "trade_date", "bucket", "sample_count", "mean_forward_return", "top_bottom_spread"]),
+        bucket_returns=pd.DataFrame(bucket_rows, columns=["fold", "feature", "feature_group", "target", "trade_date", "bucket", "sample_count", "mean_forward_return", "top_bottom_spread"]),
         correlation=correlation,
         drift=pd.DataFrame(drift_rows, columns=["fold", "reference_fold", "feature", "feature_group", "psi", "sample_count", "reference_sample_count"]),
-        group_eligibility=_group_eligibility(coverage, ic),
+        group_eligibility=_group_eligibility(coverage, ic, return_target),
     )
 
 
@@ -167,19 +175,19 @@ def _feature_names(dataset: pd.DataFrame, feature_schema: Iterable[str] | None =
     return sorted(features)
 
 
-def _daily_feature_evidence(dataset: pd.DataFrame, feature: str) -> tuple[list[float], list[dict]]:
+def _daily_feature_evidence(dataset: pd.DataFrame, feature: str, target: str) -> tuple[list[float], list[dict]]:
     daily_ic: list[float] = []
     buckets: list[dict] = []
     for trade_date, daily in dataset.groupby("trade_date", sort=True):
-        valid = daily[[feature, TARGET_COLUMN]].apply(pd.to_numeric, errors="coerce").dropna()
-        if len(valid) < 2 or valid[feature].nunique() < 2 or valid[TARGET_COLUMN].nunique() < 2:
+        valid = daily[[feature, target]].apply(pd.to_numeric, errors="coerce").dropna()
+        if len(valid) < 2 or valid[feature].nunique() < 2 or valid[target].nunique() < 2:
             continue
-        ic = valid[feature].corr(valid[TARGET_COLUMN], method="spearman")
+        ic = valid[feature].corr(valid[target], method="spearman")
         if pd.notna(ic):
             daily_ic.append(float(ic))
         ranked = valid[feature].rank(method="first", pct=True)
         bucket = np.minimum(BUCKET_COUNT, np.ceil(ranked * BUCKET_COUNT)).astype("int64")
-        returns = valid.assign(_bucket=bucket).groupby("_bucket", sort=True)[TARGET_COLUMN].agg(["count", "mean"])
+        returns = valid.assign(_bucket=bucket).groupby("_bucket", sort=True)[target].agg(["count", "mean"])
         if returns.empty:
             continue
         spread = float(returns.loc[returns.index.max(), "mean"] - returns.loc[returns.index.min(), "mean"])
@@ -196,7 +204,7 @@ def _daily_feature_evidence(dataset: pd.DataFrame, feature: str) -> tuple[list[f
     return daily_ic, buckets
 
 
-def _aggregate_ic(fold: int, feature: str, group: str, daily_ic: list[float]) -> dict:
+def _aggregate_ic(fold: int, feature: str, group: str, target: str, daily_ic: list[float]) -> dict:
     values = np.asarray(daily_ic, dtype=float)
     mean_ic = float(values.mean()) if len(values) else np.nan
     std_ic = float(values.std(ddof=1)) if len(values) > 1 else 0.0
@@ -204,6 +212,7 @@ def _aggregate_ic(fold: int, feature: str, group: str, daily_ic: list[float]) ->
         "fold": fold,
         "feature": feature,
         "feature_group": group,
+        "target": target,
         "date_count": int(len(values)),
         "mean_ic": mean_ic,
         "median_ic": float(np.median(values)) if len(values) else np.nan,
@@ -264,27 +273,35 @@ def _population_stability_index(reference: pd.Series, current: pd.Series) -> flo
 
 def _add_feature_decisions(ic: pd.DataFrame, coverage: pd.DataFrame, correlation: pd.DataFrame) -> pd.DataFrame:
     result = ic.copy()
-    for feature in result["feature"].unique():
-        rows = result.loc[result["feature"].eq(feature)]
+    for (feature, target), rows in result.groupby(["feature", "target"], sort=False):
         feature_coverage = coverage.loc[coverage["feature"].eq(feature), "coverage"].min()
         median_ic = rows["median_ic"].median()
-        sign_consistency = rows["sign_consistency"].mean()
+        fold_ics = pd.to_numeric(rows["median_ic"], errors="coerce").dropna()
+        positive_consistency = float((fold_ics > 0).mean()) if len(fold_ics) else 0.0
+        negative_consistency = float((fold_ics < 0).mean()) if len(fold_ics) else 0.0
+        direction = "negative" if median_ic < 0 else "positive"
+        direction_consistency = max(positive_consistency, negative_consistency)
         correlated = not correlation.loc[(correlation["feature_left"].eq(feature)) | (correlation["feature_right"].eq(feature))].empty
-        if pd.isna(feature_coverage) or feature_coverage < MIN_GROUP_COVERAGE or pd.isna(median_ic) or median_ic <= 0:
+        if pd.isna(feature_coverage) or feature_coverage < MIN_GROUP_COVERAGE or pd.isna(median_ic) or direction_consistency < 0.8:
             decision = "exclude"
-        elif len(rows) >= 2 and sign_consistency >= 0.8 and not correlated:
+        elif len(rows) >= 2 and not correlated:
             decision = "core_candidate"
         else:
             decision = "interaction_candidate"
-        result.loc[result["feature"].eq(feature), "selection"] = decision
+        mask = result["feature"].eq(feature) & result["target"].eq(target)
+        result.loc[mask, "selection"] = decision
+        result.loc[mask, "direction"] = direction
+        result.loc[mask, "direction_consistency"] = direction_consistency
     return result
 
 
-def _group_eligibility(coverage: pd.DataFrame, ic: pd.DataFrame) -> pd.DataFrame:
+def _group_eligibility(coverage: pd.DataFrame, ic: pd.DataFrame, return_target: str) -> pd.DataFrame:
     rows = []
     for (fold, group), group_coverage in coverage.groupby(["fold", "feature_group"], sort=True):
         minimum_coverage = float(group_coverage.groupby("feature")["coverage"].min().min())
-        candidates = ic.loc[ic["fold"].eq(fold) & ic["feature_group"].eq(group), "selection"]
+        candidates = ic.loc[
+            ic["fold"].eq(fold) & ic["feature_group"].eq(group) & ic["target"].eq(return_target), "selection"
+        ]
         if group == "moneyflow":
             eligibility = "pending_oof_group_comparison" if minimum_coverage >= MIN_GROUP_COVERAGE else "exclude"
             requirement = "requires_coverage_at_least_0.80_and_task_12_oof_ndcg10_and_precision5_improvement"
@@ -294,8 +311,25 @@ def _group_eligibility(coverage: pd.DataFrame, ic: pd.DataFrame) -> pd.DataFrame
             eligibility, requirement = "eligible_for_candidate_model", "development_fold_evidence_only"
         else:
             eligibility, requirement = "interaction_only", "no_core_candidate_without_stable_fold_evidence"
-        rows.append({"fold": fold, "feature_group": group, "coverage": minimum_coverage, "eligibility": eligibility, "requirement": requirement})
-    return pd.DataFrame(rows, columns=["fold", "feature_group", "coverage", "eligibility", "requirement"])
+        rows.append({"fold": fold, "feature_group": group, "target": return_target, "coverage": minimum_coverage, "eligibility": eligibility, "requirement": requirement})
+    return pd.DataFrame(rows, columns=["fold", "feature_group", "target", "coverage", "eligibility", "requirement"])
+
+
+def _audit_allowed_features(features: Iterable[str], audit: FeatureAuditResult | None) -> tuple[str, ...]:
+    """Apply the sealed feature-audit decisions to a candidate model schema."""
+    requested = tuple(str(feature) for feature in features)
+    if audit is None:
+        return requested
+    if audit.ic.empty:
+        return ()
+    target = "net_return_after_cost" if "net_return_after_cost" in set(audit.ic.get("target", ())) else TARGET_COLUMN
+    eligible = set(
+        audit.ic.loc[
+            audit.ic["target"].eq(target) & audit.ic["selection"].isin({"core_candidate", "interaction_candidate"}),
+            "feature",
+        ]
+    )
+    return tuple(feature for feature in requested if feature in eligible)
 
 
 def _feature_group(feature: str) -> str:

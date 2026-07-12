@@ -24,7 +24,7 @@ from .evaluator import (
     evaluate_ranking,
     simulate_daily_topk_portfolio,
 )
-from .feature_audit import FeatureAuditResult
+from .feature_audit import FeatureAuditResult, _audit_allowed_features
 from .features import CORE_FEATURE_SPECS, OPTIONAL_FEATURE_SPECS
 from .splits import FinalHoldoutAccessError, SplitPlan
 
@@ -295,7 +295,10 @@ def run_development_training(
     seeds = tuple(config.training.seeds)
     if seeds != FIXED_SEEDS:
         raise ValueError(f"training seeds must be fixed at {FIXED_SEEDS}")
-    features = _available_features(data)
+    features = _audit_allowed_features(_available_features(data), feature_audit)
+    if feature_audit is not None:
+        features = tuple(feature for feature in features if _audit_allows(_training_group(feature), feature_audit))
+    features = list(features)
     if not features:
         raise ValueError("development dataset has no supported leak-free features")
 
@@ -308,9 +311,10 @@ def run_development_training(
         fold_metrics = _fold_metrics(predictions)
         grid_reports.append({"params": dict(params), "metrics": metrics, "median_fold_ndcg_at_10": median(row["ndcg_at_10"] for row in fold_metrics), "median_fold_precision_at_5": median(row["precision_at_5"] for row in fold_metrics)})
     selected = max(grid_reports, key=lambda row: (row["median_fold_ndcg_at_10"], row["median_fold_precision_at_5"], -row["params"]["min_data_in_leaf"]))
-    group_ablations, selected_features = _run_group_ablations(
-        data, split_plan, features, selected["params"], seeds, feature_audit, dataset_cache=ranker_dataset_cache
+    group_ablations = _run_group_ablations(
+        data, split_plan, tuple(features), selected["params"], seeds, dataset_cache=ranker_dataset_cache
     )
+    selected_features = tuple(features)
     rank_predictions = _ranker_oof(
         data, split_plan, selected_features, selected["params"], seeds, dataset_cache=ranker_dataset_cache
     )
@@ -826,31 +830,62 @@ def _calibrate_oof(probabilities, labels):
     }
 
 
-def _run_group_ablations(data, split_plan, features, params, seeds, feature_audit, *, dataset_cache=None):
-    accepted = []
+def _run_group_ablations(data, split_plan, features, params, seeds, *, dataset_cache=None):
     report = []
-    prior = None
+    baseline_prediction = _ranker_oof(data, split_plan, features, params, seeds, dataset_cache=dataset_cache)
+    baseline_metrics = evaluate_ranking(baseline_prediction)
     for group in _GROUP_SEQUENCE:
         group_features = [feature for feature in features if _training_group(feature) == group]
-        available = bool(group_features) and _audit_allows(group, feature_audit)
+        available = bool(group_features)
         if not available:
             report.append({"group": group, "status": "unavailable", "reason": "missing_features_or_audit_gate"})
             continue
-        trial_features = tuple(dict.fromkeys([*accepted, *group_features]))
-        prediction = _ranker_oof(data, split_plan, trial_features, params, seeds, dataset_cache=dataset_cache)
+        trial_features = tuple(feature for feature in features if _training_group(feature) != group)
+        if not trial_features:
+            report.append({"group": group, "status": "unavailable", "reason": "leave_one_group_out_has_no_features"})
+            continue
+        trial_params, tuning = _select_ranker_params(data, split_plan, trial_features, seeds, dataset_cache=dataset_cache)
+        prediction = _ranker_oof(data, split_plan, trial_features, trial_params, seeds, dataset_cache=dataset_cache)
         metrics = evaluate_ranking(prediction)
-        fold_metrics = _fold_metrics(prediction)
         portfolio = _portfolio_or_empty(prediction)
-        improved = prior is None or median(item["ndcg_at_10"] for item in fold_metrics) > prior["median_ndcg"] or median(item["precision_at_5"] for item in fold_metrics) > prior["median_precision"]
-        worsens_both = prior is not None and metrics.get("severe_negative_rate", 0.0) > prior["severe"] and portfolio["maximum_drawdown"] < prior["drawdown"]
-        status = "accepted" if improved and not worsens_both else "rejected"
-        report.append({"group": group, "status": status, "features": group_features, "metrics": metrics, "portfolio": portfolio})
-        if status == "accepted":
-            accepted = list(trial_features)
-            prior = {"median_ndcg": median(item["ndcg_at_10"] for item in fold_metrics), "median_precision": median(item["precision_at_5"] for item in fold_metrics), "severe": metrics.get("severe_negative_rate", 0.0), "drawdown": portfolio["maximum_drawdown"]}
-    if not accepted:
-        raise ValueError("no feature group passed development-only ablation gates")
-    return report, tuple(accepted)
+        removal_is_better = (
+            metrics["ndcg_at_10"] > baseline_metrics["ndcg_at_10"]
+            and metrics["precision_at_5"] >= baseline_metrics["precision_at_5"]
+        )
+        status = "rejected" if removal_is_better else "accepted"
+        report.append(
+            {
+                "group": group,
+                "status": status,
+                "comparison": "all_features_vs_leave_one_group_out",
+                "features": group_features,
+                "without_group_features": list(trial_features),
+                "all_features_metrics": baseline_metrics,
+                "metrics": metrics,
+                "portfolio": portfolio,
+                "selected_params": trial_params,
+                "retuned_grid": tuning,
+            }
+        )
+    return report
+
+
+def _select_ranker_params(data, split_plan, features, seeds, *, dataset_cache=None):
+    reports = []
+    for params in FIXED_RANKER_GRID:
+        predictions = _ranker_oof(data, split_plan, features, params, seeds, dataset_cache=dataset_cache)
+        metrics = evaluate_ranking(predictions)
+        fold_metrics = _fold_metrics(predictions)
+        reports.append(
+            {
+                "params": dict(params),
+                "metrics": metrics,
+                "median_fold_ndcg_at_10": median(row["ndcg_at_10"] for row in fold_metrics),
+                "median_fold_precision_at_5": median(row["precision_at_5"] for row in fold_metrics),
+            }
+        )
+    selected = max(reports, key=lambda row: (row["median_fold_ndcg_at_10"], row["median_fold_precision_at_5"], -row["params"]["min_data_in_leaf"]))
+    return dict(selected["params"]), reports
 
 
 def _training_group(feature):
