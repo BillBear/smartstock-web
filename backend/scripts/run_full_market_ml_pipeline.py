@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.evaluation.full_market_ml.config import load_full_market_ml_config
 from app.evaluation.full_market_ml.pipeline import FullMarketMLPipeline, STAGES, select_probe_dates
+from app.evaluation.full_market_ml.assets import backup_dataset_assets, build_dataset_registry, write_dataset_registry
 
 
 RUN_ID = "fm_rank_10d_20260710_r1"
@@ -289,14 +290,34 @@ def default_services():
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    parser.add_argument("--stage", required=True, choices=STAGES)
+    parser.add_argument("--stage", choices=STAGES)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--frozen-model-sha")
     parser.add_argument("--run-id", default=RUN_ID)
+    parser.add_argument("--abort-stage", choices=STAGES)
+    parser.add_argument("--abort-reason", default="operator_requested_abort")
+    parser.add_argument("--register-assets", action="store_true")
+    parser.add_argument("--backup-root")
     arguments = parser.parse_args()
     config = load_full_market_ml_config(arguments.config)
     root = Path(__file__).resolve().parents[2] / "runtime" / "ml_full_market" / "runs" / arguments.run_id
-    result = FullMarketMLPipeline(config, root, default_services()).run(
+    pipeline = FullMarketMLPipeline(config, root, default_services())
+    if arguments.abort_stage:
+        state = pipeline.abort_stage(arguments.abort_stage, reason=arguments.abort_reason)
+        print(json.dumps({"stage": arguments.abort_stage, "status": state["status"]}, ensure_ascii=True, sort_keys=True))
+        return 0
+    if arguments.register_assets:
+        registry = build_dataset_registry(root, code_revision=os.environ.get("GIT_COMMIT", "unknown"))
+        registry_path = write_dataset_registry(root, registry)
+        if arguments.backup_root:
+            result = backup_dataset_assets(root, arguments.backup_root, registry)
+            print(json.dumps({"dataset_id": registry["dataset_id"], "backup": result}, ensure_ascii=True, sort_keys=True))
+        else:
+            print(json.dumps({"dataset_id": registry["dataset_id"], "registry": str(registry_path)}, ensure_ascii=True, sort_keys=True))
+        return 0
+    if not arguments.stage:
+        parser.error("--stage is required unless --abort-stage or --register-assets is supplied")
+    result = pipeline.run(
         arguments.stage, resume=arguments.resume, frozen_model_sha=arguments.frozen_model_sha
     )
     print(json.dumps({"stage": result.stage, "reused_stages": result.reused_stages}, ensure_ascii=True, sort_keys=True))

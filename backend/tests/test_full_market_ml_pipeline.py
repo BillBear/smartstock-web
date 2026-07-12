@@ -74,6 +74,8 @@ class FullMarketMLPipelineTests(FullMarketMLTestCase):
 
         self.assertIn("--frozen-model-sha", result.stdout)
         self.assertIn("--run-id", result.stdout)
+        self.assertIn("--abort-stage", result.stdout)
+        self.assertIn("--backup-root", result.stdout)
         self.assertNotIn("override", result.stdout.lower())
 
     def test_resume_rejects_a_tampered_file_artifact(self):
