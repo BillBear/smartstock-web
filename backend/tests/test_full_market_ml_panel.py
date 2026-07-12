@@ -134,6 +134,21 @@ class FullMarketMLPanelTests(unittest.TestCase):
             self.assertEqual(first["net_mf_amount"], 12.0)
             self.assertEqual(first["net_mf_vol"], 3.0)
 
+    def test_panel_joins_index_context_by_trade_date(self):
+        fixtures = two_day_split_fixture()
+        fixtures["index_daily"] = frame(
+            [
+                {"ts_code": "000001.SH", "trade_date": "20250102", "close": 100.0, "amount": 1000.0},
+                {"ts_code": "000001.SH", "trade_date": "20250103", "close": 102.0, "amount": 1200.0},
+            ]
+        )
+
+        panel = build_panel_from_frames(fixtures)
+
+        first = panel.loc[panel.trade_date.eq("2025-01-02")].iloc[0]
+        self.assertEqual(first["market_index_close"], 100.0)
+        self.assertEqual(first["market_index_amount"], 1000.0)
+
     def test_missing_or_nonpositive_adj_factor_invalidates_adjusted_rows_and_prior_entry(self):
         for name, factor in (("missing", None), ("zero", 0.0)):
             with self.subTest(name=name):

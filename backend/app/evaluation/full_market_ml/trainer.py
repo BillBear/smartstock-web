@@ -25,7 +25,7 @@ from .evaluator import (
     simulate_daily_topk_portfolio,
 )
 from .feature_audit import FeatureAuditResult
-from .features import CORE_FEATURE_SPECS
+from .features import CORE_FEATURE_SPECS, OPTIONAL_FEATURE_SPECS
 from .splits import FinalHoldoutAccessError, SplitPlan
 
 
@@ -38,7 +38,7 @@ FIXED_RANKER_GRID = tuple(
 )
 RISK_ALPHAS = (0.0, 0.1, 0.2, 0.3)
 _GROUP_SEQUENCE = ("momentum", "amount_turnover", "technical", "risk", "market_industry", "moneyflow")
-_GROUPS = {spec.name: spec.feature_group for spec in CORE_FEATURE_SPECS}
+_GROUPS = {spec.name: spec.feature_group for spec in (*CORE_FEATURE_SPECS, *OPTIONAL_FEATURE_SPECS)}
 _LOADED_FINAL_FITS: weakref.WeakKeyDictionary["FinalFit", tuple[Path, str]] = weakref.WeakKeyDictionary()
 
 
@@ -299,16 +299,21 @@ def run_development_training(
     if not features:
         raise ValueError("development dataset has no supported leak-free features")
 
+    ranker_dataset_cache: dict[tuple[tuple[str, ...], int], tuple[lgb.Dataset, list[lgb.Dataset]]] = {}
     baselines = _baselines(_oof_rows(data, split_plan))
     grid_reports = []
     for params in FIXED_RANKER_GRID:
-        predictions = _ranker_oof(data, split_plan, features, params, seeds)
+        predictions = _ranker_oof(data, split_plan, features, params, seeds, dataset_cache=ranker_dataset_cache)
         metrics = evaluate_ranking(predictions)
         fold_metrics = _fold_metrics(predictions)
         grid_reports.append({"params": dict(params), "metrics": metrics, "median_fold_ndcg_at_10": median(row["ndcg_at_10"] for row in fold_metrics), "median_fold_precision_at_5": median(row["precision_at_5"] for row in fold_metrics)})
     selected = max(grid_reports, key=lambda row: (row["median_fold_ndcg_at_10"], row["median_fold_precision_at_5"], -row["params"]["min_data_in_leaf"]))
-    group_ablations, selected_features = _run_group_ablations(data, split_plan, features, selected["params"], seeds, feature_audit)
-    rank_predictions = _ranker_oof(data, split_plan, selected_features, selected["params"], seeds)
+    group_ablations, selected_features = _run_group_ablations(
+        data, split_plan, features, selected["params"], seeds, feature_audit, dataset_cache=ranker_dataset_cache
+    )
+    rank_predictions = _ranker_oof(
+        data, split_plan, selected_features, selected["params"], seeds, dataset_cache=ranker_dataset_cache
+    )
     strong_prob, strong_calibrator = _classifier_oof(data, split_plan, selected_features, "label_strong_path_10d", selected["params"], seeds)
     severe_prob, severe_calibrator = _classifier_oof(data, split_plan, selected_features, "label_severe_negative_10d", selected["params"], seeds)
     rank_predictions["strong_probability"] = strong_prob
@@ -322,7 +327,9 @@ def run_development_training(
     risk_selected = max(risk_trials, key=lambda row: (row["metrics"]["ndcg_at_10"], row["metrics"]["precision_at_5"], -row["alpha"]))
     rank_predictions["score"] = rank_predictions["score"] - risk_selected["alpha"] * rank_predictions["severe_negative_probability"]
     oof_metrics = evaluate_ranking(rank_predictions)
-    seed_sensitivity = _seed_sensitivity(data, split_plan, selected_features, selected["params"], seeds)
+    seed_sensitivity = _seed_sensitivity(
+        data, split_plan, selected_features, selected["params"], seeds, dataset_cache=ranker_dataset_cache
+    )
     error_samples = _top_ranked_error_samples(rank_predictions)
     importances = _feature_importance(data, split_plan, selected_features, selected["params"], seeds)
     failed_gates = _failed_gates(oof_metrics, baselines["random"])
@@ -644,19 +651,40 @@ def _oof_rows(data: pd.DataFrame, split_plan: SplitPlan) -> pd.DataFrame:
 
 
 def _stable_random_score(data: pd.DataFrame) -> pd.Series:
-    return data.apply(lambda row: int(hashlib.sha256(f"17:{row.trade_date}:{row.symbol}".encode()).hexdigest()[:12], 16), axis=1)
+    keys = (
+        "17:"
+        + data["trade_date"].astype("string").fillna("")
+        + ":"
+        + data["symbol"].astype("string").fillna("")
+    )
+    return pd.Series(pd.util.hash_pandas_object(keys, index=False).to_numpy(), index=data.index, dtype="uint64")
 
 
-def _ranker_oof(data, split_plan, features, params, seeds) -> pd.DataFrame:
+def _ranker_oof(data, split_plan, features, params, seeds, *, dataset_cache=None) -> pd.DataFrame:
     features = list(features)
     rows = []
     for fold in split_plan.walk_forward:
         train, valid = _fold_data(data, fold)
         if train.empty or valid.empty:
             continue
+        cache_key = (tuple(features), int(fold.fold))
+        cached = None if dataset_cache is None else dataset_cache.get(cache_key)
+        if cached is None:
+            cached = _build_ranker_datasets(train, valid, features)
+            if dataset_cache is not None:
+                dataset_cache[cache_key] = cached
+        train_set, validation_sets = cached
         scores = []
         for seed in seeds:
-            model = _train_ranker(train, features, params, seed, valid)
+            model = _train_ranker(
+                train,
+                features,
+                params,
+                seed,
+                valid,
+                train_set=train_set,
+                validation_sets=validation_sets,
+            )
             scores.append(model.predict(valid[features], num_iteration=model.best_iteration or model.current_iteration()))
         rows.append(valid.assign(score=np.median(np.vstack(scores), axis=0), fold=fold.fold))
     if not rows:
@@ -664,11 +692,11 @@ def _ranker_oof(data, split_plan, features, params, seeds) -> pd.DataFrame:
     return pd.concat(rows, ignore_index=True)
 
 
-def _seed_sensitivity(data, split_plan, features, params, seeds) -> list[dict[str, Any]]:
+def _seed_sensitivity(data, split_plan, features, params, seeds, *, dataset_cache=None) -> list[dict[str, Any]]:
     """Measure the frozen ranker configuration per fixed seed on the same OOF rows."""
     result = []
     for seed in seeds:
-        predictions = _ranker_oof(data, split_plan, features, params, (seed,))
+        predictions = _ranker_oof(data, split_plan, features, params, (seed,), dataset_cache=dataset_cache)
         result.append({"seed": int(seed), **evaluate_ranking(predictions)})
     return result
 
@@ -688,10 +716,16 @@ def _fold_data(data, fold):
     return train, valid
 
 
-def _train_ranker(train, features, params, seed, valid=None):
+def _build_ranker_datasets(train, valid, features):
     features = list(features)
     ordered = train.sort_values(["trade_date", "symbol"], kind="stable")
     groups = ordered.groupby("trade_date", sort=True).size().tolist()
+    train_set = lgb.Dataset(
+        ordered[features],
+        label=pd.to_numeric(ordered["relevance_grade_10d"], errors="coerce").fillna(0),
+        group=groups,
+        free_raw_data=False,
+    )
     validation_sets = []
     if valid is not None and not valid.empty:
         validation = valid.sort_values(["trade_date", "symbol"], kind="stable")
@@ -700,12 +734,25 @@ def _train_ranker(train, features, params, seed, valid=None):
                 validation[features],
                 label=pd.to_numeric(validation["relevance_grade_10d"], errors="coerce").fillna(0),
                 group=validation.groupby("trade_date", sort=True).size().tolist(),
-                reference=lgb.Dataset(ordered[features], label=pd.to_numeric(ordered["relevance_grade_10d"], errors="coerce").fillna(0), group=groups),
+                reference=train_set,
+                free_raw_data=False,
             )
         ]
+    train_set.construct()
+    for validation_set in validation_sets:
+        validation_set.construct()
+    return train_set, validation_sets
+
+
+def _train_ranker(train, features, params, seed, valid=None, *, train_set=None, validation_sets=None):
+    features = list(features)
+    if train_set is None:
+        train_set, default_validation_sets = _build_ranker_datasets(train, valid, features)
+        validation_sets = default_validation_sets
+    validation_sets = validation_sets or []
     model = lgb.train(
         {"objective": "lambdarank", "metric": ["ndcg"], "ndcg_eval_at": [5, 10], "learning_rate": 0.03, "feature_fraction": 0.8, "bagging_fraction": 0.8, "bagging_freq": 1, "verbosity": -1, "seed": seed, "feature_fraction_seed": seed, "bagging_seed": seed, **params},
-        lgb.Dataset(ordered[features], label=pd.to_numeric(ordered["relevance_grade_10d"], errors="coerce").fillna(0), group=groups),
+        train_set,
         num_boost_round=120,
         valid_sets=validation_sets or None,
         callbacks=[lgb.early_stopping(100, verbose=False)] if validation_sets else [],
@@ -736,10 +783,10 @@ def _classifier_oof(data, split_plan, features, label, params, seeds):
         raw_rows.append(valid[["trade_date", "symbol", label]].assign(raw_probability=probability))
     raw = pd.concat(raw_rows, ignore_index=True)
     calibrated, report = _calibrate_oof(raw["raw_probability"].to_numpy(), raw[label].astype(bool).astype(int).to_numpy())
-    key = pd.MultiIndex.from_frame(raw[["trade_date", "symbol"]])
-    values = pd.Series(calibrated, index=key)
-    all_oof = _ranker_oof(data, split_plan, features, params, seeds)
-    return pd.MultiIndex.from_frame(all_oof[["trade_date", "symbol"]]).map(values).to_numpy(dtype=float), report
+    # The classifier loop visits the same fold validation rows in the same stable
+    # order as the ranker OOF loop. Re-training a ranker only to align keys
+    # multiplied the full-market runtime without adding information.
+    return calibrated.astype(float), report
 
 
 def _calibrate_oof(probabilities, labels):
@@ -779,7 +826,7 @@ def _calibrate_oof(probabilities, labels):
     }
 
 
-def _run_group_ablations(data, split_plan, features, params, seeds, feature_audit):
+def _run_group_ablations(data, split_plan, features, params, seeds, feature_audit, *, dataset_cache=None):
     accepted = []
     report = []
     prior = None
@@ -790,7 +837,7 @@ def _run_group_ablations(data, split_plan, features, params, seeds, feature_audi
             report.append({"group": group, "status": "unavailable", "reason": "missing_features_or_audit_gate"})
             continue
         trial_features = tuple(dict.fromkeys([*accepted, *group_features]))
-        prediction = _ranker_oof(data, split_plan, trial_features, params, seeds)
+        prediction = _ranker_oof(data, split_plan, trial_features, params, seeds, dataset_cache=dataset_cache)
         metrics = evaluate_ranking(prediction)
         fold_metrics = _fold_metrics(prediction)
         portfolio = _portfolio_or_empty(prediction)

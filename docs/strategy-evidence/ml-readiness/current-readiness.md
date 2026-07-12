@@ -105,3 +105,10 @@ docs/strategy-evidence/ml-readiness/2026-07-04-training-dataset-audit.md
 Precision@5 固定门槛。状态为 `research_only_failed_gate`，原时间留出集
 仅作运行诊断，不能用于后续调优或正式准入。详见
 `2026-07-12-r2-run-closure.md`。
+
+修正后的全市场开发期 OOF 运行 `fm_rank_10d_20260712_v2` 已完成，但仍为
+`research_only_failed_gate`。本次运行确认全市场面板为 `2,764,158` 行，开发期
+训练输入为 `2,288,531` 行，OOF 覆盖 `350` 个交易日。修正后的候选
+Precision@5 为 `13.77%`、NDCG@10 为 `12.81%`，且 Top5 严重负面率为
+`56.80%`，未通过固定门槛，因此没有新模型接入生产。完整数据链路复盘、标签
+对照实验和下一轮拆分目标见 `2026-07-12-v2-corrected-oof-review.md`。

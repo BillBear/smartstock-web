@@ -10,6 +10,7 @@ from app.evaluation.full_market_ml.pipeline import (
     FullMarketMLPipeline,
     select_probe_dates,
 )
+from scripts.run_full_market_ml_pipeline import validate_backup_root
 from app.evaluation.full_market_ml.quality import TrainingBlockedError
 from tests.full_market_ml_fixtures import fake_pipeline_services
 from tests.test_full_market_ml_collector import FullMarketMLTestCase
@@ -136,6 +137,15 @@ class FullMarketMLPipelineTests(FullMarketMLTestCase):
         self.assertIn("--status", result.stdout)
         self.assertIn("--recover-stale-seconds", result.stdout)
         self.assertNotIn("override", result.stdout.lower())
+
+    def test_local_backup_root_is_allowed_outside_runtime(self):
+        backup = validate_backup_root(self.temp_path.parent / "ml-backup", self.temp_path)
+
+        self.assertEqual(backup, (self.temp_path.parent / "ml-backup").resolve())
+
+    def test_backup_root_inside_runtime_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "outside the current runtime root"):
+            validate_backup_root(self.temp_path / "backup", self.temp_path)
 
     def test_cli_recovery_does_not_require_config_or_data_providers(self):
         script = Path(__file__).parents[1] / "scripts" / "run_full_market_ml_pipeline.py"

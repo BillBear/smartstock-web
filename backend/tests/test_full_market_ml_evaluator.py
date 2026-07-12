@@ -35,6 +35,23 @@ class FullMarketMLEvaluatorTests(FullMarketMLTestCase):
         self.assertEqual(result["ndcg_at_10"], 0.5)
         self.assertEqual(result["mrr"], 0.5)
 
+    def test_ranking_can_use_an_explicit_alternative_label_contract(self):
+        dataset = perfect_two_day_ranking_fixture()
+        dataset["return_grade"] = dataset["relevance_grade_10d"]
+        original_strong = dataset["label_strong_path_10d"].astype(bool)
+        dataset["return_strong"] = ~original_strong
+        dataset["return_grade"] = dataset["return_strong"].astype(int) * 4
+
+        result = evaluate_ranking(
+            dataset,
+            score_col="score",
+            grade_col="return_grade",
+            strong_col="return_strong",
+        )
+
+        self.assertEqual(result["precision_at_5"], 0.0)
+        self.assertLess(result["ndcg_at_10"], 1.0)
+
     def test_calibration_uses_ten_equal_count_bins(self):
         result = evaluate_calibration(calibration_fixture(), score_col="score")
 

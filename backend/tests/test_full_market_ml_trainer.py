@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from unittest.mock import patch
 
 from app.evaluation.full_market_ml.trainer import (
     FIXED_RANKER_GRID,
     FIXED_SEEDS,
     fit_final_candidate,
     load_final_fit,
+    _classifier_oof,
+    _ranker_oof,
+    _stable_random_score,
     run_development_training,
     run_final_holdout_evaluation,
     save_final_fit,
@@ -28,6 +32,45 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
         self.assertNotIn("B_final_train_symbols", candidate.selection_sources)
         self.assertNotIn("D_final_unseen_symbols", candidate.selection_sources)
         self.assertEqual(set(candidate.oof_predictions["trade_date"]), set(self._split().development_dates[2:5]))
+
+    def test_classifier_oof_does_not_retrain_ranker_to_align_prediction_keys(self):
+        dataset = predictive_fixture()
+
+        with patch("app.evaluation.full_market_ml.trainer._ranker_oof", side_effect=AssertionError("ranker retrained")):
+            probabilities, _report = _classifier_oof(
+                dataset,
+                self._split(),
+                ("adjusted_return_20d",),
+                "label_strong_path_10d",
+                FIXED_RANKER_GRID[0],
+                (FIXED_SEEDS[0],),
+            )
+
+        expected_rows = sum(
+            len(dataset.loc[dataset.trade_date.isin(fold.validation_dates)])
+            for fold in self._split().walk_forward
+        )
+        self.assertEqual(len(probabilities), expected_rows)
+
+    def test_random_baseline_score_is_deterministic_and_index_aligned(self):
+        dataset = predictive_fixture().iloc[::7].copy()
+
+        left = _stable_random_score(dataset)
+        right = _stable_random_score(dataset)
+
+        self.assertEqual(left.index.tolist(), dataset.index.tolist())
+        self.assertTrue(left.equals(right))
+
+    def test_ranker_oof_cache_reuses_one_dataset_per_fold_and_feature_set(self):
+        dataset = predictive_fixture()
+        cache = {}
+
+        first = _ranker_oof(dataset, self._split(), ("adjusted_return_20d",), FIXED_RANKER_GRID[0], (FIXED_SEEDS[0],), dataset_cache=cache)
+        second = _ranker_oof(dataset, self._split(), ("adjusted_return_20d",), FIXED_RANKER_GRID[0], (FIXED_SEEDS[0],), dataset_cache=cache)
+
+        self.assertEqual(len(cache), len(self._split().walk_forward))
+        self.assertEqual(first[["trade_date", "symbol"]].to_dict("records"), second[["trade_date", "symbol"]].to_dict("records"))
+        self.assertEqual(first["score"].tolist(), second["score"].tolist())
 
     def test_random_labels_cannot_receive_research_status(self):
         candidate = run_development_training(self.config, random_label_fixture(seed=42), self._split())

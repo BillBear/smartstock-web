@@ -28,6 +28,25 @@ from app.evaluation.full_market_ml.assets import (
 RUN_ID = "fm_rank_10d_20260710_r1"
 
 
+def validate_backup_root(backup_root: str | Path, runtime_root: str | Path) -> Path:
+    """Allow local or external backups, but never back up into the source run."""
+    backup_path = Path(backup_root).expanduser().resolve()
+    runtime_path = Path(runtime_root).expanduser().resolve()
+    if backup_path == runtime_path or runtime_path in backup_path.parents:
+        raise ValueError("ML_BACKUP_ROOT must be outside the current runtime root")
+    return backup_path
+
+
+def load_feature_audit_artifact(path: str | Path):
+    """Load the sealed feature-audit contract used by development training."""
+    from app.evaluation.full_market_ml.feature_audit import FeatureAuditResult
+
+    report_path = Path(path)
+    if not report_path.is_file():
+        raise FileNotFoundError(f"feature audit artifact is missing: {report_path}")
+    return FeatureAuditResult.from_csv_rows(json.loads(report_path.read_text(encoding="utf-8")))
+
+
 def default_services():
     """Bind the CLI to the established research-only module contracts."""
     import pandas as pd
@@ -37,7 +56,7 @@ def default_services():
     from app.evaluation.full_market_ml.collector import collect_full_market_raw
     from app.evaluation.full_market_ml.evaluator import evaluate_ranking
     from app.evaluation.full_market_ml.feature_audit import audit_features
-    from app.evaluation.full_market_ml.features import build_cross_section_features, build_time_series_features
+    from app.evaluation.full_market_ml.features import ALL_FEATURE_NAMES, build_cross_section_features, build_time_series_features
     from app.evaluation.full_market_ml.labels import aggregate_full_market_labels, build_forward_labels
     from app.evaluation.full_market_ml.manifests import load_manifest
     from app.evaluation.full_market_ml.panel import build_full_market_panel
@@ -188,7 +207,7 @@ def default_services():
         dataset = pd.read_parquet(artifact(root, "full-build") / "dataset.parquet")
         split = load_split(root)
         development = dataset.loc[dataset["trade_date"].isin(split.development_dates)].copy()
-        report = audit_features(development, split)
+        report = audit_features(development, split, feature_schema=ALL_FEATURE_NAMES)
         output = artifact(root, "feature-audit") / "report.json"
         output.write_text(json.dumps(report.to_csv_rows(), ensure_ascii=True, default=str) + "\n", encoding="utf-8")
         return {"quality_ready": True, "feature_audit": str(output)}
@@ -198,7 +217,9 @@ def default_services():
         dataset = pd.read_parquet(dataset_path)
         split = load_split(root)
         development = dataset.loc[dataset["trade_date"].isin(split.development_dates)].copy()
-        candidate = run_development_training(config, development, split)
+        audit_path = artifact(root, "feature-audit") / "report.json"
+        feature_audit = load_feature_audit_artifact(audit_path)
+        candidate = run_development_training(config, development, split, feature_audit=feature_audit)
         output = artifact(root, "dev-train") / "oof_predictions.parquet"
         candidate.oof_predictions.to_parquet(output, index=False)
         diagnostics_root = artifact(root, "dev-train")
@@ -275,11 +296,7 @@ def default_services():
         backup_root = os.environ.get("ML_BACKUP_ROOT", "").strip()
         if not backup_root:
             raise ValueError("ML_BACKUP_ROOT is required before formal final-fit")
-        backup_path = Path(backup_root).resolve()
-        try:
-            backup_path.relative_to(Path("/Volumes"))
-        except ValueError as error:
-            raise ValueError("ML_BACKUP_ROOT must resolve under /Volumes for an external backup") from error
+        backup_path = validate_backup_root(backup_root, root)
         registry_path = artifact(root, "full-build") / "dataset_registry.json"
         if not registry_path.is_file():
             raise FileNotFoundError("dataset registry is required before formal final-fit")

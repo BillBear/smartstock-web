@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Iterable
 from itertools import combinations
 
 import numpy as np
 import pandas as pd
 
-from .features import CORE_FEATURE_SPECS
+from .features import CORE_FEATURE_SPECS, OPTIONAL_FEATURE_SPECS, FeatureLeakageError, assert_leak_free_schema
 from .splits import FinalHoldoutAccessError, SplitPlan
 
 
@@ -15,7 +16,10 @@ TARGET_COLUMN = "future_return_10d"
 BUCKET_COUNT = 5
 HIGH_CORRELATION_THRESHOLD = 0.95
 MIN_GROUP_COVERAGE = 0.80
-_FEATURE_GROUPS = {spec.name: spec.feature_group for spec in CORE_FEATURE_SPECS}
+_FEATURE_GROUPS = {
+    spec.name: spec.feature_group
+    for spec in (*CORE_FEATURE_SPECS, *OPTIONAL_FEATURE_SPECS)
+}
 _FEATURE_GROUPS.update({"net_mf_amount": "moneyflow", "net_mf_vol": "moneyflow", "moneyflow": "moneyflow"})
 _NON_FEATURE_COLUMNS = {"trade_date", "symbol", TARGET_COLUMN, "eligible_for_training"}
 _LABEL_PREFIXES = ("future_", "label_", "relevance_", "mfe_", "mae_", "market_median_", "industry_median_")
@@ -46,8 +50,24 @@ class FeatureAuditResult:
             "group_eligibility": self.group_eligibility.to_dict("records"),
         }
 
+    @classmethod
+    def from_csv_rows(cls, payload: dict[str, list[dict]]) -> "FeatureAuditResult":
+        """Restore an audit artifact without recomputing it or reading holdout rows."""
+        if not isinstance(payload, dict):
+            raise TypeError("feature audit payload must be a mapping")
+        required = {"coverage", "ic", "bucket_returns", "correlation", "drift", "group_eligibility"}
+        missing = sorted(required - set(payload))
+        if missing:
+            raise ValueError("feature audit payload missing: " + ", ".join(missing))
+        return cls(**{name: pd.DataFrame(payload[name]) for name in required})
 
-def audit_features(development_dataset: pd.DataFrame, split_plan: SplitPlan) -> FeatureAuditResult:
+
+def audit_features(
+    development_dataset: pd.DataFrame,
+    split_plan: SplitPlan,
+    *,
+    feature_schema: Iterable[str] | None = None,
+) -> FeatureAuditResult:
     """Audit signal-day features exclusively inside the sealed plan's development period.
 
     Fold evidence is calculated on each expanding fold's development validation dates
@@ -58,7 +78,7 @@ def audit_features(development_dataset: pd.DataFrame, split_plan: SplitPlan) -> 
     # millions of meaningless daily bucket rows on the full-market panel.
     feature_names = [
         feature
-        for feature in _feature_names(dataset)
+        for feature in _feature_names(dataset, feature_schema)
         if pd.to_numeric(dataset[feature], errors="coerce").nunique(dropna=True) > 1
     ]
     coverage_rows: list[dict] = []
@@ -127,11 +147,18 @@ def _normalize_development_dataset(development_dataset: pd.DataFrame, split_plan
     return dataset.sort_values(["trade_date", "symbol"], kind="stable").reset_index(drop=True)
 
 
-def _feature_names(dataset: pd.DataFrame) -> list[str]:
+def _feature_names(dataset: pd.DataFrame, feature_schema: Iterable[str] | None = None) -> list[str]:
+    allowed = None if feature_schema is None else {str(name) for name in feature_schema}
     features = []
     for column in dataset.columns:
         name = str(column)
+        if allowed is not None and name not in allowed:
+            continue
         if name in _NON_FEATURE_COLUMNS or name.startswith(_LABEL_PREFIXES):
+            continue
+        try:
+            assert_leak_free_schema([name])
+        except FeatureLeakageError:
             continue
         if pd.api.types.is_numeric_dtype(dataset[column]):
             features.append(name)
@@ -187,13 +214,20 @@ def _aggregate_ic(fold: int, feature: str, group: str, daily_ic: list[float]) ->
 
 
 def _fold_correlations(fold: int, dataset: pd.DataFrame, features: list[str]) -> list[dict]:
-    rows = []
     numeric = dataset[features].apply(pd.to_numeric, errors="coerce")
-    for left, right in combinations(features, 2):
-        paired = numeric[[left, right]].dropna()
-        correlation = paired[left].corr(paired[right], method="spearman") if len(paired) >= 2 else np.nan
+    variable_features = [feature for feature in features if numeric[feature].nunique(dropna=True) > 1]
+    if len(variable_features) < 2:
+        return []
+    # Rank each column once, then use a vectorized Pearson correlation on the
+    # ranks. Pairwise counts are retained for the audit evidence.
+    ranked = numeric[variable_features].rank(method="average", na_option="keep")
+    correlations = ranked.corr(method="pearson", min_periods=2)
+    rows = []
+    for left, right in combinations(variable_features, 2):
+        correlation = correlations.loc[left, right]
         if pd.notna(correlation) and abs(correlation) >= HIGH_CORRELATION_THRESHOLD:
-            rows.append({"fold": fold, "feature_left": left, "feature_right": right, "correlation": float(correlation), "abs_correlation": float(abs(correlation)), "sample_count": int(len(paired))})
+            sample_count = int(numeric[[left, right]].notna().all(axis=1).sum())
+            rows.append({"fold": fold, "feature_left": left, "feature_right": right, "correlation": float(correlation), "abs_correlation": float(abs(correlation)), "sample_count": sample_count})
     return rows
 
 

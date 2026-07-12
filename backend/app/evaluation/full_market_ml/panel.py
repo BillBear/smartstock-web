@@ -44,6 +44,8 @@ ALLOWED_FEATURE_COLUMNS = (
     "ps",
     "net_mf_amount",
     "net_mf_vol",
+    "market_index_close",
+    "market_index_amount",
 )
 FUTURE_EXECUTION_COLUMNS = (
     "next_open_date",
@@ -160,6 +162,7 @@ def _build_base_panel(
         "moneyflow",
         ("net_mf_amount", "net_mf_vol"),
     )
+    daily = _join_market_context_fields(daily, _frame(frames, "index_daily"))
     adjustments = _deduplicate_market_rows(_frame(frames, "adj_factor"), "adj_factor")
     if not adjustments.empty:
         adjustments["symbol"] = _symbols(adjustments)
@@ -255,6 +258,30 @@ def _join_daily_endpoint_fields(
         if field not in values:
             values[field] = pd.NA
     return daily.merge(values[["symbol", "trade_date", *fields]], on=["symbol", "trade_date"], how="left", validate="many_to_one")
+
+
+def _join_market_context_fields(daily: pd.DataFrame, index_daily: pd.DataFrame) -> pd.DataFrame:
+    """Broadcast one stable market index bar to every stock row on that date."""
+    if index_daily.empty:
+        result = daily.copy()
+        result["market_index_close"] = pd.NA
+        result["market_index_amount"] = pd.NA
+        return result
+    values = index_daily.copy()
+    values["trade_date"] = values.get("trade_date", pd.Series("", index=values.index)).map(_date_text)
+    values["ts_code"] = values.get("ts_code", pd.Series("", index=values.index)).astype(str)
+    preferred = values.loc[values["ts_code"].eq("000001.SH")].copy()
+    if preferred.empty:
+        preferred = values.sort_values("ts_code", kind="stable").copy()
+    preferred = preferred.drop_duplicates("trade_date", keep="first")
+    context = pd.DataFrame(
+        {
+            "trade_date": preferred["trade_date"],
+            "market_index_close": pd.to_numeric(preferred.get("close"), errors="coerce"),
+            "market_index_amount": pd.to_numeric(preferred.get("amount"), errors="coerce"),
+        }
+    )
+    return daily.merge(context, on="trade_date", how="left", validate="many_to_one")
 
 
 def _row_signature(row: pd.Series) -> str:
@@ -414,7 +441,7 @@ def _load_static_frames(root: Path, manifest: CollectionManifest) -> dict[str, p
 
 def _load_daily_frames(root: Path, manifest: CollectionManifest, trade_date: str) -> dict[str, pd.DataFrame]:
     compact = trade_date.replace("-", "")
-    endpoints = {"daily", "daily_basic", "adj_factor", "stk_limit", "moneyflow"}
+    endpoints = {"daily", "daily_basic", "adj_factor", "stk_limit", "moneyflow", "index_daily", "index_dailybasic"}
     return {
         endpoint: _read_partitions(root, [record for record in manifest.partitions if record.endpoint == endpoint and record.key == compact])
         for endpoint in endpoints

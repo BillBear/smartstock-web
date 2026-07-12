@@ -135,6 +135,8 @@ OPTIONAL_FEATURE_SPECS = (
 )
 
 FEATURE_NAMES = [spec.name for spec in CORE_FEATURE_SPECS]
+OPTIONAL_FEATURE_NAMES = [spec.name for spec in OPTIONAL_FEATURE_SPECS]
+ALL_FEATURE_NAMES = [*FEATURE_NAMES, *OPTIONAL_FEATURE_NAMES]
 _DENIED_EXACT = {"entry_tradeable", "eligible_for_training", "eligible_signal_day"}
 _DENIED_PREFIXES = (
     "next_", "future_", "label_", "relevance_", "tp_", "sl_", "path_ambiguous",
@@ -156,9 +158,9 @@ def assert_leak_free_schema(columns: Iterable[str]) -> None:
 
 
 def _model_schema(feature_schema: Iterable[str] | None) -> list[str]:
-    schema = list(FEATURE_NAMES if feature_schema is None else feature_schema)
+    schema = list(ALL_FEATURE_NAMES if feature_schema is None else feature_schema)
     assert_leak_free_schema(schema)
-    unknown = sorted(set(schema) - set(FEATURE_NAMES))
+    unknown = sorted(set(schema) - set(ALL_FEATURE_NAMES))
     if unknown:
         raise ValueError("feature schema contains unknown features: " + ", ".join(unknown))
     return schema
@@ -170,7 +172,7 @@ def build_time_series_features(config: FullMarketMLConfig, panel_shard: pd.DataF
     panel = _normalize_panel(panel_shard)
     if panel.empty:
         return panel
-    assert_leak_free_schema(FEATURE_NAMES)
+    assert_leak_free_schema(ALL_FEATURE_NAMES)
     result = panel.copy()
     grouped = result.groupby("symbol", sort=False, group_keys=False)
     close, opening, high, low = (result[name] for name in ("adjusted_close", "adjusted_open", "adjusted_high", "adjusted_low"))
@@ -238,7 +240,7 @@ def build_cross_section_features(
         if not daily_rows:
             continue
         market = _cross_section_for_date(pd.concat(daily_rows, ignore_index=True))
-        output_columns = [name for name in FEATURE_NAMES if name in market]
+        output_columns = [name for name in ALL_FEATURE_NAMES if name in market]
         for shard_key, shard in result.items():
             rows = market.loc[market["_shard_key"].eq(shard_key)]
             if not rows.empty:
@@ -272,12 +274,33 @@ def write_feature_dictionary(path: str | Path) -> Path:
 
 
 def _add_optional_time_series(result: pd.DataFrame, grouped) -> None:
+    index_close = pd.to_numeric(result.get("market_index_close", pd.Series(np.nan, index=result.index)), errors="coerce")
+    index_amount = pd.to_numeric(result.get("market_index_amount", pd.Series(np.nan, index=result.index)), errors="coerce")
+    index_grouped = index_close.groupby(result["symbol"], sort=False)
+    index_returns = index_close / index_grouped.shift(1) - 1.0
+    result["market_index_return_5d"] = index_close / index_grouped.shift(5) - 1.0
+    result["market_index_volatility_20d"] = index_returns.groupby(result["symbol"], sort=False).transform(
+        lambda s: s.rolling(20, min_periods=20).std()
+    )
+    result["index_turnover_ratio_20d"] = index_amount / index_amount.groupby(result["symbol"], sort=False).transform(
+        lambda s: s.rolling(20, min_periods=20).mean()
+    )
     for source in ("turnover_rate", "total_mv", "circ_mv", "pe", "pb", "ps", "net_mf_amount", "listing_age_trade_days"):
         values = pd.to_numeric(result[source], errors="coerce") if source in result else pd.Series(np.nan, index=result.index)
         result[source] = values
     result["main_net_inflow_ratio"] = result["net_mf_amount"] / result["amount_cny"].where(result["amount_cny"].gt(0))
-    for source in ("turnover_rate", "total_mv", "circ_mv", "pe", "pb", "ps", "main_net_inflow_ratio", "net_mf_amount", "listing_age_trade_days"):
-        flag = f"{source}_missing"
+    missing_flags = (
+        ("turnover_rate", "turnover_rate_missing"),
+        ("total_mv", "total_mv_missing"),
+        ("circ_mv", "circ_mv_missing"),
+        ("pe", "pe_missing"),
+        ("pb", "pb_missing"),
+        ("ps", "ps_missing"),
+        ("main_net_inflow_ratio", "main_net_inflow_ratio_missing"),
+        ("net_mf_amount", "net_mf_amount_missing"),
+        ("listing_age_trade_days", "listing_age_missing"),
+    )
+    for source, flag in missing_flags:
         if flag in FEATURE_NAMES:
             result[flag] = result[source].isna().astype("int8")
     result["turnover_ratio_20d"] = result["turnover_rate"] / grouped["turnover_rate"].transform(lambda s: s.rolling(20, min_periods=20).mean())

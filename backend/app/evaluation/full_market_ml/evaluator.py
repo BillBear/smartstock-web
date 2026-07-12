@@ -15,10 +15,16 @@ _GRADE = "relevance_grade_10d"
 _STRONG = "label_strong_path_10d"
 
 
-def evaluate_ranking(predictions: pd.DataFrame, *, score_col: str = "score") -> dict[str, Any]:
-    """Evaluate predictions per signal date, then average each daily metric."""
-    data = _validated_predictions(predictions, score_col, {_GRADE, _STRONG}, require_symbol=True)
-    daily = [_daily_ranking_metrics(rows, score_col) for _, rows in data.groupby(_DATE, sort=True)]
+def evaluate_ranking(
+    predictions: pd.DataFrame,
+    *,
+    score_col: str = "score",
+    grade_col: str = _GRADE,
+    strong_col: str = _STRONG,
+) -> dict[str, Any]:
+    """Evaluate predictions per signal date against an explicit label contract."""
+    data = _validated_predictions(predictions, score_col, {grade_col, strong_col}, require_symbol=True)
+    daily = [_daily_ranking_metrics(rows, score_col, grade_col=grade_col, strong_col=strong_col) for _, rows in data.groupby(_DATE, sort=True)]
     if not daily:
         return _empty_ranking_result()
 
@@ -162,10 +168,16 @@ def simulate_daily_topk_portfolio(
     }
 
 
-def _daily_ranking_metrics(rows: pd.DataFrame, score_col: str) -> dict[str, float]:
+def _daily_ranking_metrics(
+    rows: pd.DataFrame,
+    score_col: str,
+    *,
+    grade_col: str = _GRADE,
+    strong_col: str = _STRONG,
+) -> dict[str, float]:
     ranked = rows.sort_values([score_col, "symbol"], ascending=[False, True], kind="stable").reset_index(drop=True)
-    strong = ranked[_STRONG].astype(bool).to_numpy()
-    grades = pd.to_numeric(ranked[_GRADE], errors="coerce").fillna(0.0).clip(lower=0.0).to_numpy()
+    strong = ranked[strong_col].astype(bool).to_numpy()
+    grades = pd.to_numeric(ranked[grade_col], errors="coerce").fillna(0.0).clip(lower=0.0).to_numpy()
     returns = pd.to_numeric(ranked.get(_RETURN, pd.Series(0.0, index=ranked.index)), errors="coerce").fillna(0.0).to_numpy()
     top = lambda size: slice(0, min(size, len(ranked)))
     denominator = lambda size: max(1, min(size, len(ranked)))

@@ -6,6 +6,7 @@ import pandas as pd
 
 from app.evaluation.full_market_ml.features import (
     CORE_FEATURE_SPECS,
+    ALL_FEATURE_NAMES,
     FEATURE_NAMES,
     FeatureLeakageError,
     assert_leak_free_schema,
@@ -76,6 +77,14 @@ class FullMarketMLFeatureTests(FullMarketMLTestCase):
         self.assertIn("main_net_inflow_ratio_missing", matrix.columns)
         self.assertTrue(matrix["main_net_inflow_ratio_missing"].eq(1).all())
 
+    def test_listing_age_missing_flag_matches_feature_contract(self):
+        panel = feature_fixture().drop(columns=["listing_age_trade_days"])
+
+        matrix = build_features_for_date(self.config, panel, "2025-01-10")
+
+        self.assertIn("listing_age_missing", matrix.columns)
+        self.assertTrue(matrix["listing_age_missing"].eq(1).all())
+
     def test_feature_contract_has_explicit_bounded_core_dictionary(self):
         self.assertGreaterEqual(len(CORE_FEATURE_SPECS), 80)
         self.assertLessEqual(len(CORE_FEATURE_SPECS), 120)
@@ -88,6 +97,22 @@ class FullMarketMLFeatureTests(FullMarketMLTestCase):
         self.assertIn("adjusted_return_20d_rank", matrix.columns)
         self.assertIn("adjusted_return_20d_robust_z", matrix.columns)
         self.assertTrue(matrix["adjusted_return_20d_rank"].between(0, 1).all())
+
+    def test_market_context_features_are_built_from_signal_day_index_data(self):
+        panel = feature_fixture(sessions=30)
+        index_close = pd.Series(range(len(panel["trade_date"].unique())), dtype="float64") + 100.0
+        index_by_date = dict(zip(sorted(panel["trade_date"].unique()), index_close))
+        panel["market_index_close"] = panel["trade_date"].map(index_by_date)
+        panel["market_index_amount"] = panel["trade_date"].map(index_by_date) * 10.0
+
+        matrix = build_features_for_date(self.config, panel, "2025-01-10")
+
+        self.assertIn("market_index_return_5d", matrix.columns)
+        self.assertIn("market_index_volatility_20d", matrix.columns)
+        self.assertIn("index_turnover_ratio_20d", matrix.columns)
+        for name in ("market_index_return_5d", "market_index_volatility_20d", "index_turnover_ratio_20d"):
+            self.assertIn(name, matrix.columns)
+        self.assertTrue(set(ALL_FEATURE_NAMES).issubset(matrix.columns))
 
     def test_cross_section_ranks_are_aggregated_across_all_supplied_shards(self):
         time_series = build_time_series_features(self.config, feature_fixture())
