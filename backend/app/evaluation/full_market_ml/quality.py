@@ -58,6 +58,7 @@ class QualityReport:
     per_date_board_coverage: dict[str, dict[str, float]]
     industry_coverage: float
     moneyflow_coverage: float | None
+    market_context_conflict_count: int
     sample_estimates: dict[str, int]
     raw_valid_row_count: int
     row_count: int
@@ -88,6 +89,7 @@ class QualityReport:
             "per_date_board_coverage": self.per_date_board_coverage,
             "industry_coverage": self.industry_coverage,
             "moneyflow_coverage": self.moneyflow_coverage,
+            "market_context_conflict_count": self.market_context_conflict_count,
             "sample_estimates": self.sample_estimates,
             "raw_valid_row_count": self.raw_valid_row_count,
             "row_count": self.row_count,
@@ -211,6 +213,11 @@ def audit_panel_quality(config: FullMarketMLConfig, panel_dataset: pd.DataFrame,
     if moneyflow_coverage is None or moneyflow_coverage < OPTIONAL_MONEYFLOW_MINIMUM_COVERAGE:
         disabled_groups.add("moneyflow")
 
+    market_context_conflict_count = _market_context_conflict_count(panel)
+    if market_context_conflict_count:
+        blocking_codes.add("market_context_conflict")
+        exclusions.add("market_context:conflicting_values")
+
     sample_estimates = _sample_estimates(panel, valid_rows)
     if sample_estimates["estimated_labeled_rows"] <= 0:
         blocking_codes.add("insufficient_training_samples")
@@ -232,6 +239,7 @@ def audit_panel_quality(config: FullMarketMLConfig, panel_dataset: pd.DataFrame,
         per_date_board_coverage=per_date_board_coverage,
         industry_coverage=industry_coverage,
         moneyflow_coverage=moneyflow_coverage,
+        market_context_conflict_count=market_context_conflict_count,
         sample_estimates=sample_estimates,
         raw_valid_row_count=raw_valid_row_count,
         row_count=len(panel),
@@ -359,6 +367,17 @@ def _moneyflow_coverage(panel: pd.DataFrame) -> float | None:
     if not columns:
         return None
     return float(panel[columns].notna().all(axis=1).mean()) if len(panel) else 0.0
+
+
+def _market_context_conflict_count(panel: pd.DataFrame) -> int:
+    columns = [column for column in ("market_index_close", "market_index_amount") if column in panel]
+    if not columns:
+        return 0
+    conflicts = set()
+    for trade_date, rows in panel.groupby("trade_date", sort=False):
+        if any(pd.to_numeric(rows[column], errors="coerce").nunique(dropna=True) > 1 for column in columns):
+            conflicts.add(trade_date)
+    return len(conflicts)
 
 
 def _missing_ratio(values: pd.Series) -> float:

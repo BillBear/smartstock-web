@@ -149,6 +149,27 @@ class FullMarketMLPanelTests(unittest.TestCase):
         self.assertEqual(first["market_index_close"], 100.0)
         self.assertEqual(first["market_index_amount"], 1000.0)
 
+    def test_conflicting_index_rows_for_one_date_block_panel_build(self):
+        equivalent = two_day_split_fixture()
+        equivalent["index_daily"] = frame(
+            [
+                {"ts_code": "000001.SH", "trade_date": "20250102", "close": 100.0, "amount": 1000.0},
+                {"ts_code": "000001.SH", "trade_date": "20250102", "close": 100.0, "amount": 1000.0},
+            ]
+        )
+        self.assertEqual(build_panel_from_frames(equivalent).loc[lambda rows: rows.trade_date == "2025-01-02", "market_index_close"].iloc[0], 100.0)
+
+        fixtures = two_day_split_fixture()
+        fixtures["index_daily"] = frame(
+            [
+                {"ts_code": "000001.SH", "trade_date": "20250102", "close": 100.0, "amount": 1000.0},
+                {"ts_code": "000001.SH", "trade_date": "20250102", "close": 101.0, "amount": 1000.0},
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "conflicting index_daily rows"):
+            build_panel_from_frames(fixtures)
+
     def test_missing_or_nonpositive_adj_factor_invalidates_adjusted_rows_and_prior_entry(self):
         for name, factor in (("missing", None), ("zero", 0.0)):
             with self.subTest(name=name):
@@ -285,6 +306,18 @@ class FullMarketMLPanelTests(unittest.TestCase):
 
         self.assertEqual(panel.loc[panel.trade_date == "2024-12-31", "industry_l1"].item(), "基础化工")
         self.assertEqual(panel.loc[panel.trade_date == "2025-01-02", "industry_l1"].item(), "有色金属")
+
+    def test_overlapping_historical_industry_intervals_block_panel_build(self):
+        fixtures = historical_industry_fixture()
+        fixtures["index_member_all"] = frame(
+            [
+                {"l1_code": "801010.SI", "con_code": "000001.SZ", "in_date": "20200101", "out_date": "20250131"},
+                {"l1_code": "801020.SI", "con_code": "000001.SZ", "in_date": "20250101", "out_date": ""},
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "overlapping historical industry intervals"):
+            build_panel_from_frames(fixtures)
 
     def test_units_are_converted_once_and_conflicting_market_duplicates_block_build(self):
         panel = build_panel_from_frames(two_day_split_fixture())

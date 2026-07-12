@@ -276,15 +276,29 @@ def write_feature_dictionary(path: str | Path) -> Path:
 def _add_optional_time_series(result: pd.DataFrame, grouped) -> None:
     index_close = pd.to_numeric(result.get("market_index_close", pd.Series(np.nan, index=result.index)), errors="coerce")
     index_amount = pd.to_numeric(result.get("market_index_amount", pd.Series(np.nan, index=result.index)), errors="coerce")
-    index_grouped = index_close.groupby(result["symbol"], sort=False)
-    index_returns = index_close / index_grouped.shift(1) - 1.0
-    result["market_index_return_5d"] = index_close / index_grouped.shift(5) - 1.0
-    result["market_index_volatility_20d"] = index_returns.groupby(result["symbol"], sort=False).transform(
-        lambda s: s.rolling(20, min_periods=20).std()
+    # Market context is one observation per date.  Computing it after grouping
+    # by symbol makes the value depend on each stock's missing-row pattern.
+    context = pd.DataFrame(
+        {
+            "trade_date": result["trade_date"].astype(str),
+            "market_index_close": index_close.to_numpy(),
+            "market_index_amount": index_amount.to_numpy(),
+        }
     )
-    result["index_turnover_ratio_20d"] = index_amount / index_amount.groupby(result["symbol"], sort=False).transform(
-        lambda s: s.rolling(20, min_periods=20).mean()
-    )
+    for trade_date, rows in context.groupby("trade_date", sort=False):
+        for column in ("market_index_close", "market_index_amount"):
+            if rows[column].nunique(dropna=True) > 1:
+                raise ValueError(f"conflicting market context values for trade_date={trade_date}")
+    context = context.groupby("trade_date", as_index=False, sort=True).first()
+    context_close = context["market_index_close"]
+    context_amount = context["market_index_amount"]
+    context_returns = context_close.pct_change()
+    context["market_index_return_5d"] = context_close.pct_change(5)
+    context["market_index_volatility_20d"] = context_returns.rolling(20, min_periods=20).std()
+    context["index_turnover_ratio_20d"] = context_amount / context_amount.rolling(20, min_periods=20).mean()
+    context_by_date = context.set_index("trade_date")
+    for name in ("market_index_return_5d", "market_index_volatility_20d", "index_turnover_ratio_20d"):
+        result[name] = result["trade_date"].map(context_by_date[name])
     for source in ("turnover_rate", "total_mv", "circ_mv", "pe", "pb", "ps", "net_mf_amount", "listing_age_trade_days"):
         values = pd.to_numeric(result[source], errors="coerce") if source in result else pd.Series(np.nan, index=result.index)
         result[source] = values

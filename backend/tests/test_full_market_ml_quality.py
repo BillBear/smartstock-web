@@ -189,6 +189,17 @@ class FullMarketMLQualityTests(unittest.TestCase):
         self.assertEqual(report.per_date_board_coverage["2025-01-02"]["CHINEXT"], 0.0)
         self.assertEqual(report.per_date_board_coverage["2025-01-02"]["STAR"], 0.0)
 
+    def test_conflicting_market_context_values_block_quality_gate(self):
+        panel = valid_panel()
+        panel["market_index_close"] = panel["trade_date"].map({"2025-01-02": 100.0, "2025-01-03": 101.0})
+        panel.loc[panel.index[0], "market_index_close"] = 999.0
+
+        report = audit_panel_quality(self.config, panel, valid_manifest(self.config))
+
+        self.assertFalse(report.ready)
+        self.assertIn("market_context_conflict", report.blocking_codes)
+        self.assertEqual(report.market_context_conflict_count, 1)
+
 
 def valid_manifest(config) -> CollectionManifest:
     open_dates = ("20250102", "20250103")

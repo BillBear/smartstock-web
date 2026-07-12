@@ -114,6 +114,22 @@ class FullMarketMLFeatureTests(FullMarketMLTestCase):
             self.assertIn(name, matrix.columns)
         self.assertTrue(set(ALL_FEATURE_NAMES).issubset(matrix.columns))
 
+    def test_market_context_is_constant_by_date_when_a_symbol_has_missing_history(self):
+        panel = feature_fixture(sessions=30)
+        dates = sorted(panel["trade_date"].unique())
+        index_close = pd.Series(range(len(dates)), dtype="float64") + 100.0
+        index_by_date = dict(zip(dates, index_close))
+        panel["market_index_close"] = panel["trade_date"].map(index_by_date)
+        panel["market_index_amount"] = panel["trade_date"].map(index_by_date) * 10.0
+        panel = panel.loc[~((panel["symbol"] == "000004") & panel["trade_date"].isin(dates[:4]))].copy()
+
+        features = build_time_series_features(self.config, panel)
+        signal_date = dates[-1]
+        rows = features.loc[features["trade_date"].eq(signal_date)]
+
+        for name in ("market_index_return_5d", "market_index_volatility_20d", "index_turnover_ratio_20d"):
+            self.assertLessEqual(rows[name].nunique(dropna=True), 1, name)
+
     def test_cross_section_ranks_are_aggregated_across_all_supplied_shards(self):
         time_series = build_time_series_features(self.config, feature_fixture())
         shards = {

@@ -273,6 +273,10 @@ def _join_market_context_fields(daily: pd.DataFrame, index_daily: pd.DataFrame) 
     preferred = values.loc[values["ts_code"].eq("000001.SH")].copy()
     if preferred.empty:
         preferred = values.sort_values("ts_code", kind="stable").copy()
+    for trade_date, rows in preferred.groupby("trade_date", sort=False):
+        for column in ("close", "amount"):
+            if column in rows and pd.to_numeric(rows[column], errors="coerce").nunique(dropna=True) > 1:
+                raise ValueError(f"conflicting index_daily rows for trade_date={trade_date}")
     preferred = preferred.drop_duplicates("trade_date", keep="first")
     context = pd.DataFrame(
         {
@@ -387,6 +391,19 @@ def _industry_values(panel: pd.DataFrame, frames: Mapping[str, pd.DataFrame], en
     intervals = {}
     for symbol, code, start, end in zip(members.symbol, members.get("l1_code", pd.Series("", index=members.index)), starts, ends):
         intervals.setdefault(symbol, []).append((start, end, name_by_code.get(code)))
+    for symbol, values in intervals.items():
+        ordered = sorted(values, key=lambda value: (value[0], value[1], str(value[2])))
+        previous = []
+        for current in ordered:
+            current_start, current_end, current_name = current
+            for prior_start, prior_end, prior_name in previous:
+                if not current_start or not prior_start:
+                    continue
+                overlaps = not prior_end or current_start <= prior_end
+                exact_duplicate = (prior_start, prior_end, prior_name) == (current_start, current_end, current_name)
+                if overlaps and not exact_duplicate:
+                    raise ValueError(f"overlapping historical industry intervals for symbol={symbol}")
+            previous.append(current)
     return pd.Series(
         [next((name for start, end, name in intervals.get(symbol, []) if start <= trade_date and (not end or trade_date <= end)), pd.NA) for symbol, trade_date in zip(panel.symbol, panel.trade_date)],
         index=panel.index,
