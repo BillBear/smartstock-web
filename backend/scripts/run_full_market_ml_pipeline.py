@@ -6,6 +6,7 @@ import hashlib
 import os
 import json
 import sys
+from datetime import datetime, timezone
 from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
@@ -223,10 +224,27 @@ def default_services(*, readiness_mode: str = "online"):
         development = dataset.loc[dataset["trade_date"].isin(split.development_dates)].copy()
         audit_path = artifact(root, "feature-audit") / "report.json"
         feature_audit = load_feature_audit_artifact(audit_path)
-        candidate = run_development_training(config, development, split, feature_audit=feature_audit)
-        output = artifact(root, "dev-train") / "oof_predictions.parquet"
-        candidate.oof_predictions.to_parquet(output, index=False)
         diagnostics_root = artifact(root, "dev-train")
+
+        def report_progress(payload):
+            progress_path = root / "progress.json"
+            current = json.loads(progress_path.read_text(encoding="utf-8")) if progress_path.is_file() else {}
+            current.update(payload)
+            current["stage"] = "dev-train"
+            current["status"] = "running"
+            current["last_progress_at"] = datetime.now(timezone.utc).isoformat()
+            write_json(progress_path, current)
+
+        candidate = run_development_training(
+            config,
+            development,
+            split,
+            feature_audit=feature_audit,
+            checkpoint_dir=diagnostics_root / "checkpoints",
+            on_progress=report_progress,
+        )
+        output = diagnostics_root / "oof_predictions.parquet"
+        candidate.oof_predictions.to_parquet(output, index=False)
         seed_sensitivity_path = diagnostics_root / "seed_sensitivity.csv"
         pd.DataFrame(candidate.seed_sensitivity).to_csv(seed_sensitivity_path, index=False)
         error_samples_path = diagnostics_root / "error_samples.csv"

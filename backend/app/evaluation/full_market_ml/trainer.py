@@ -7,9 +7,11 @@ import os
 import shutil
 import tempfile
 import weakref
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
+from types import SimpleNamespace
 from typing import Any, Callable
 
 import lightgbm as lgb
@@ -37,6 +39,7 @@ FIXED_RANKER_GRID = tuple(
     for leaf in (200, 500)
 )
 RISK_ALPHAS = (0.0, 0.1, 0.2, 0.3)
+PRE_REGISTERED_RISK_ALPHA = 0.2
 _GROUP_SEQUENCE = ("momentum", "amount_turnover", "technical", "risk", "market_industry", "moneyflow")
 _GROUPS = {spec.name: spec.feature_group for spec in (*CORE_FEATURE_SPECS, *OPTIONAL_FEATURE_SPECS)}
 _LOADED_FINAL_FITS: weakref.WeakKeyDictionary["FinalFit", tuple[Path, str]] = weakref.WeakKeyDictionary()
@@ -289,6 +292,9 @@ def run_development_training(
     dataset: pd.DataFrame,
     split_plan: SplitPlan,
     feature_audit: FeatureAuditResult | None = None,
+    *,
+    checkpoint_dir: str | Path | None = None,
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> FrozenCandidate:
     """Train only on A walk-forward folds and freeze an OOF-selected research candidate."""
     data = _development_dataset(dataset, split_plan)
@@ -309,20 +315,34 @@ def run_development_training(
 
     ranker_dataset_cache: dict[tuple[tuple[str, ...], int], tuple[lgb.Dataset, list[lgb.Dataset]]] = {}
     baselines = _baselines(_oof_rows(data, split_plan))
-    grid_reports = []
-    for params in FIXED_RANKER_GRID:
-        predictions = _ranker_oof(data, split_plan, features, params, seeds, dataset_cache=ranker_dataset_cache)
-        metrics = evaluate_ranking(predictions)
-        fold_metrics = _fold_metrics(predictions)
-        grid_reports.append({"params": dict(params), "metrics": metrics, "median_fold_ndcg_at_10": median(row["ndcg_at_10"] for row in fold_metrics), "median_fold_precision_at_5": median(row["precision_at_5"] for row in fold_metrics)})
-    selected = max(grid_reports, key=lambda row: (row["median_fold_ndcg_at_10"], row["median_fold_precision_at_5"], -row["params"]["min_data_in_leaf"]))
+    rank_predictions, nested_selection, selected_params = _nested_ranker_oof(
+        data,
+        split_plan,
+        features,
+        seeds,
+        dataset_cache=ranker_dataset_cache,
+        checkpoint_dir=checkpoint_dir,
+        on_progress=on_progress,
+    )
+    selected = {
+        "params": selected_params,
+        "metrics": evaluate_ranking(rank_predictions),
+        "median_fold_ndcg_at_10": median(row["ndcg_at_10"] for row in _fold_metrics(rank_predictions)),
+        "median_fold_precision_at_5": median(row["precision_at_5"] for row in _fold_metrics(rank_predictions)),
+    }
+    grid_reports = [{"selection_protocol": "nested_inner_oof", **row} for row in nested_selection]
     group_ablations = _run_group_ablations(
-        data, split_plan, tuple(features), selected["params"], seeds, dataset_cache=ranker_dataset_cache
+        data,
+        split_plan,
+        tuple(features),
+        selected["params"],
+        seeds,
+        dataset_cache=ranker_dataset_cache,
+        checkpoint_dir=checkpoint_dir,
+        on_progress=on_progress,
+        baseline_prediction=rank_predictions,
     )
     selected_features = tuple(features)
-    rank_predictions = _ranker_oof(
-        data, split_plan, selected_features, selected["params"], seeds, dataset_cache=ranker_dataset_cache
-    )
     unseen_predictions = _unseen_stock_oof(
         development_with_unseen,
         split_plan,
@@ -330,9 +350,32 @@ def run_development_training(
         selected["params"],
         seeds,
         dataset_cache=ranker_dataset_cache,
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_key="unseen-stocks",
+        on_progress=on_progress,
     )
-    strong_prob, strong_calibrator = _classifier_oof(data, split_plan, selected_features, "label_strong_path_10d", selected["params"], seeds)
-    severe_prob, severe_calibrator = _classifier_oof(data, split_plan, selected_features, "label_severe_negative_10d", selected["params"], seeds)
+    strong_prob, strong_calibrator = _classifier_oof(
+        data,
+        split_plan,
+        selected_features,
+        "label_strong_path_10d",
+        selected["params"],
+        seeds,
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_key="classifier-strong",
+        on_progress=on_progress,
+    )
+    severe_prob, severe_calibrator = _classifier_oof(
+        data,
+        split_plan,
+        selected_features,
+        "label_severe_negative_10d",
+        selected["params"],
+        seeds,
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_key="classifier-severe",
+        on_progress=on_progress,
+    )
     rank_predictions["strong_probability"] = strong_prob
     rank_predictions["severe_negative_probability"] = severe_prob
     risk_trials = []
@@ -341,7 +384,8 @@ def run_development_training(
         trial["score"] = trial["score"] - alpha * trial["severe_negative_probability"]
         metrics = evaluate_ranking(trial)
         risk_trials.append({"alpha": alpha, "metrics": metrics})
-    risk_selected = max(risk_trials, key=lambda row: (row["metrics"]["ndcg_at_10"], row["metrics"]["precision_at_5"], -row["alpha"]))
+    risk_selected = next(row for row in risk_trials if row["alpha"] == PRE_REGISTERED_RISK_ALPHA)
+    risk_selected["selection_protocol"] = "pre_registered_before_outer_oof"
     rank_predictions["score"] = rank_predictions["score"] - risk_selected["alpha"] * rank_predictions["severe_negative_probability"]
     oof_metrics = evaluate_ranking(rank_predictions)
     development_quadrant_metrics = {
@@ -686,12 +730,128 @@ def _stable_random_score(data: pd.DataFrame) -> pd.Series:
     return pd.Series(pd.util.hash_pandas_object(keys, index=False).to_numpy(), index=data.index, dtype="uint64")
 
 
-def _ranker_oof(data, split_plan, features, params, seeds, *, dataset_cache=None) -> pd.DataFrame:
+def _nested_ranker_oof(
+    data,
+    split_plan,
+    features,
+    seeds,
+    *,
+    dataset_cache=None,
+    checkpoint_dir: str | Path | None = None,
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
+):
+    """Select ranker parameters inside each outer fold, then score that fold."""
+    rows = []
+    selection_report = []
+    selected_by_fold = []
+    for outer_fold in split_plan.walk_forward:
+        train, outer_valid = _fold_data(data, outer_fold)
+        if train.empty or outer_valid.empty:
+            continue
+        selection_path = _selection_checkpoint_path(checkpoint_dir, outer_fold.fold)
+        if selection_path is not None and selection_path.is_file():
+            selection = json.loads(selection_path.read_text(encoding="utf-8"))
+            params = {key: int(value) for key, value in selection["params"].items()}
+            inner_reports = list(selection.get("inner_reports", []))
+            selection_report.append(selection)
+        else:
+            inner_split = _inner_selection_plan(train, outer_fold)
+            if inner_split.walk_forward:
+                params, inner_reports = _select_ranker_params(
+                    train,
+                    inner_split,
+                    features,
+                    seeds,
+                    dataset_cache={},
+                )
+                selection = {"fold": int(outer_fold.fold), "params": params, "inner_reports": inner_reports}
+            else:
+                params = dict(FIXED_RANKER_GRID[0])
+                inner_reports = []
+                selection = {
+                    "fold": int(outer_fold.fold),
+                    "params": params,
+                    "inner_reports": [],
+                    "fallback": "insufficient_pre_outer_dates",
+                }
+            if selection_path is not None:
+                _write_json_atomic(selection, selection_path)
+            selection_report.append(selection)
+        _report_progress(on_progress, "nested-selection", outer_fold.fold, len(split_plan.walk_forward), status="complete")
+        selected_by_fold.append(tuple(sorted(params.items())))
+        outer_only = SimpleNamespace(walk_forward=(outer_fold,))
+        fold_predictions = _ranker_oof(
+            data,
+            outer_only,
+            features,
+            params,
+            seeds,
+            dataset_cache=dataset_cache,
+            checkpoint_dir=checkpoint_dir,
+            checkpoint_key=f"nested-outer-fold-{outer_fold.fold}",
+            on_progress=on_progress,
+            progress_total=len(split_plan.walk_forward),
+        )
+        rows.append(fold_predictions)
+    if not rows:
+        raise ValueError("nested walk-forward plan produced no OOF rows")
+    selected = dict(Counter(selected_by_fold).most_common(1)[0][0])
+    return pd.concat(rows, ignore_index=True), selection_report, selected
+
+
+def _inner_selection_plan(train: pd.DataFrame, outer_fold) -> SimpleNamespace:
+    """Build time-only inner folds strictly before one outer validation fold."""
+    dates = tuple(sorted(train["trade_date"].dropna().astype(str).unique()))
+    embargo = 20
+    if len(dates) < 60:
+        return SimpleNamespace(walk_forward=())
+    validation_count = max(5, min(20, len(dates) // 8))
+    folds = []
+    for index, start in enumerate((len(dates) // 2, (len(dates) * 3) // 4), start=1):
+        validation_start = start + embargo
+        validation_end = min(validation_start + validation_count, len(dates))
+        if start < 10 or validation_start >= validation_end:
+            continue
+        folds.append(
+            type(outer_fold)(
+                fold=index,
+                training_dates=dates[:start],
+                validation_dates=dates[validation_start:validation_end],
+                training_symbols=tuple(sorted(train["symbol"].astype(str).unique())),
+                train_start=dates[0],
+                train_end=dates[start - 1],
+                validation_start=dates[validation_start],
+                validation_end=dates[validation_end - 1],
+            )
+        )
+    return SimpleNamespace(walk_forward=tuple(folds))
+
+
+def _ranker_oof(
+    data,
+    split_plan,
+    features,
+    params,
+    seeds,
+    *,
+    dataset_cache=None,
+    checkpoint_dir: str | Path | None = None,
+    checkpoint_key: str = "ranker",
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
+    progress_total: int | None = None,
+) -> pd.DataFrame:
     features = list(features)
     rows = []
     for fold in split_plan.walk_forward:
         train, outer_valid = _fold_data(data, fold)
         if train.empty or outer_valid.empty:
+            continue
+        checkpoint = _fold_checkpoint_path(checkpoint_dir, checkpoint_key, features, params, seeds, fold.fold)
+        if checkpoint is not None and checkpoint.is_file():
+            cached = pd.read_parquet(checkpoint)
+            _validate_fold_checkpoint(cached, outer_valid, fold.fold, "A_time_oof")
+            rows.append(cached)
+            _report_progress(on_progress, checkpoint_key, fold.fold, progress_total or len(split_plan.walk_forward), status="reused")
             continue
         fit_train, fit_valid = _inner_time_split(train)
         cache_key = (tuple(features), int(fold.fold))
@@ -713,13 +873,28 @@ def _ranker_oof(data, split_plan, features, params, seeds, *, dataset_cache=None
                 validation_sets=validation_sets,
             )
             scores.append(model.predict(outer_valid[features], num_iteration=_model_iteration(model)))
-        rows.append(outer_valid.assign(score=np.median(np.vstack(scores), axis=0), fold=fold.fold, quadrant="A_time_oof"))
+        result = outer_valid.assign(score=np.median(np.vstack(scores), axis=0), fold=fold.fold, quadrant="A_time_oof")
+        if checkpoint is not None:
+            _write_parquet_atomic(result, checkpoint)
+        rows.append(result)
+        _report_progress(on_progress, checkpoint_key, fold.fold, progress_total or len(split_plan.walk_forward), status="complete")
     if not rows:
         raise ValueError("walk-forward plan produced no OOF rows")
     return pd.concat(rows, ignore_index=True)
 
 
-def _unseen_stock_oof(data, split_plan, features, params, seeds, *, dataset_cache=None):
+def _unseen_stock_oof(
+    data,
+    split_plan,
+    features,
+    params,
+    seeds,
+    *,
+    dataset_cache=None,
+    checkpoint_dir: str | Path | None = None,
+    checkpoint_key: str = "unseen-stocks",
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
+):
     """Score development validation dates for symbols excluded from A training."""
     features = list(features)
     unseen_symbols = set(split_plan.C_dev_unseen_symbols)
@@ -732,6 +907,13 @@ def _unseen_stock_oof(data, split_plan, features, params, seeds, *, dataset_cach
         train = data.loc[data["trade_date"].isin(fold.training_dates) & data["symbol"].isin(fold.training_symbols)].copy()
         outer_valid = data.loc[data["trade_date"].isin(fold.validation_dates) & data["symbol"].isin(unseen_symbols)].copy()
         if train.empty or outer_valid.empty:
+            continue
+        checkpoint = _fold_checkpoint_path(checkpoint_dir, checkpoint_key, features, params, seeds, fold.fold)
+        if checkpoint is not None and checkpoint.is_file():
+            cached = pd.read_parquet(checkpoint)
+            _validate_fold_checkpoint(cached, outer_valid, fold.fold, "C_dev_unseen")
+            rows.append(cached)
+            _report_progress(on_progress, checkpoint_key, fold.fold, len(split_plan.walk_forward), status="reused")
             continue
         fit_train, fit_valid = _inner_time_split(train)
         cache_key = ("C_dev_unseen", tuple(features), int(fold.fold))
@@ -753,7 +935,11 @@ def _unseen_stock_oof(data, split_plan, features, params, seeds, *, dataset_cach
                 validation_sets=validation_sets,
             )
             scores.append(model.predict(outer_valid[features], num_iteration=_model_iteration(model)))
-        rows.append(outer_valid.assign(score=np.median(np.vstack(scores), axis=0), fold=fold.fold, quadrant="C_dev_unseen"))
+        result = outer_valid.assign(score=np.median(np.vstack(scores), axis=0), fold=fold.fold, quadrant="C_dev_unseen")
+        if checkpoint is not None:
+            _write_parquet_atomic(result, checkpoint)
+        rows.append(result)
+        _report_progress(on_progress, checkpoint_key, fold.fold, len(split_plan.walk_forward), status="complete")
     if not rows:
         return data.iloc[0:0].copy().assign(
             score=pd.Series(dtype=float), fold=pd.Series(dtype=int), quadrant=pd.Series(dtype=str)
@@ -776,6 +962,83 @@ def _inner_time_split(train: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame |
     fit_train = train.loc[train["trade_date"].isin(fit_dates)].copy()
     fit_valid = train.loc[train["trade_date"].isin(validation_dates)].copy()
     return fit_train, fit_valid if not fit_valid.empty else None
+
+
+def _fold_checkpoint_path(
+    checkpoint_dir: str | Path | None,
+    checkpoint_key: str,
+    features: list[str],
+    params: dict[str, Any],
+    seeds: tuple[int, ...],
+    fold: int,
+) -> Path | None:
+    if checkpoint_dir is None:
+        return None
+    payload = {"key": checkpoint_key, "features": features, "params": params, "seeds": list(seeds)}
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()[:16]
+    root = Path(checkpoint_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    return root / f"{checkpoint_key}-{digest}-fold-{int(fold):02d}.parquet"
+
+
+def _selection_checkpoint_path(checkpoint_dir: str | Path | None, fold: int) -> Path | None:
+    if checkpoint_dir is None:
+        return None
+    root = Path(checkpoint_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    return root / f"nested-selection-fold-{int(fold):02d}.json"
+
+
+def _write_json_atomic(value: dict[str, Any], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, prefix=".selection-", suffix=".tmp", delete=False
+    ) as temporary:
+        temporary.write(json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2, default=str) + "\n")
+        temporary.flush()
+        os.fsync(temporary.fileno())
+        temporary_path = Path(temporary.name)
+    os.replace(temporary_path, path)
+
+
+def _validate_fold_checkpoint(cached: pd.DataFrame, expected: pd.DataFrame, fold: int, quadrant: str) -> None:
+    required = {"trade_date", "symbol", "score", "fold", "quadrant"}
+    if not required.issubset(cached.columns):
+        raise ValueError("fold checkpoint is missing required columns")
+    if not cached["fold"].eq(fold).all() or not cached["quadrant"].eq(quadrant).all():
+        raise ValueError("fold checkpoint metadata does not match the requested fold")
+    expected_keys = set(zip(expected["trade_date"].astype(str), expected["symbol"].astype(str)))
+    cached_keys = set(zip(cached["trade_date"].astype(str), cached["symbol"].astype(str)))
+    if cached_keys != expected_keys or len(cached) != len(expected):
+        raise ValueError("fold checkpoint rows do not match the requested validation rows")
+
+
+def _write_parquet_atomic(value: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".fold-checkpoint-", dir=path.parent) as temporary:
+        temporary_path = Path(temporary) / path.name
+        value.to_parquet(temporary_path, index=False)
+        os.replace(temporary_path, path)
+
+
+def _report_progress(
+    callback: Callable[[dict[str, Any]], None] | None,
+    substep: str,
+    fold: int,
+    total_folds: int,
+    *,
+    status: str,
+) -> None:
+    if callback is None:
+        return
+    callback(
+        {
+            "substep": substep,
+            "current_fold": int(fold),
+            "total_folds": int(total_folds),
+            "status": status,
+        }
+    )
 
 
 def _model_iteration(model: Any) -> int | None:
@@ -858,12 +1121,36 @@ def _fold_metrics(predictions):
     return [evaluate_ranking(rows) for _, rows in predictions.groupby("fold", sort=True)]
 
 
-def _classifier_oof(data, split_plan, features, label, params, seeds):
+def _classifier_oof(
+    data,
+    split_plan,
+    features,
+    label,
+    params,
+    seeds,
+    *,
+    checkpoint_dir: str | Path | None = None,
+    checkpoint_key: str = "classifier",
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
+):
     features = list(features)
     raw_rows = []
     for fold in split_plan.walk_forward:
         train, valid = _fold_data(data, fold)
         if train.empty or valid.empty:
+            continue
+        checkpoint = _fold_checkpoint_path(checkpoint_dir, checkpoint_key, features, params, seeds, fold.fold)
+        if checkpoint is not None and checkpoint.is_file():
+            cached = pd.read_parquet(checkpoint)
+            required = {"trade_date", "symbol", label, "raw_probability", "fold"}
+            if not required.issubset(cached.columns) or not cached["fold"].eq(fold.fold).all():
+                raise ValueError("classifier fold checkpoint metadata is invalid")
+            expected_keys = set(zip(valid["trade_date"].astype(str), valid["symbol"].astype(str)))
+            cached_keys = set(zip(cached["trade_date"].astype(str), cached["symbol"].astype(str)))
+            if cached_keys != expected_keys or len(cached) != len(valid):
+                raise ValueError("classifier fold checkpoint rows do not match validation rows")
+            raw_rows.append(cached)
+            _report_progress(on_progress, checkpoint_key, fold.fold, len(split_plan.walk_forward), status="reused")
             continue
         target = train[label].astype(bool).astype(int)
         if target.nunique() < 2:
@@ -874,9 +1161,35 @@ def _classifier_oof(data, split_plan, features, label, params, seeds):
                 model = lgb.train({"objective": "binary", "metric": "binary_logloss", "learning_rate": 0.03, "feature_fraction": 0.8, "bagging_fraction": 0.8, "bagging_freq": 1, "verbosity": -1, "seed": seed, **params}, lgb.Dataset(train[features], label=target), num_boost_round=120)
                 predictions.append(model.predict(valid[features]))
             probability = np.median(np.vstack(predictions), axis=0)
-        raw_rows.append(valid[["trade_date", "symbol", label]].assign(raw_probability=probability))
+        result = valid[["trade_date", "symbol", label]].assign(raw_probability=probability, fold=fold.fold)
+        if checkpoint is not None:
+            _write_parquet_atomic(result, checkpoint)
+        raw_rows.append(result)
+        _report_progress(on_progress, checkpoint_key, fold.fold, len(split_plan.walk_forward), status="complete")
     raw = pd.concat(raw_rows, ignore_index=True)
-    calibrated, report = _calibrate_oof(raw["raw_probability"].to_numpy(), raw[label].astype(bool).astype(int).to_numpy())
+    calibrated_parts = []
+    cross_fitted_brier = []
+    for fold in sorted(raw["fold"].unique()):
+        current = raw.loc[raw["fold"].eq(fold)]
+        history = raw.loc[raw["fold"].lt(fold)]
+        if history.empty or history[label].nunique() < 2:
+            calibrated_fold = np.clip(current["raw_probability"].to_numpy(dtype=float), 1e-6, 1 - 1e-6)
+        else:
+            _, history_report = _calibrate_oof(
+                history["raw_probability"].to_numpy(), history[label].astype(bool).astype(int).to_numpy()
+            )
+            calibrated_fold = _apply_calibrator(current["raw_probability"].to_numpy(), history_report)
+        calibrated_parts.append(pd.Series(calibrated_fold, index=current.index))
+        cross_fitted_brier.extend(
+            (calibrated_fold - current[label].astype(bool).astype(int).to_numpy()) ** 2
+        )
+    calibrated = pd.concat(calibrated_parts).sort_index().to_numpy(dtype=float)
+    # Fit one final calibrator on all development OOF rows for the future
+    # holdout contract. Its own fit metric is diagnostic only; the acceptance
+    # metric above is the cross-fitted score.
+    _, report = _calibrate_oof(raw["raw_probability"].to_numpy(), raw[label].astype(bool).astype(int).to_numpy())
+    report["cross_fitted_brier"] = float(np.mean(cross_fitted_brier)) if cross_fitted_brier else None
+    report["calibration_selection"] = "prior_outer_folds_only"
     # The classifier loop visits the same fold validation rows in the same stable
     # order as the ranker OOF loop. Re-training a ranker only to align keys
     # multiplied the full-market runtime without adding information.
@@ -920,9 +1233,31 @@ def _calibrate_oof(probabilities, labels):
     }
 
 
-def _run_group_ablations(data, split_plan, features, params, seeds, *, dataset_cache=None):
+def _run_group_ablations(
+    data,
+    split_plan,
+    features,
+    params,
+    seeds,
+    *,
+    dataset_cache=None,
+    checkpoint_dir: str | Path | None = None,
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
+    baseline_prediction: pd.DataFrame | None = None,
+):
     report = []
-    baseline_prediction = _ranker_oof(data, split_plan, features, params, seeds, dataset_cache=dataset_cache)
+    if baseline_prediction is None:
+        baseline_prediction = _ranker_oof(
+            data,
+            split_plan,
+            features,
+            params,
+            seeds,
+            dataset_cache=dataset_cache,
+            checkpoint_dir=checkpoint_dir,
+            checkpoint_key="ablation-all-features",
+            on_progress=on_progress,
+        )
     baseline_metrics = evaluate_ranking(baseline_prediction)
     for group in _GROUP_SEQUENCE:
         group_features = [feature for feature in features if _training_group(feature) == group]
@@ -934,8 +1269,22 @@ def _run_group_ablations(data, split_plan, features, params, seeds, *, dataset_c
         if not trial_features:
             report.append({"group": group, "status": "unavailable", "reason": "leave_one_group_out_has_no_features"})
             continue
-        trial_params, tuning = _select_ranker_params(data, split_plan, trial_features, seeds, dataset_cache=dataset_cache)
-        prediction = _ranker_oof(data, split_plan, trial_features, trial_params, seeds, dataset_cache=dataset_cache)
+        # Ablations are diagnostics, not a second model-selection loop.  Reusing
+        # the frozen candidate parameters keeps the comparison bounded and
+        # avoids selecting against the same outer OOF rows twice.
+        trial_params = dict(params)
+        tuning = []
+        prediction = _ranker_oof(
+            data,
+            split_plan,
+            trial_features,
+            trial_params,
+            seeds,
+            dataset_cache=dataset_cache,
+            checkpoint_dir=checkpoint_dir,
+            checkpoint_key=f"ablation-without-{group}",
+            on_progress=on_progress,
+        )
         metrics = evaluate_ranking(prediction)
         portfolio = _portfolio_or_empty(prediction)
         removal_is_better = (

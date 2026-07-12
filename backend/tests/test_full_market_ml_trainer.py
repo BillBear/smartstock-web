@@ -15,11 +15,12 @@ from app.evaluation.full_market_ml.trainer import (
     run_final_holdout_evaluation,
     save_final_fit,
     _portfolio_or_empty,
+    _inner_selection_plan,
     _ranker_oof,
     _run_group_ablations,
     _unseen_stock_oof,
 )
-from app.evaluation.full_market_ml.splits import FinalHoldoutAccessError, SplitPlan
+from app.evaluation.full_market_ml.splits import FinalHoldoutAccessError, SplitPlan, WalkForwardFold
 from tests.full_market_ml_fixtures import overlapping_portfolio_fixture, predictive_fixture, random_label_fixture, sealed_split_fixture
 from tests.test_full_market_ml_collector import FullMarketMLTestCase
 
@@ -38,18 +39,18 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
 
         self.assertEqual(portfolio["closed_trade_count"], 10)
 
-    def test_group_ablation_is_leave_one_out_and_retunes_each_subset(self):
+    def test_group_ablation_is_leave_one_out_with_frozen_candidate_params(self):
         dataset = predictive_fixture(symbols_per_date=220)
         calls = []
 
-        def fake_ranker(data, _split, features, _params, _seeds, *, dataset_cache=None):
+        def fake_ranker(data, _split, features, _params, _seeds, **_kwargs):
             calls.append(tuple(features))
             return data.assign(score=data[features[0]])
 
         with patch("app.evaluation.full_market_ml.trainer._ranker_oof", side_effect=fake_ranker), patch(
             "app.evaluation.full_market_ml.trainer._select_ranker_params",
-            return_value=(dict(FIXED_RANKER_GRID[0]), [{"params": dict(FIXED_RANKER_GRID[0])}]),
-        ) as retune:
+            side_effect=AssertionError("group ablation must not retune on outer OOF"),
+        ):
             report = _run_group_ablations(
                 dataset,
                 self._split(),
@@ -61,7 +62,48 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
         evaluated = [row for row in report if row.get("comparison") == "all_features_vs_leave_one_group_out"]
         self.assertTrue(evaluated)
         self.assertTrue(all(len(row["without_group_features"]) < 2 for row in evaluated))
-        self.assertEqual(retune.call_count, len(evaluated))
+        self.assertTrue(all(row["selected_params"] == dict(FIXED_RANKER_GRID[0]) for row in evaluated))
+        self.assertTrue(all(row["retuned_grid"] == [] for row in evaluated))
+
+    def test_ranker_oof_persists_and_reuses_each_fold_checkpoint(self):
+        dataset = predictive_fixture(symbols_per_date=220)
+        checkpoint_dir = self.temp_path / "ranker-checkpoints"
+        progress = []
+
+        class FakeModel:
+            def predict(self, rows, num_iteration=None):
+                return [0.0] * len(rows)
+
+        with patch("app.evaluation.full_market_ml.trainer._build_ranker_datasets", return_value=(object(), [])), patch(
+            "app.evaluation.full_market_ml.trainer._train_ranker", return_value=FakeModel()
+        ) as train:
+            first = _ranker_oof(
+                dataset,
+                self._split(),
+                ("adjusted_return_20d",),
+                FIXED_RANKER_GRID[0],
+                (FIXED_SEEDS[0],),
+                checkpoint_dir=checkpoint_dir,
+                checkpoint_key="main",
+                on_progress=progress.append,
+            )
+            first_call_count = train.call_count
+
+        with patch("app.evaluation.full_market_ml.trainer._train_ranker", side_effect=AssertionError("checkpoint not reused")):
+            second = _ranker_oof(
+                dataset,
+                self._split(),
+                ("adjusted_return_20d",),
+                FIXED_RANKER_GRID[0],
+                (FIXED_SEEDS[0],),
+                checkpoint_dir=checkpoint_dir,
+                checkpoint_key="main",
+            )
+
+        self.assertGreater(first_call_count, 0)
+        self.assertEqual(len(list(checkpoint_dir.glob("*.parquet"))), len(self._split().walk_forward))
+        self.assertEqual(first.reset_index(drop=True).to_dict(), second.reset_index(drop=True).to_dict())
+        self.assertTrue(any(item["status"] == "complete" for item in progress))
 
     def test_outer_validation_rows_are_not_used_for_ranker_early_stopping(self):
         dataset = predictive_fixture(symbols_per_date=220)
@@ -83,6 +125,30 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
         outer_validation_dates = set().union(*(set(fold.validation_dates) for fold in self._split().walk_forward))
         self.assertTrue(captured)
         self.assertTrue(all(not valid_dates & outer_validation_dates for _train_dates, valid_dates in captured))
+
+    def test_inner_selection_plan_is_strictly_before_outer_validation_with_embargo(self):
+        dates = tuple(__import__("pandas").bdate_range("2024-01-02", periods=140).strftime("%Y-%m-%d"))
+        symbols = tuple(f"{index:06d}" for index in range(20))
+        data = __import__("pandas").DataFrame(
+            [{"trade_date": trade_date, "symbol": symbol} for trade_date in dates[:110] for symbol in symbols]
+        )
+        outer = WalkForwardFold(
+            fold=5,
+            training_dates=dates[:110],
+            validation_dates=dates[130:140],
+            training_symbols=symbols,
+            train_start=dates[0],
+            train_end=dates[109],
+            validation_start=dates[130],
+            validation_end=dates[139],
+        )
+
+        inner = _inner_selection_plan(data, outer)
+
+        self.assertTrue(inner.walk_forward)
+        for fold in inner.walk_forward:
+            self.assertLess(fold.validation_end, outer.validation_start)
+            self.assertGreaterEqual(dates.index(fold.validation_start) - dates.index(fold.train_end) - 1, 20)
 
     def test_development_unseen_stock_oof_outputs_c_quadrant(self):
         dataset = predictive_fixture(symbols_per_date=220)
@@ -123,7 +189,7 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
         dataset = predictive_fixture()
 
         with patch("app.evaluation.full_market_ml.trainer._ranker_oof", side_effect=AssertionError("ranker retrained")):
-            probabilities, _report = _classifier_oof(
+            probabilities, report = _classifier_oof(
                 dataset,
                 self._split(),
                 ("adjusted_return_20d",),
@@ -137,6 +203,44 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
             for fold in self._split().walk_forward
         )
         self.assertEqual(len(probabilities), expected_rows)
+        self.assertEqual(report["calibration_selection"], "prior_outer_folds_only")
+
+    def test_classifier_oof_persists_and_reuses_raw_fold_predictions(self):
+        dataset = predictive_fixture()
+        checkpoint_dir = self.temp_path / "classifier-checkpoints"
+
+        class FakeModel:
+            def predict(self, rows):
+                return [0.25] * len(rows)
+
+        with patch("app.evaluation.full_market_ml.trainer.lgb.train", return_value=FakeModel()) as train:
+            first, _ = _classifier_oof(
+                dataset,
+                self._split(),
+                ("adjusted_return_20d",),
+                "label_strong_path_10d",
+                FIXED_RANKER_GRID[0],
+                (FIXED_SEEDS[0],),
+                checkpoint_dir=checkpoint_dir,
+                checkpoint_key="classifier-test",
+            )
+            first_call_count = train.call_count
+
+        with patch("app.evaluation.full_market_ml.trainer.lgb.train", side_effect=AssertionError("checkpoint not reused")):
+            second, _ = _classifier_oof(
+                dataset,
+                self._split(),
+                ("adjusted_return_20d",),
+                "label_strong_path_10d",
+                FIXED_RANKER_GRID[0],
+                (FIXED_SEEDS[0],),
+                checkpoint_dir=checkpoint_dir,
+                checkpoint_key="classifier-test",
+            )
+
+        self.assertGreater(first_call_count, 0)
+        self.assertEqual(len(list(checkpoint_dir.glob("*.parquet"))), len(self._split().walk_forward))
+        self.assertEqual(first.tolist(), second.tolist())
 
     def test_random_baseline_score_is_deterministic_and_index_aligned(self):
         dataset = predictive_fixture().iloc[::7].copy()
