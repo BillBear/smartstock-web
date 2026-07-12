@@ -10,6 +10,7 @@ __pycache__/
 .ruff_cache/
 backend/venv/
 backend/.venv-ml/
+backend/.venv-ml-py313/
 
 # Node / Vite
 frontend/node_modules/

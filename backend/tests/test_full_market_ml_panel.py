@@ -278,8 +278,11 @@ class FullMarketMLPanelTests(unittest.TestCase):
         self.assertEqual(row["amount_cny"], 3000.0)
 
         conflicting = two_day_split_fixture()
-        conflicting["daily"] = conflicting["daily"]._append(
-            {"ts_code": "000001.SZ", "trade_date": "20250102", "open": 99.0, "high": 11.0, "low": 9.0, "close": 10.0, "vol": 2.0, "amount": 3.0},
+        conflicting["daily"] = pd.concat(
+            [
+                conflicting["daily"],
+                pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": "20250102", "open": 99.0, "high": 11.0, "low": 9.0, "close": 10.0, "vol": 2.0, "amount": 3.0}]),
+            ],
             ignore_index=True,
         )
         with self.assertRaisesRegex(ValueError, "conflicting duplicate"):
