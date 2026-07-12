@@ -121,6 +121,7 @@ def verify_dataset_backup(backup_root: str | Path, registry: Mapping[str, Any]) 
     manifest = _load_json(manifest_path)
     if manifest.get("dataset_id") != dataset_id or manifest.get("verification_status") != "verified":
         raise ValueError("dataset backup manifest does not match the immutable dataset registry")
+    _verify_backup_manifest_files(destination, manifest)
     files = {str(item.get("path")): str(item.get("sha256")) for item in manifest.get("files", ()) if isinstance(item, Mapping)}
     for asset in registry.get("assets", {}).values():
         source_path = Path(str(asset.get("path", "")))
@@ -158,6 +159,7 @@ def backup_stage_assets(
             or existing.get("verification_status") != "verified"
         ):
             raise ValueError(f"derived artifact backup does not match the requested immutable artifact: {destination}")
+        _verify_backup_manifest_files(destination, existing)
         return existing
     if not source.is_dir():
         raise FileNotFoundError(f"stage artifact directory is missing: {source}")
@@ -197,6 +199,22 @@ def _backup_relative_asset_path(source_path: Path) -> str | None:
         if marker in parts:
             return str(Path(*parts[parts.index(marker):]))
     return None
+
+
+def _verify_backup_manifest_files(destination: Path, manifest: Mapping[str, Any]) -> None:
+    files = manifest.get("files")
+    if not isinstance(files, list):
+        raise ValueError("backup manifest has no file checksum list")
+    for item in files:
+        if not isinstance(item, Mapping):
+            raise ValueError("backup manifest has an invalid file checksum entry")
+        relative = str(item.get("path", ""))
+        expected_sha = str(item.get("sha256", ""))
+        path = destination / relative
+        if not relative or not path.is_file():
+            raise ValueError(f"backup manifest file is missing: {relative}")
+        if _sha256_file(path) != expected_sha:
+            raise ValueError(f"backup manifest checksum mismatch: {relative}")
 
 
 def _label_schema(dataset_path: Path) -> dict[str, list[str]]:

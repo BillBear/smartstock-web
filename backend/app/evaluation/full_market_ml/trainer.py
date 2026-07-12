@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import tempfile
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
@@ -38,7 +39,7 @@ FIXED_RANKER_GRID = tuple(
 RISK_ALPHAS = (0.0, 0.1, 0.2, 0.3)
 _GROUP_SEQUENCE = ("momentum", "amount_turnover", "technical", "risk", "market_industry", "moneyflow")
 _GROUPS = {spec.name: spec.feature_group for spec in CORE_FEATURE_SPECS}
-_LOADED_FINAL_FITS: dict[int, tuple[Path, str]] = {}
+_LOADED_FINAL_FITS: weakref.WeakKeyDictionary["FinalFit", tuple[Path, str]] = weakref.WeakKeyDictionary()
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,8 @@ class FrozenCandidate:
     selected_ranker_params: dict[str, int]
     group_ablations: list[dict[str, Any]]
     selected_features: tuple[str, ...]
+    seed_sensitivity: list[dict[str, Any]]
+    error_samples: pd.DataFrame
 
     @property
     def can_open_final_holdout(self) -> bool:
@@ -124,6 +127,8 @@ class FrozenCandidate:
             selected_ranker_params={key: int(value) for key, value in dict(manifest["selected_ranker_params"]).items()},
             group_ablations=[],
             selected_features=tuple(str(feature) for feature in manifest["selected_features"]),
+            seed_sensitivity=[],
+            error_samples=pd.DataFrame(),
         )
 
 @dataclass(frozen=True)
@@ -141,7 +146,7 @@ class FinalHoldoutEvaluation:
     failed_gates: list[str]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class FinalFit:
     """Models fitted once from a frozen candidate on A development rows only."""
 
@@ -224,7 +229,7 @@ def load_final_fit(source: str | Path, frozen_model_sha: str) -> FinalFit:
         severe_constant=_optional_float(manifest.get("severe_constant")),
         artifact_manifest_sha256=_file_sha256(manifest_path),
     )
-    _LOADED_FINAL_FITS[id(fitted)] = (manifest_path, fitted.artifact_manifest_sha256)
+    _LOADED_FINAL_FITS[fitted] = (manifest_path, fitted.artifact_manifest_sha256)
     return fitted
 
 
@@ -265,7 +270,7 @@ def _file_sha256(path: Path) -> str:
 
 
 def _verify_loaded_final_fit(final_fit: FinalFit) -> None:
-    registered = _LOADED_FINAL_FITS.get(id(final_fit))
+    registered = _LOADED_FINAL_FITS.get(final_fit)
     if registered is None:
         raise FinalHoldoutAccessError("final holdout requires a loaded final fit artifact")
     manifest_path, expected_sha = registered
@@ -317,6 +322,8 @@ def run_development_training(
     risk_selected = max(risk_trials, key=lambda row: (row["metrics"]["ndcg_at_10"], row["metrics"]["precision_at_5"], -row["alpha"]))
     rank_predictions["score"] = rank_predictions["score"] - risk_selected["alpha"] * rank_predictions["severe_negative_probability"]
     oof_metrics = evaluate_ranking(rank_predictions)
+    seed_sensitivity = _seed_sensitivity(data, split_plan, selected_features, selected["params"], seeds)
+    error_samples = _top_ranked_error_samples(rank_predictions)
     importances = _feature_importance(data, split_plan, selected_features, selected["params"], seeds)
     failed_gates = _failed_gates(oof_metrics, baselines["random"])
     payload = {
@@ -346,6 +353,8 @@ def run_development_training(
         selected_ranker_params=dict(selected["params"]),
         group_ablations=group_ablations,
         selected_features=selected_features,
+        seed_sensitivity=seed_sensitivity,
+        error_samples=error_samples,
     )
 
 
@@ -653,6 +662,24 @@ def _ranker_oof(data, split_plan, features, params, seeds) -> pd.DataFrame:
     if not rows:
         raise ValueError("walk-forward plan produced no OOF rows")
     return pd.concat(rows, ignore_index=True)
+
+
+def _seed_sensitivity(data, split_plan, features, params, seeds) -> list[dict[str, Any]]:
+    """Measure the frozen ranker configuration per fixed seed on the same OOF rows."""
+    result = []
+    for seed in seeds:
+        predictions = _ranker_oof(data, split_plan, features, params, (seed,))
+        result.append({"seed": int(seed), **evaluate_ranking(predictions)})
+    return result
+
+
+def _top_ranked_error_samples(predictions: pd.DataFrame, top_k: int = 5) -> pd.DataFrame:
+    ranked = (
+        predictions.sort_values(["trade_date", "score", "symbol"], ascending=[True, False, True], kind="stable")
+        .groupby("trade_date", sort=True)
+        .head(top_k)
+    )
+    return ranked.loc[ranked["label_severe_negative_10d"].astype(bool)].reset_index(drop=True)
 
 
 def _fold_data(data, fold):

@@ -90,3 +90,25 @@ class FullMarketMLAssetTests(FullMarketMLTestCase):
         self.assertEqual(second, evidence)
         self.assertTrue((destination / "artifacts" / "final-fit" / "model" / "rank_00.txt").is_file())
         self.assertTrue((destination / "backup_manifest.json").is_file())
+
+    def test_backup_verification_detects_tampered_base_and_derived_files(self):
+        runtime = self._runtime()
+        registry = build_dataset_registry(runtime, code_revision="commit-sha", environment={})
+        target = self.temp_path / "backup"
+        backup_dataset_assets(runtime, target, registry)
+        base_dataset = target / registry["dataset_id"] / "artifacts" / "full-build" / "dataset.parquet"
+        base_dataset.write_bytes(b"corruption")
+
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            verify_dataset_backup(target, registry)
+
+        backup_dataset_assets(runtime, self.temp_path / "clean-backup", registry)
+        source = runtime / "artifacts" / "final-fit"
+        source.mkdir(parents=True)
+        (source / "model.txt").write_text("model", encoding="utf-8")
+        backup_stage_assets(runtime, self.temp_path / "clean-backup", registry, stage="final-fit", artifact_id="frozen-sha")
+        derived_file = self.temp_path / "clean-backup" / registry["dataset_id"] / "derived" / "final-fit" / "frozen-sha" / "artifacts" / "final-fit" / "model.txt"
+        derived_file.write_text("corruption", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            backup_stage_assets(runtime, self.temp_path / "clean-backup", registry, stage="final-fit", artifact_id="frozen-sha")

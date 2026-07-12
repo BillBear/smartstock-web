@@ -58,6 +58,9 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
             "momentum", "amount_turnover", "technical", "risk", "market_industry", "moneyflow",
         ])
         self.assertTrue(all(row["status"] in {"accepted", "rejected", "unavailable"} for row in candidate.group_ablations))
+        self.assertEqual([row["seed"] for row in candidate.seed_sensitivity], list(FIXED_SEEDS))
+        self.assertTrue(all("ndcg_at_10" in row for row in candidate.seed_sensitivity))
+        self.assertTrue(candidate.error_samples["label_severe_negative_10d"].astype(bool).all())
 
     def test_frozen_candidate_manifest_records_the_exact_split_and_reproducible_selection_contract(self):
         split = self._split()

@@ -199,6 +199,29 @@ def default_services():
         candidate = run_development_training(config, development, split)
         output = artifact(root, "dev-train") / "oof_predictions.parquet"
         candidate.oof_predictions.to_parquet(output, index=False)
+        diagnostics_root = artifact(root, "dev-train")
+        seed_sensitivity_path = diagnostics_root / "seed_sensitivity.csv"
+        pd.DataFrame(candidate.seed_sensitivity).to_csv(seed_sensitivity_path, index=False)
+        error_samples_path = diagnostics_root / "error_samples.csv"
+        candidate.error_samples.to_csv(error_samples_path, index=False)
+        feature_importance_path = diagnostics_root / "feature_importance.csv"
+        pd.DataFrame(
+            [{"feature": feature, "gain_importance": value} for feature, value in sorted(candidate.feature_importance.items())]
+        ).to_csv(feature_importance_path, index=False)
+        group_ablations_path = diagnostics_root / "group_ablations.json"
+        write_json(group_ablations_path, {"group_ablations": candidate.group_ablations})
+        development_report_path = diagnostics_root / "development_report.json"
+        write_json(development_report_path, {
+            "preliminary_status": candidate.preliminary_status,
+            "failed_gates": candidate.failed_gates,
+            "oof_metrics": candidate.oof_metrics,
+            "baselines": candidate.baselines,
+            "model_selection_report": candidate.model_selection_report,
+            "seed_sensitivity": candidate.seed_sensitivity,
+            "selected_features": list(candidate.selected_features),
+            "selected_ranker_params": candidate.selected_ranker_params,
+            "selected_risk_alpha": candidate.selected_risk_alpha,
+        })
         manifest = candidate.manifest(
             config_sha256=config.sha256,
             data_sha256=file_sha256(dataset_path),
@@ -213,6 +236,11 @@ def default_services():
             "preliminary_status": candidate.preliminary_status,
             "oof_predictions": str(output),
             "candidate_manifest": str(manifest_path),
+            "development_report": str(development_report_path),
+            "seed_sensitivity": str(seed_sensitivity_path),
+            "error_samples": str(error_samples_path),
+            "feature_importance": str(feature_importance_path),
+            "group_ablations": str(group_ablations_path),
         }
 
     def final_evaluate(_config, root, _artifacts):
@@ -245,12 +273,17 @@ def default_services():
         backup_root = os.environ.get("ML_BACKUP_ROOT", "").strip()
         if not backup_root:
             raise ValueError("ML_BACKUP_ROOT is required before formal final-fit")
+        backup_path = Path(backup_root).resolve()
+        try:
+            backup_path.relative_to(Path("/Volumes"))
+        except ValueError as error:
+            raise ValueError("ML_BACKUP_ROOT must resolve under /Volumes for an external backup") from error
         registry_path = artifact(root, "full-build") / "dataset_registry.json"
         if not registry_path.is_file():
             raise FileNotFoundError("dataset registry is required before formal final-fit")
         registry = json.loads(registry_path.read_text(encoding="utf-8"))
-        verify_dataset_backup(backup_root, registry)
-        return Path(backup_root), registry
+        verify_dataset_backup(backup_path, registry)
+        return backup_path, registry
 
     def final_fit(_config, root, _artifacts):
         frozen_sha, candidate = frozen_candidate(root)
@@ -258,11 +291,14 @@ def default_services():
             return write_development_gate_skip(root, "final-fit", candidate, frozen_sha)
         backup_root, registry = verified_backup(root)
         split = load_split(root)
-        dataset_path = artifact(root, "full-build") / "dataset.parquet"
-        development = pd.read_parquet(dataset_path, filters=[("trade_date", "in", list(split.development_dates))])
-        fitted = fit_final_candidate(development, split, candidate, frozen_model_sha=frozen_sha)
         output = artifact(root, "final-fit") / "model"
-        save_final_fit(fitted, output)
+        if (output / "manifest.json").is_file():
+            load_final_fit(output, frozen_sha)
+        else:
+            dataset_path = artifact(root, "full-build") / "dataset.parquet"
+            development = pd.read_parquet(dataset_path, filters=[("trade_date", "in", list(split.development_dates))])
+            fitted = fit_final_candidate(development, split, candidate, frozen_model_sha=frozen_sha)
+            save_final_fit(fitted, output)
         backup_stage_assets(root, backup_root, registry, stage="final-fit", artifact_id=frozen_sha)
         backup_manifest = backup_root / registry["dataset_id"] / "derived" / "final-fit" / frozen_sha / "backup_manifest.json"
         manifest_path = output / "manifest.json"
@@ -285,6 +321,32 @@ def default_services():
         if not candidate.can_open_final_holdout:
             return write_development_gate_skip(root, "final-holdout-evaluate", candidate, frozen_sha)
         backup_root, registry = verified_backup(root)
+        output = artifact(root, "final-holdout-evaluate")
+        existing_quadrants = {
+            quadrant: output / "predictions" / f"{quadrant}.parquet"
+            for quadrant in ("B_time_holdout", "C_stock_holdout", "D_joint_holdout")
+        }
+        existing_required = [
+            output / "predictions.parquet",
+            output / "holdout_metrics.csv",
+            output / "model_metrics.json",
+            output / "model_card.md",
+            *existing_quadrants.values(),
+        ]
+        if all(path.is_file() for path in existing_required):
+            metrics = json.loads((output / "model_metrics.json").read_text(encoding="utf-8"))
+            backup_stage_assets(root, backup_root, registry, stage="final-holdout-evaluate", artifact_id=frozen_sha)
+            backup_manifest = backup_root / registry["dataset_id"] / "derived" / "final-holdout-evaluate" / frozen_sha / "backup_manifest.json"
+            return {
+                "quality_ready": True,
+                "model_status": metrics["model_status"],
+                "holdout_metrics": str(output / "holdout_metrics.csv"),
+                "model_metrics": str(output / "model_metrics.json"),
+                "model_card": str(output / "model_card.md"),
+                "predictions": str(output / "predictions.parquet"),
+                "backup_manifest": str(backup_manifest),
+                **{f"prediction_{quadrant}": str(path) for quadrant, path in sorted(existing_quadrants.items())},
+            }
         dates = pd.read_parquet(dataset_path, columns=["trade_date", "eligible_for_training"])
         dates["trade_date"] = pd.to_datetime(dates["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d")
         labelable_final_dates = dates.loc[
@@ -295,7 +357,6 @@ def default_services():
                 f"final holdout has only {labelable_final_dates} labelable trade dates; requires at least 40 before opening the sealed holdout"
             )
         dataset = pd.read_parquet(dataset_path)
-        output = artifact(root, "final-holdout-evaluate")
         final_fit = load_final_fit(artifact(root, "final-fit") / "model", frozen_sha)
         quadrant_paths = {}
 
@@ -387,14 +448,16 @@ def main() -> int:
     if arguments.status:
         print(json.dumps(FullMarketMLPipeline.inspect_runtime(root), ensure_ascii=True, sort_keys=True))
         return 0
-    if not arguments.config:
-        parser.error("--config is required unless --status is supplied")
-    config = load_full_market_ml_config(arguments.config)
-    pipeline = FullMarketMLPipeline(config, root, default_services())
     if arguments.recover_stale_seconds is not None:
+        recovery_services = {stage: (lambda _config, _root, _artifacts: {}) for stage in STAGES}
+        pipeline = FullMarketMLPipeline(None, root, recovery_services)
         recovered = pipeline.recover_stale_stages(max_idle_seconds=arguments.recover_stale_seconds)
         print(json.dumps({"recovered_stages": recovered}, ensure_ascii=True, sort_keys=True))
         return 0
+    if not arguments.config:
+        parser.error("--config is required unless --status or --recover-stale-seconds is supplied")
+    config = load_full_market_ml_config(arguments.config)
+    pipeline = FullMarketMLPipeline(config, root, default_services())
     if arguments.abort_stage:
         state = pipeline.abort_stage(arguments.abort_stage, reason=arguments.abort_reason)
         print(json.dumps({"stage": arguments.abort_stage, "status": state["status"]}, ensure_ascii=True, sort_keys=True))

@@ -137,6 +137,18 @@ class FullMarketMLPipelineTests(FullMarketMLTestCase):
         self.assertIn("--recover-stale-seconds", result.stdout)
         self.assertNotIn("override", result.stdout.lower())
 
+    def test_cli_recovery_does_not_require_config_or_data_providers(self):
+        script = Path(__file__).parents[1] / "scripts" / "run_full_market_ml_pipeline.py"
+
+        result = subprocess.run(
+            [sys.executable, str(script), "--run-id", "missing-run", "--recover-stale-seconds", "300"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertIn('"recovered_stages": []', result.stdout)
+
     def test_resume_rejects_a_tampered_file_artifact(self):
         artifact = self.temp_path / "preflight-output.json"
         services = fake_pipeline_services()
