@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -10,6 +11,8 @@ from app.evaluation.full_market_ml.assets import (
     backup_stage_assets,
     build_dataset_registry,
     verify_dataset_backup,
+    verify_stage_completion_manifest,
+    write_stage_completion_manifest,
 )
 from tests.test_full_market_ml_collector import FullMarketMLTestCase
 
@@ -112,3 +115,51 @@ class FullMarketMLAssetTests(FullMarketMLTestCase):
 
         with self.assertRaisesRegex(ValueError, "checksum"):
             backup_stage_assets(runtime, self.temp_path / "clean-backup", registry, stage="final-fit", artifact_id="frozen-sha")
+
+        backup_dataset_assets(runtime, self.temp_path / "rewritten-manifest-backup", registry)
+        backup_stage_assets(runtime, self.temp_path / "rewritten-manifest-backup", registry, stage="final-fit", artifact_id="frozen-sha")
+        rewritten_root = self.temp_path / "rewritten-manifest-backup" / registry["dataset_id"] / "derived" / "final-fit" / "frozen-sha"
+        rewritten_file = rewritten_root / "artifacts" / "final-fit" / "model.txt"
+        rewritten_file.write_text("rewritten", encoding="utf-8")
+        manifest_path = rewritten_root / "backup_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for item in manifest["files"]:
+            if item["path"] == "artifacts/final-fit/model.txt":
+                item["sha256"] = hashlib.sha256(rewritten_file.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "source evidence"):
+            backup_stage_assets(runtime, self.temp_path / "rewritten-manifest-backup", registry, stage="final-fit", artifact_id="frozen-sha")
+
+    def test_stage_completion_manifest_binds_outputs_to_the_frozen_contract(self):
+        stage_root = self.temp_path / "final-holdout-evaluate"
+        stage_root.mkdir()
+        prediction = stage_root / "predictions.parquet"
+        metrics = stage_root / "model_metrics.json"
+        prediction.write_bytes(b"predictions")
+        metrics.write_text('{"model_status":"research_only"}\n', encoding="utf-8")
+        contract = {
+            "frozen_model_sha": "frozen-sha",
+            "split_sha256": "split-sha",
+            "candidate_manifest_sha256": "candidate-sha",
+            "final_fit_manifest_sha256": "fit-sha",
+        }
+        paths = {"predictions": prediction, "metrics": metrics}
+
+        write_stage_completion_manifest(stage_root, stage="final-holdout-evaluate", contract=contract, artifact_paths=paths)
+        verified = verify_stage_completion_manifest(
+            stage_root,
+            stage="final-holdout-evaluate",
+            contract=contract,
+            artifact_paths=paths,
+        )
+
+        self.assertEqual(verified["contract"], contract)
+        prediction.write_bytes(b"tampered")
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            verify_stage_completion_manifest(
+                stage_root,
+                stage="final-holdout-evaluate",
+                contract=contract,
+                artifact_paths=paths,
+            )

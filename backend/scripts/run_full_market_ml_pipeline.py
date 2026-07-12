@@ -19,6 +19,8 @@ from app.evaluation.full_market_ml.assets import (
     backup_stage_assets,
     build_dataset_registry,
     verify_dataset_backup,
+    verify_stage_completion_manifest,
+    write_stage_completion_manifest,
     write_dataset_registry,
 )
 
@@ -285,6 +287,36 @@ def default_services():
         verify_dataset_backup(backup_path, registry)
         return backup_path, registry
 
+    def final_holdout_contract(root, split, frozen_sha):
+        candidate_manifest_path = artifact(root, "dev-train") / "candidate_manifest.json"
+        candidate_manifest = json.loads(candidate_manifest_path.read_text(encoding="utf-8"))
+        final_fit_manifest_path = artifact(root, "final-fit") / "model" / "manifest.json"
+        return {
+            "frozen_model_sha": frozen_sha,
+            "split_sha256": split.split_sha256,
+            "data_sha256": str(candidate_manifest["data_sha256"]),
+            "candidate_manifest_sha256": file_sha256(candidate_manifest_path),
+            "final_fit_manifest_sha256": file_sha256(final_fit_manifest_path),
+        }
+
+    def final_holdout_artifact_paths(output):
+        paths = {
+            "predictions": output / "predictions.parquet",
+            "holdout_metrics": output / "holdout_metrics.csv",
+            "baseline_comparison": output / "baseline_comparison.csv",
+            "calibration": output / "calibration.csv",
+            "bootstrap_metrics": output / "bootstrap_metrics.csv",
+            "error_cases": output / "error_cases.csv",
+            "model_metrics": output / "model_metrics.json",
+            "model_card": output / "model_card.md",
+            "candidate_manifest": output / "candidate_manifest.json",
+        }
+        paths.update({
+            f"prediction_{quadrant}": output / "predictions" / f"{quadrant}.parquet"
+            for quadrant in ("B_time_holdout", "C_stock_holdout", "D_joint_holdout")
+        })
+        return paths
+
     def final_fit(_config, root, _artifacts):
         frozen_sha, candidate = frozen_candidate(root)
         if not candidate.can_open_final_holdout:
@@ -322,18 +354,16 @@ def default_services():
             return write_development_gate_skip(root, "final-holdout-evaluate", candidate, frozen_sha)
         backup_root, registry = verified_backup(root)
         output = artifact(root, "final-holdout-evaluate")
-        existing_quadrants = {
-            quadrant: output / "predictions" / f"{quadrant}.parquet"
-            for quadrant in ("B_time_holdout", "C_stock_holdout", "D_joint_holdout")
-        }
-        existing_required = [
-            output / "predictions.parquet",
-            output / "holdout_metrics.csv",
-            output / "model_metrics.json",
-            output / "model_card.md",
-            *existing_quadrants.values(),
-        ]
-        if all(path.is_file() for path in existing_required):
+        completion_contract = final_holdout_contract(root, split, frozen_sha)
+        artifact_paths = final_holdout_artifact_paths(output)
+        completion_path = output / "completion_manifest.json"
+        if completion_path.is_file():
+            verify_stage_completion_manifest(
+                output,
+                stage="final-holdout-evaluate",
+                contract=completion_contract,
+                artifact_paths=artifact_paths,
+            )
             metrics = json.loads((output / "model_metrics.json").read_text(encoding="utf-8"))
             backup_stage_assets(root, backup_root, registry, stage="final-holdout-evaluate", artifact_id=frozen_sha)
             backup_manifest = backup_root / registry["dataset_id"] / "derived" / "final-holdout-evaluate" / frozen_sha / "backup_manifest.json"
@@ -345,7 +375,11 @@ def default_services():
                 "model_card": str(output / "model_card.md"),
                 "predictions": str(output / "predictions.parquet"),
                 "backup_manifest": str(backup_manifest),
-                **{f"prediction_{quadrant}": str(path) for quadrant, path in sorted(existing_quadrants.items())},
+                "completion_manifest": str(completion_path),
+                **{
+                    f"prediction_{quadrant}": str(artifact_paths[f"prediction_{quadrant}"])
+                    for quadrant in ("B_time_holdout", "C_stock_holdout", "D_joint_holdout")
+                },
             }
         dates = pd.read_parquet(dataset_path, columns=["trade_date", "eligible_for_training"])
         dates["trade_date"] = pd.to_datetime(dates["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d")
@@ -414,6 +448,12 @@ def default_services():
             feature_schema_sha256=feature_schema_sha256(candidate),
         )
         write_json(output / "candidate_manifest.json", manifest)
+        completion_path = write_stage_completion_manifest(
+            output,
+            stage="final-holdout-evaluate",
+            contract=completion_contract,
+            artifact_paths=final_holdout_artifact_paths(output),
+        )
         backup_stage_assets(root, backup_root, registry, stage="final-holdout-evaluate", artifact_id=frozen_sha)
         backup_manifest = backup_root / registry["dataset_id"] / "derived" / "final-holdout-evaluate" / frozen_sha / "backup_manifest.json"
         return {
@@ -424,6 +464,7 @@ def default_services():
             "model_card": str(output / "model_card.md"),
             "predictions": str(predictions_path),
             "backup_manifest": str(backup_manifest),
+            "completion_manifest": str(completion_path),
             **{f"prediction_{quadrant}": str(path) for quadrant, path in sorted(quadrant_paths.items())},
         }
 

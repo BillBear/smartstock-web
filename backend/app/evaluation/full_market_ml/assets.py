@@ -160,9 +160,13 @@ def backup_stage_assets(
         ):
             raise ValueError(f"derived artifact backup does not match the requested immutable artifact: {destination}")
         _verify_backup_manifest_files(destination, existing)
+        current_source_files = _directory_file_evidence(source, relative_to=Path(runtime_root))
+        if existing.get("source_files") != current_source_files or existing.get("files") != current_source_files:
+            raise ValueError(f"derived artifact backup does not match current local source evidence: {destination}")
         return existing
     if not source.is_dir():
         raise FileNotFoundError(f"stage artifact directory is missing: {source}")
+    source_files = _directory_file_evidence(source, relative_to=Path(runtime_root))
     temporary = Path(tempfile.mkdtemp(prefix=f".{artifact_id}-", dir=destination.parent))
     try:
         copied = temporary / "artifacts" / stage
@@ -178,6 +182,7 @@ def backup_stage_assets(
             "total_bytes": sum(item["bytes"] for item in files),
             "verification_status": "verified",
             "files": files,
+            "source_files": source_files,
         }
         _write_json_atomic(temporary / "backup_manifest.json", verification)
         os.replace(temporary, destination)
@@ -185,6 +190,48 @@ def backup_stage_assets(
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
+
+
+def write_stage_completion_manifest(
+    stage_root: str | Path,
+    *,
+    stage: str,
+    contract: Mapping[str, Any],
+    artifact_paths: Mapping[str, str | Path],
+) -> Path:
+    """Seal a completed stage's outputs to its frozen input contract."""
+    root = Path(stage_root)
+    manifest = {
+        "schema_version": 1,
+        "stage": stage,
+        "contract": dict(contract),
+        "artifacts": _stage_artifact_evidence(root, artifact_paths),
+    }
+    path = root / "completion_manifest.json"
+    _write_json_atomic(path, manifest)
+    return path
+
+
+def verify_stage_completion_manifest(
+    stage_root: str | Path,
+    *,
+    stage: str,
+    contract: Mapping[str, Any],
+    artifact_paths: Mapping[str, str | Path],
+) -> dict[str, Any]:
+    """Refuse to reuse stale or tampered outputs from a completed research stage."""
+    root = Path(stage_root)
+    path = root / "completion_manifest.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"stage completion manifest is missing: {path}")
+    manifest = _load_json(path)
+    if manifest.get("schema_version") != 1 or manifest.get("stage") != stage:
+        raise ValueError("stage completion manifest does not match the requested stage")
+    if manifest.get("contract") != dict(contract):
+        raise ValueError("stage completion manifest does not match the frozen input contract")
+    if manifest.get("artifacts") != _stage_artifact_evidence(root, artifact_paths):
+        raise ValueError("stage completion manifest artifact checksum mismatch")
+    return manifest
 
 
 def _feature_schema(root: Path) -> Any:
@@ -215,6 +262,27 @@ def _verify_backup_manifest_files(destination: Path, manifest: Mapping[str, Any]
             raise ValueError(f"backup manifest file is missing: {relative}")
         if _sha256_file(path) != expected_sha:
             raise ValueError(f"backup manifest checksum mismatch: {relative}")
+
+
+def _stage_artifact_evidence(root: Path, artifact_paths: Mapping[str, str | Path]) -> list[dict[str, Any]]:
+    evidence = []
+    root_resolved = root.resolve()
+    for name, raw_path in sorted(artifact_paths.items()):
+        path = Path(raw_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"stage artifact is missing: {path}")
+        try:
+            relative = path.resolve().relative_to(root_resolved)
+        except ValueError as error:
+            raise ValueError(f"stage artifact must be inside its stage root: {path}") from error
+        evidence.append({"name": str(name), "path": str(relative), "sha256": _sha256_file(path)})
+    return evidence
+
+
+def _directory_file_evidence(directory: Path, *, relative_to: Path) -> list[dict[str, Any]]:
+    if not directory.is_dir():
+        raise FileNotFoundError(f"artifact source directory is missing: {directory}")
+    return [_file_evidence(path, relative_to=relative_to) for path in sorted(directory.rglob("*")) if path.is_file()]
 
 
 def _label_schema(dataset_path: Path) -> dict[str, list[str]]:

@@ -321,6 +321,14 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
                 candidate,
                 frozen_model_sha=candidate.frozen_model_sha256,
             )
+        with self.assertRaisesRegex(FinalHoldoutAccessError, "development gate"):
+            run_final_holdout_evaluation(
+                self.config,
+                dataset,
+                self._split(),
+                candidate,
+                frozen_model_sha=candidate.frozen_model_sha256,
+            )
 
     def test_final_holdout_rejects_a_final_fit_with_a_changed_prediction_contract(self):
         development = predictive_fixture(symbols_per_date=300)
