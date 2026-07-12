@@ -7,8 +7,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from app.evaluation.full_market_ml.collector import collect_full_market_raw
 from app.evaluation.full_market_ml.config import load_full_market_ml_config
+from app.evaluation.full_market_ml.config import DatesConfig
 from app.evaluation.full_market_ml.preflight import run_preflight
+from tests.full_market_ml_fixtures import FakeTuShareClient
 
 
 class FakeProbeClient:
@@ -25,16 +28,70 @@ class FullMarketMLPreflightTests(unittest.TestCase):
             Path(__file__).parents[1] / "config" / "ml_full_market_v1.toml"
         )
         self.module_versions = {
-            "numpy": "2.0.2",
-            "pandas": "2.3.3",
-            "pyarrow": "20.0.0",
-            "scikit-learn": "1.6.1",
+            "numpy": "2.5.1",
+            "pandas": "3.0.3",
+            "pyarrow": "25.0.0",
+            "scikit-learn": "1.9.0",
             "lightgbm": "4.6.0",
             "joblib": "1.5.3",
-            "psutil": "7.0.0",
-            "tushare": "1.4.21",
-            "python-dotenv": "1.0.0",
+            "psycopg2-binary": "2.9.12",
+            "psutil": "7.2.2",
+            "tushare": "1.4.29",
+            "python-dotenv": "1.2.2",
         }
+
+    def test_preflight_accepts_python_3_13_with_the_tested_lockfile(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = run_preflight(
+                self.config,
+                env={"TUSHARE_TOKEN": "secret"},
+                probe_client=FakeProbeClient(),
+                memory_bytes=16 * 1024**3,
+                free_disk_bytes=100 * 1024**3,
+                python_version=(3, 13, 0),
+                module_versions=self.module_versions,
+                runtime_root=Path(temporary_directory),
+            )
+
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["observed"]["python_version"], "3.13.0")
+
+    def test_preflight_offline_mode_accepts_verified_raw_assets_without_token(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            runtime_root = Path(temporary_directory)
+            offline_config = replace(
+                self.config,
+                dates=DatesConfig(
+                    signal_start="2026-07-09",
+                    signal_end="2026-07-09",
+                    holdout_start="2026-07-09",
+                    holdout_end="2026-07-09",
+                ),
+            )
+            collect_full_market_raw(
+                offline_config,
+                FakeTuShareClient(),
+                runtime_root,
+                "full-build",
+                resume=True,
+            )
+
+            result = run_preflight(
+                offline_config,
+                env={},
+                probe_client=None,
+                memory_bytes=16 * 1024**3,
+                free_disk_bytes=100 * 1024**3,
+                python_version=(3, 13, 1),
+                module_versions=self.module_versions,
+                runtime_root=runtime_root,
+                readiness_mode="offline",
+            )
+
+        self.assertTrue(result["ready"])
+        self.assertFalse(result["observed"]["tushare_token_configured"])
+        self.assertEqual(result["observed"]["daily_probe_count"], None)
+        self.assertNotIn("tushare_token_missing", result["blocking_codes"])
 
     def test_preflight_requires_token_without_exposing_it(self):
         result = run_preflight(
@@ -57,7 +114,7 @@ class FullMarketMLPreflightTests(unittest.TestCase):
                 probe_client=FakeProbeClient(),
                 memory_bytes=16 * 1024**3,
                 free_disk_bytes=100 * 1024**3,
-                python_version=(3, 11, 9),
+                python_version=(3, 13, 0),
                 module_versions=self.module_versions,
                 runtime_root=Path(temporary_directory),
             )
@@ -75,7 +132,7 @@ class FullMarketMLPreflightTests(unittest.TestCase):
                 probe_client=FakeProbeClient(),
                 memory_bytes=16 * 1024**3,
                 free_disk_bytes=100 * 1024**3,
-                python_version=(3, 11, 9),
+                python_version=(3, 13, 0),
                 module_versions=self.module_versions,
                 runtime_root=output_path.parent,
             )
@@ -104,7 +161,7 @@ class FullMarketMLPreflightTests(unittest.TestCase):
                     env={"TUSHARE_TOKEN": "secret"},
                     probe_client=FakeProbeClient(),
                     memory_bytes=16 * 1024**3,
-                    python_version=(3, 11, 9),
+                    python_version=(3, 13, 0),
                     module_versions=self.module_versions,
                     runtime_root=runtime_root,
                 )
@@ -126,7 +183,7 @@ class FullMarketMLPreflightTests(unittest.TestCase):
             probe_client=SmallDailyProbeClient(),
             memory_bytes=16 * 1024**3,
             free_disk_bytes=100 * 1024**3,
-            python_version=(3, 11, 9),
+            python_version=(3, 13, 0),
             module_versions=self.module_versions,
         )
 
@@ -176,7 +233,7 @@ class FullMarketMLPreflightTests(unittest.TestCase):
             probe_client=InsufficientProbeClient(),
             memory_bytes=16 * 1024**3,
             free_disk_bytes=100 * 1024**3,
-            python_version=(3, 11, 9),
+            python_version=(3, 13, 0),
             module_versions=self.module_versions,
         )
 
@@ -197,7 +254,7 @@ class FullMarketMLPreflightTests(unittest.TestCase):
             probe_client=DailyFailureProbeClient(),
             memory_bytes=16 * 1024**3,
             free_disk_bytes=100 * 1024**3,
-            python_version=(3, 11, 9),
+            python_version=(3, 13, 0),
             module_versions=self.module_versions,
         )
 
@@ -214,7 +271,7 @@ class FullMarketMLPreflightTests(unittest.TestCase):
             probe_client=SmallDailyProbeClient(),
             memory_bytes=16 * 1024**3,
             free_disk_bytes=100 * 1024**3,
-            python_version=(3, 11, 9),
+            python_version=(3, 13, 0),
             module_versions=self.module_versions,
         )
 

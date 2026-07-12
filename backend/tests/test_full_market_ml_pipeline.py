@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import time
@@ -32,6 +33,11 @@ class FullMarketMLPipelineTests(FullMarketMLTestCase):
         pipeline = FullMarketMLPipeline(self.config, self.temp_path, fake_pipeline_services())
         pipeline.run("dev-train")
         pipeline.run("final-evaluate", frozen_model_sha="fixture-frozen-sha")
+        (self.temp_path / "manifests").mkdir(parents=True, exist_ok=True)
+        (self.temp_path / "manifests" / "full-build.json").write_text("{}\n", encoding="utf-8")
+        registry_path = self.temp_path / "artifacts" / "full-build" / "dataset_registry.json"
+        registry_path.parent.mkdir(parents=True, exist_ok=True)
+        registry_path.write_text(json.dumps({"dataset_id": "fixture-dataset"}) + "\n", encoding="utf-8")
 
         final_fit = pipeline.run("final-fit", frozen_model_sha="fixture-frozen-sha")
 
@@ -39,6 +45,18 @@ class FullMarketMLPipelineTests(FullMarketMLTestCase):
 
         with self.assertRaises(FrozenModelMismatchError):
             pipeline.run("final-holdout-evaluate", frozen_model_sha="wrong")
+
+    def test_formal_final_fit_rejects_missing_collection_manifest_and_dataset_registry(self):
+        pipeline = FullMarketMLPipeline(self.config, self.temp_path, fake_pipeline_services())
+        pipeline.run("dev-train")
+
+        with self.assertRaises(TrainingBlockedError) as error:
+            pipeline.run("final-fit", frozen_model_sha="fixture-frozen-sha")
+
+        self.assertEqual(
+            error.exception.blocking_codes,
+            ("upstream_full-build_manifest_missing", "full_build_dataset_unregistered"),
+        )
 
     def test_resume_reuses_completed_stages(self):
         pipeline = FullMarketMLPipeline(self.config, self.temp_path, fake_pipeline_services())

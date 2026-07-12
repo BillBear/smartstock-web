@@ -1,3 +1,4 @@
+# Local ML contract: run under Python 3.13 with backend/requirements-ml.txt.
 [dates]
 signal_start = "2024-06-03"
 signal_end = "2026-07-10"

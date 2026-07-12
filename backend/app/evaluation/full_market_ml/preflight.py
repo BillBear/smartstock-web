@@ -11,20 +11,24 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 from .config import FullMarketMLConfig
+from .manifests import load_manifest, manifest_path, validate_partition
 
 
 MINIMUM_MEMORY_BYTES = 15 * 1024**3
 MINIMUM_FREE_DISK_BYTES = 40 * 1024**3
+SUPPORTED_PYTHON_MAJOR_MINOR = (3, 13)
+READINESS_MODES = {"online", "offline"}
 PINNED_MODULES = {
-    "numpy": "2.0.2",
-    "pandas": "2.3.3",
-    "pyarrow": "20.0.0",
-    "scikit-learn": "1.6.1",
+    "numpy": "2.5.1",
+    "pandas": "3.0.3",
+    "pyarrow": "25.0.0",
+    "scikit-learn": "1.9.0",
     "lightgbm": "4.6.0",
     "joblib": "1.5.3",
-    "psutil": "7.0.0",
-    "tushare": "1.4.21",
-    "python-dotenv": "1.0.0",
+    "psycopg2-binary": "2.9.12",
+    "psutil": "7.2.2",
+    "tushare": "1.4.29",
+    "python-dotenv": "1.2.2",
 }
 
 
@@ -39,12 +43,17 @@ def run_preflight(
     module_versions: Optional[Mapping[str, str]] = None,
     runtime_root: Optional[Path] = None,
     today: Optional[date] = None,
+    readiness_mode: str = "online",
 ) -> dict[str, Any]:
     """Return secret-safe readiness evidence and atomically persist it."""
+    if readiness_mode not in READINESS_MODES:
+        raise ValueError(f"readiness_mode must be one of {sorted(READINESS_MODES)}")
+
     root = runtime_root or _default_runtime_root()
     runtime_root_writable = _is_writable(root)
     observed: dict[str, Any] = {
         "config_sha256": config.sha256,
+        "readiness_mode": readiness_mode,
         "python_version": _version_text(python_version or sys.version_info),
         "module_versions": _module_versions(module_versions),
         "tushare_token_configured": bool(env.get("TUSHARE_TOKEN", "").strip()),
@@ -54,16 +63,17 @@ def run_preflight(
         "runtime_root_writable": runtime_root_writable,
         "trade_calendar_date": None,
         "daily_probe_count": None,
+        "offline_manifest_path": str(manifest_path(root, "full-build")),
+        "offline_partition_count": None,
+        "offline_manifest_ready": None,
     }
     blocking_codes: list[str] = []
 
     version = tuple(python_version or sys.version_info)
-    if not ((3, 11) <= version < (3, 13)):
+    if tuple(version[:2]) != SUPPORTED_PYTHON_MAJOR_MINOR:
         blocking_codes.append("python_version_unsupported")
     if any(observed["module_versions"].get(name) != expected for name, expected in PINNED_MODULES.items()):
         blocking_codes.append("pinned_modules_missing_or_mismatched")
-    if not observed["tushare_token_configured"]:
-        blocking_codes.append("tushare_token_missing")
     if observed["memory_bytes"] < MINIMUM_MEMORY_BYTES:
         blocking_codes.append("memory_insufficient")
     if observed["free_disk_bytes"] < MINIMUM_FREE_DISK_BYTES:
@@ -71,16 +81,21 @@ def run_preflight(
     if not observed["runtime_root_writable"]:
         blocking_codes.append("runtime_root_unwritable")
 
-    if observed["tushare_token_configured"] and probe_client is not None:
-        _probe_tushare(
-            probe_client,
-            observed,
-            blocking_codes,
-            today or date.today(),
-            max(4500, config.sample.minimum_daily_symbols),
-        )
-    elif observed["tushare_token_configured"]:
-        blocking_codes.extend(("trade_calendar_unavailable", "daily_probe_insufficient"))
+    if readiness_mode == "offline":
+        _verify_offline_assets(config, root, observed, blocking_codes)
+    else:
+        if not observed["tushare_token_configured"]:
+            blocking_codes.append("tushare_token_missing")
+        if observed["tushare_token_configured"] and probe_client is not None:
+            _probe_tushare(
+                probe_client,
+                observed,
+                blocking_codes,
+                today or date.today(),
+                max(4500, config.sample.minimum_daily_symbols),
+            )
+        elif observed["tushare_token_configured"]:
+            blocking_codes.extend(("trade_calendar_unavailable", "daily_probe_insufficient"))
 
     result = {
         "ready": not blocking_codes,
@@ -123,6 +138,41 @@ def _probe_tushare(
         return
     if observed["daily_probe_count"] < minimum_daily_symbols:
         blocking_codes.append("daily_probe_insufficient")
+
+
+def _verify_offline_assets(
+    config: FullMarketMLConfig,
+    root: Path,
+    observed: dict[str, Any],
+    blocking_codes: list[str],
+) -> None:
+    path = manifest_path(root, "full-build")
+    if not path.is_file():
+        blocking_codes.append("offline_raw_manifest_missing")
+        return
+    try:
+        manifest = load_manifest(root, "full-build", config.sha256, config.collection.request_pacing_seconds)
+    except ValueError:
+        blocking_codes.append("offline_raw_manifest_mismatched")
+        return
+
+    observed["offline_partition_count"] = len(manifest.partitions)
+    observed["offline_manifest_ready"] = manifest.ready
+    if not manifest.ready:
+        blocking_codes.append("offline_raw_manifest_not_ready")
+        return
+    if not manifest.partitions:
+        blocking_codes.append("offline_raw_manifest_empty")
+        return
+    if not manifest.trade_cal_open_dates:
+        blocking_codes.append("offline_trade_calendar_unavailable")
+        return
+    observed["trade_calendar_date"] = max(manifest.trade_cal_open_dates).replace("-", "")
+    try:
+        for record in manifest.partitions:
+            validate_partition(root, record)
+    except ValueError:
+        blocking_codes.append("offline_raw_assets_invalid")
 
 
 def _records(value: Any) -> list[dict[str, Any]]:

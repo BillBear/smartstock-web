@@ -47,7 +47,7 @@ def load_feature_audit_artifact(path: str | Path):
     return FeatureAuditResult.from_csv_rows(json.loads(report_path.read_text(encoding="utf-8")))
 
 
-def default_services():
+def default_services(*, readiness_mode: str = "online"):
     """Bind the CLI to the established research-only module contracts."""
     import pandas as pd
     import pyarrow.parquet as pq
@@ -72,7 +72,7 @@ def default_services():
         save_final_fit,
     )
 
-    client = ts.pro_api(os.environ.get("TUSHARE_TOKEN", ""))
+    client = None if readiness_mode == "offline" else ts.pro_api(os.environ.get("TUSHARE_TOKEN", ""))
 
     def artifact(root, name):
         path = root / "artifacts" / name
@@ -146,8 +146,11 @@ def default_services():
         )
 
     def preflight(config, root, _artifacts):
-        report = run_preflight(config, os.environ, client, runtime_root=root)
+        report = run_preflight(config, os.environ, client, runtime_root=root, readiness_mode=readiness_mode)
         return {"quality_ready": report["ready"], "blocking_codes": report["blocking_codes"], "preflight": report}
+
+    def offline_reuse(_config, _root, _artifacts):
+        return {"quality_ready": True, "offline_reused": True}
 
     def recent_window_config(config, calendar_days, sessions):
         end = date.fromisoformat(config.dates.signal_end)
@@ -181,7 +184,7 @@ def default_services():
         return handler
 
     def full_build(config, root, _artifacts):
-        manifest = collect_full_market_raw(config, client, root, "full-build", resume=True)
+        manifest = load_manifest(root, "full-build", config.sha256, config.collection.request_pacing_seconds) if readiness_mode == "offline" else collect_full_market_raw(config, client, root, "full-build", resume=True)
         if not manifest.ready:
             return {"quality_ready": False, "blocking_codes": manifest.blocking_codes}
         panel_root = root / "panel" / "stage=full-build"
@@ -485,7 +488,7 @@ def default_services():
             **{f"prediction_{quadrant}": str(path) for quadrant, path in sorted(quadrant_paths.items())},
         }
 
-    return {"preflight": preflight, "probe": collect("probe", bounded_probe=True), "pilot-build": lambda config, root, artifacts: collect("pilot-build", with_panel=True)(pilot_config(config), root, artifacts), "full-build": full_build, "feature-audit": feature_audit, "dev-train": dev_train, "final-evaluate": final_evaluate, "final-fit": final_fit, "final-holdout-evaluate": final_holdout_evaluate}
+    return {"preflight": preflight, "probe": offline_reuse if readiness_mode == "offline" else collect("probe", bounded_probe=True), "pilot-build": offline_reuse if readiness_mode == "offline" else lambda config, root, artifacts: collect("pilot-build", with_panel=True)(pilot_config(config), root, artifacts), "full-build": full_build, "feature-audit": feature_audit, "dev-train": dev_train, "final-evaluate": final_evaluate, "final-fit": final_fit, "final-holdout-evaluate": final_holdout_evaluate}
 
 
 def main() -> int:
@@ -501,6 +504,7 @@ def main() -> int:
     parser.add_argument("--backup-root")
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--recover-stale-seconds", type=int)
+    parser.add_argument("--offline-readiness", action="store_true")
     arguments = parser.parse_args()
     root = Path(__file__).resolve().parents[2] / "runtime" / "ml_full_market" / "runs" / arguments.run_id
     if arguments.status:
@@ -515,7 +519,11 @@ def main() -> int:
     if not arguments.config:
         parser.error("--config is required unless --status or --recover-stale-seconds is supplied")
     config = load_full_market_ml_config(arguments.config)
-    pipeline = FullMarketMLPipeline(config, root, default_services())
+    pipeline = FullMarketMLPipeline(
+        config,
+        root,
+        default_services(readiness_mode="offline" if arguments.offline_readiness else "online"),
+    )
     if arguments.abort_stage:
         state = pipeline.abort_stage(arguments.abort_stage, reason=arguments.abort_reason)
         print(json.dumps({"stage": arguments.abort_stage, "status": state["status"]}, ensure_ascii=True, sort_keys=True))

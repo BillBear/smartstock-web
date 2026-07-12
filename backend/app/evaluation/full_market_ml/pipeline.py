@@ -46,6 +46,7 @@ DEFAULT_STAGE_TIMEOUTS_SECONDS = {
     "final-fit": 30 * 60,
     "final-holdout-evaluate": 30 * 60,
 }
+FORMAL_DOWNSTREAM_STAGES = {"final-fit", "final-holdout-evaluate"}
 
 
 def select_probe_dates(open_dates: list[str] | tuple[str, ...], count: int = 5) -> tuple[str, ...]:
@@ -101,6 +102,7 @@ class FullMarketMLPipeline:
         reused: list[str] = []
         for current in STAGES[: STAGES.index(stage) + 1]:
             inputs = self._input_hashes(current, states)
+            self._require_formal_stage_inputs(current)
             existing = self._load_state(current)
             if self._is_reusable(existing, inputs) and (resume or current != stage):
                 states[current] = existing
@@ -317,6 +319,17 @@ class FullMarketMLPipeline:
         expected = str(json.loads(path.read_text(encoding="utf-8")).get("frozen_model_sha", "")).strip()
         if not expected or provided != expected:
             raise FrozenModelMismatchError("final-evaluate requires the exact frozen model SHA")
+
+    def _require_formal_stage_inputs(self, stage: str) -> None:
+        if stage not in FORMAL_DOWNSTREAM_STAGES:
+            return
+        blocking_codes = []
+        if not (self.runtime_root / "manifests" / "full-build.json").is_file():
+            blocking_codes.append("upstream_full-build_manifest_missing")
+        if not (self.runtime_root / "artifacts" / "full-build" / "dataset_registry.json").is_file():
+            blocking_codes.append("full_build_dataset_unregistered")
+        if blocking_codes:
+            raise TrainingBlockedError(tuple(blocking_codes))
 
     def _state(
         self,
