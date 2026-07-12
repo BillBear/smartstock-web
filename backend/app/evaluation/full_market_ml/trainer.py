@@ -9,7 +9,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
-from typing import Any
+from typing import Any, Callable
 
 import lightgbm as lgb
 import numpy as np
@@ -154,6 +154,7 @@ class FinalFit:
     strong_constant: float | None
     severe_models: tuple[Any, ...]
     severe_constant: float | None
+    artifact_manifest_sha256: str | None = None
 
 
 def save_final_fit(final_fit: FinalFit, target: str | Path) -> Path:
@@ -220,6 +221,7 @@ def load_final_fit(source: str | Path, frozen_model_sha: str) -> FinalFit:
         strong_constant=_optional_float(manifest.get("strong_constant")),
         severe_models=tuple(_load_booster_models(directory, manifest.get("severe_models"), "severe")),
         severe_constant=_optional_float(manifest.get("severe_constant")),
+        artifact_manifest_sha256=_file_sha256(manifest_path),
     )
 
 
@@ -380,6 +382,7 @@ def run_final_holdout_evaluation(
     *,
     frozen_model_sha: str,
     final_fit: FinalFit | None = None,
+    on_quadrant_complete: Callable[[str, pd.DataFrame], None] | None = None,
 ) -> FinalHoldoutEvaluation:
     """Fit the frozen candidate on development A and evaluate B/C/D exactly once.
 
@@ -391,6 +394,8 @@ def run_final_holdout_evaluation(
     sealed = split_plan.seal_final_holdout(frozen_model_sha)
     if final_fit is not None and final_fit.frozen_model_sha256 != frozen_model_sha:
         raise FinalHoldoutAccessError("final holdout fit SHA does not match frozen candidate")
+    if final_fit is None or final_fit.artifact_manifest_sha256 is None:
+        raise FinalHoldoutAccessError("final holdout requires a persisted final fit artifact")
     if final_fit is not None and (
         final_fit.split_sha256 != sealed.split_sha256
         or final_fit.selected_features != tuple(candidate.selected_features)
@@ -404,8 +409,6 @@ def run_final_holdout_evaluation(
         "D_joint_holdout": (set(sealed.load_quadrant("D", frozen_model_sha=frozen_model_sha)), set(sealed.final_dates)),
     }
     data = _final_evaluation_dataset(dataset, sealed, candidate.selected_features)
-    if final_fit is None:
-        raise FinalHoldoutAccessError("final holdout requires an explicit final fit artifact")
 
     prediction_frames = []
     quadrant_metrics: dict[str, dict[str, Any]] = {}
@@ -427,6 +430,8 @@ def run_final_holdout_evaluation(
             final_fit.severe_constant,
         )
         predicted["quadrant"] = quadrant
+        if on_quadrant_complete is not None:
+            on_quadrant_complete(quadrant, predicted.copy())
         prediction_frames.append(predicted)
         quadrant_metrics[quadrant] = evaluate_ranking(predicted)
         baseline_metrics[quadrant] = _baselines(predicted)

@@ -124,6 +124,9 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
             )
 
         final_fit = fit_final_candidate(development, split, candidate, frozen_model_sha=candidate.frozen_model_sha256)
+        final_fit_dir = self.temp_path / "existing-final-fit"
+        save_final_fit(final_fit, final_fit_dir)
+        final_fit = load_final_fit(final_fit_dir, candidate.frozen_model_sha256)
         report = run_final_holdout_evaluation(
             self.config,
             complete,
@@ -160,7 +163,7 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
         final_rows["trade_date"] = "2025-02-03"
         complete = __import__("pandas").concat([development, final_rows], ignore_index=True)
 
-        with self.assertRaisesRegex(FinalHoldoutAccessError, "requires an explicit final fit"):
+        with self.assertRaisesRegex(FinalHoldoutAccessError, "requires a persisted final fit"):
             run_final_holdout_evaluation(
                 self.config,
                 complete,
@@ -191,10 +194,68 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
         complete = __import__("pandas").concat([development, final_rows], ignore_index=True)
 
         fitted = fit_final_candidate(development, split, candidate, frozen_model_sha=candidate.frozen_model_sha256)
-        report = run_final_holdout_evaluation(self.config, complete, split, candidate, frozen_model_sha=candidate.frozen_model_sha256, final_fit=fitted)
+        with self.assertRaisesRegex(FinalHoldoutAccessError, "persisted final fit"):
+            run_final_holdout_evaluation(
+                self.config,
+                complete,
+                split,
+                candidate,
+                frozen_model_sha=candidate.frozen_model_sha256,
+                final_fit=fitted,
+            )
+        final_fit_dir = self.temp_path / "final-fit"
+        save_final_fit(fitted, final_fit_dir)
+        persisted_fit = load_final_fit(final_fit_dir, candidate.frozen_model_sha256)
+        report = run_final_holdout_evaluation(
+            self.config,
+            complete,
+            split,
+            candidate,
+            frozen_model_sha=candidate.frozen_model_sha256,
+            final_fit=persisted_fit,
+        )
 
         self.assertEqual(fitted.frozen_model_sha256, candidate.frozen_model_sha256)
         self.assertEqual(report.quadrant_metrics["D_joint_holdout"]["date_count"], 1)
+
+    def test_final_holdout_persists_each_quadrant_through_the_completion_callback(self):
+        development = predictive_fixture(symbols_per_date=300)
+        base_split = self._split()
+        train_symbols = tuple(f"{index + 1:06d}" for index in range(240))
+        unseen_symbols = tuple(f"{index + 1:06d}" for index in range(240, 300))
+        split = SplitPlan(
+            development_dates=base_split.development_dates,
+            final_dates=("2025-02-03",),
+            stock_holdout_symbols=unseen_symbols,
+            A_dev_train_symbols=train_symbols,
+            B_final_train_symbols=train_symbols,
+            C_dev_unseen_symbols=unseen_symbols,
+            D_final_unseen_symbols=unseen_symbols,
+            walk_forward=tuple(replace(fold, training_symbols=train_symbols) for fold in base_split.walk_forward),
+            stratum_counts_before={}, stratum_counts_after={}, split_sha256="quadrant-callback-fixture",
+        )
+        candidate = run_development_training(self.config, development, split)
+        final_rows = development.loc[development["trade_date"].eq(development["trade_date"].iloc[-1])].copy()
+        final_rows["trade_date"] = "2025-02-03"
+        complete = __import__("pandas").concat([development, final_rows], ignore_index=True)
+        final_fit = fit_final_candidate(development, split, candidate, frozen_model_sha=candidate.frozen_model_sha256)
+        final_fit_dir = self.temp_path / "callback-final-fit"
+        save_final_fit(final_fit, final_fit_dir)
+        final_fit = load_final_fit(final_fit_dir, candidate.frozen_model_sha256)
+        persisted = {}
+
+        run_final_holdout_evaluation(
+            self.config,
+            complete,
+            split,
+            candidate,
+            frozen_model_sha=candidate.frozen_model_sha256,
+            final_fit=final_fit,
+            on_quadrant_complete=lambda quadrant, rows: persisted.setdefault(quadrant, rows.copy()),
+        )
+
+        self.assertEqual(set(persisted), {"B_time_holdout", "C_stock_holdout", "D_joint_holdout"})
+        self.assertTrue(all(rows["quadrant"].eq(quadrant).all() for quadrant, rows in persisted.items()))
 
     def test_final_fit_model_artifacts_round_trip(self):
         candidate = run_development_training(self.config, predictive_fixture(), self._split())
@@ -210,6 +271,17 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
         self.assertEqual(restored.selected_features, candidate.selected_features)
         self.assertEqual(restored.selected_risk_alpha, candidate.selected_risk_alpha)
         self.assertEqual(restored.calibrators, candidate.calibrators)
+
+    def test_final_fit_rejects_a_tampered_model_binary(self):
+        candidate = run_development_training(self.config, predictive_fixture(), self._split())
+        fitted = fit_final_candidate(predictive_fixture(), self._split(), candidate, frozen_model_sha=candidate.frozen_model_sha256)
+        target = self.temp_path / "tampered-final-fit"
+        save_final_fit(fitted, target)
+        model_path = target / "rank_00.txt"
+        model_path.write_text(model_path.read_text(encoding="utf-8") + "\ncorruption\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+            load_final_fit(target, candidate.frozen_model_sha256)
 
     def test_final_fit_rejects_final_holdout_rows(self):
         development = predictive_fixture()
@@ -247,6 +319,9 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
         final_rows["trade_date"] = "2025-02-03"
         complete = __import__("pandas").concat([development, final_rows], ignore_index=True)
         fitted = fit_final_candidate(development, split, candidate, frozen_model_sha=candidate.frozen_model_sha256)
+        final_fit_dir = self.temp_path / "contract-final-fit"
+        save_final_fit(fitted, final_fit_dir)
+        fitted = load_final_fit(final_fit_dir, candidate.frozen_model_sha256)
 
         with self.assertRaisesRegex(FinalHoldoutAccessError, "prediction contract"):
             run_final_holdout_evaluation(

@@ -36,7 +36,14 @@ def default_services():
     from app.evaluation.full_market_ml.preflight import run_preflight
     from app.evaluation.full_market_ml.quality import audit_panel_quality
     from app.evaluation.full_market_ml.splits import SplitPlan, WalkForwardFold, build_split_plan
-    from app.evaluation.full_market_ml.trainer import FrozenCandidate, run_development_training, run_final_holdout_evaluation
+    from app.evaluation.full_market_ml.trainer import (
+        FrozenCandidate,
+        fit_final_candidate,
+        load_final_fit,
+        run_development_training,
+        run_final_holdout_evaluation,
+        save_final_fit,
+    )
 
     client = ts.pro_api(os.environ.get("TUSHARE_TOKEN", ""))
 
@@ -210,23 +217,52 @@ def default_services():
         output.write_text(json.dumps(report, ensure_ascii=True, sort_keys=True) + "\n", encoding="utf-8")
         return {"quality_ready": True, "evaluation": str(output), "status": report["status"]}
 
-    def final_holdout_evaluate(config, root, _artifacts):
-        dataset_path = artifact(root, "full-build") / "dataset.parquet"
-        split = load_split(root)
+    def frozen_candidate(root):
         frozen_sha = str(json.loads((root / "frozen_model_manifest.json").read_text(encoding="utf-8"))["frozen_model_sha"])
         candidate_manifest = json.loads((artifact(root, "dev-train") / "candidate_manifest.json").read_text(encoding="utf-8"))
         candidate = FrozenCandidate.from_manifest(candidate_manifest)
         if candidate.frozen_model_sha256 != frozen_sha:
             raise ValueError("frozen candidate manifest SHA does not match the sealed manifest")
+        return frozen_sha, candidate
+
+    def write_development_gate_skip(root, stage, candidate, frozen_sha):
+        output = artifact(root, stage) / "skipped.json"
+        write_json(output, {
+            "status": "research_only_failed_gate",
+            "reason": "development_gate_failed",
+            "failed_gates": candidate.failed_gates,
+            "frozen_model_sha": frozen_sha,
+        })
+        return {"quality_ready": True, "status": "research_only_failed_gate", "skipped": str(output)}
+
+    def final_fit(_config, root, _artifacts):
+        frozen_sha, candidate = frozen_candidate(root)
         if not candidate.can_open_final_holdout:
-            output = artifact(root, "final-holdout-evaluate") / "skipped.json"
-            write_json(output, {
-                "status": "research_only_failed_gate",
-                "reason": "development_gate_failed",
-                "failed_gates": candidate.failed_gates,
-                "frozen_model_sha": frozen_sha,
-            })
-            return {"quality_ready": True, "status": "research_only_failed_gate", "skipped": str(output)}
+            return write_development_gate_skip(root, "final-fit", candidate, frozen_sha)
+        split = load_split(root)
+        dataset_path = artifact(root, "full-build") / "dataset.parquet"
+        development = pd.read_parquet(dataset_path, filters=[("trade_date", "in", list(split.development_dates))])
+        fitted = fit_final_candidate(development, split, candidate, frozen_model_sha=frozen_sha)
+        output = artifact(root, "final-fit") / "model"
+        save_final_fit(fitted, output)
+        manifest_path = output / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        result = {
+            "quality_ready": True,
+            "status": "complete",
+            "final_fit_manifest": str(manifest_path),
+        }
+        for group in ("rank_models", "strong_models", "severe_models"):
+            for index, model in enumerate(manifest[group]):
+                result[f"{group}_{index:02d}"] = str(output / model["file"])
+        return result
+
+    def final_holdout_evaluate(config, root, _artifacts):
+        dataset_path = artifact(root, "full-build") / "dataset.parquet"
+        split = load_split(root)
+        frozen_sha, candidate = frozen_candidate(root)
+        if not candidate.can_open_final_holdout:
+            return write_development_gate_skip(root, "final-holdout-evaluate", candidate, frozen_sha)
         dates = pd.read_parquet(dataset_path, columns=["trade_date", "eligible_for_training"])
         dates["trade_date"] = pd.to_datetime(dates["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d")
         labelable_final_dates = dates.loc[
@@ -237,17 +273,28 @@ def default_services():
                 f"final holdout has only {labelable_final_dates} labelable trade dates; requires at least 40 before opening the sealed holdout"
             )
         dataset = pd.read_parquet(dataset_path)
+        output = artifact(root, "final-holdout-evaluate")
+        final_fit = load_final_fit(artifact(root, "final-fit") / "model", frozen_sha)
+        quadrant_paths = {}
+
+        def persist_quadrant(quadrant, rows):
+            path = output / "predictions" / f"{quadrant}.parquet"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            rows.to_parquet(path, index=False)
+            quadrant_paths[quadrant] = path
+
         evaluation = run_final_holdout_evaluation(
             config,
             dataset,
             split,
             candidate,
             frozen_model_sha=frozen_sha,
+            final_fit=final_fit,
+            on_quadrant_complete=persist_quadrant,
         )
-        output = artifact(root, "final-holdout-evaluate")
         predictions_path = output / "predictions.parquet"
         evaluation.predictions.to_parquet(predictions_path, index=False)
-        pd.DataFrame(metric_rows(evaluation.quadrant_metrics)).to_csv(root / "holdout_metrics.csv", index=False)
+        pd.DataFrame(metric_rows(evaluation.quadrant_metrics)).to_csv(output / "holdout_metrics.csv", index=False)
         baseline_rows = []
         for quadrant, baselines in evaluation.baseline_metrics.items():
             for baseline, values in baselines.items():
@@ -255,18 +302,18 @@ def default_services():
                     {"quadrant": quadrant, "baseline": baseline, "metric": key, "value": value}
                     for key, value in values.items()
                 )
-        pd.DataFrame(baseline_rows).to_csv(root / "baseline_comparison.csv", index=False)
+        pd.DataFrame(baseline_rows).to_csv(output / "baseline_comparison.csv", index=False)
         calibration_rows = []
         for quadrant, report in evaluation.calibration.items():
             calibration_rows.append({"quadrant": quadrant, "bin": 0, "count": None, "mean_predicted_probability": None, "hit_rate": None, "brier": report["brier"], "ece": report["ece"]})
             calibration_rows.extend({"quadrant": quadrant, **row, "brier": None, "ece": None} for row in report["bins"])
-        pd.DataFrame(calibration_rows).to_csv(root / "calibration.csv", index=False)
-        pd.DataFrame(metric_rows(evaluation.bootstrap)).to_csv(root / "bootstrap_metrics.csv", index=False)
+        pd.DataFrame(calibration_rows).to_csv(output / "calibration.csv", index=False)
+        pd.DataFrame(metric_rows(evaluation.bootstrap)).to_csv(output / "bootstrap_metrics.csv", index=False)
         error_rows = []
         for quadrant, rows in evaluation.predictions.groupby("quadrant", sort=True):
             ranked = rows.sort_values(["score", "symbol"], ascending=[False, True], kind="stable").groupby("trade_date", sort=True).head(5)
             error_rows.append(ranked.loc[ranked["label_severe_negative_10d"].astype(bool)])
-        pd.concat(error_rows, ignore_index=True).to_csv(root / "error_cases.csv", index=False)
+        pd.concat(error_rows, ignore_index=True).to_csv(output / "error_cases.csv", index=False)
         metrics = {
             "model_status": evaluation.model_status,
             "gate_results": {"failed": evaluation.failed_gates},
@@ -276,8 +323,8 @@ def default_services():
             "portfolios": evaluation.portfolios,
             "labelable_final_dates": labelable_final_dates,
         }
-        write_json(root / "model_metrics.json", metrics)
-        write_model_card(root / "model_card.md", candidate, evaluation, split)
+        write_json(output / "model_metrics.json", metrics)
+        write_model_card(output / "model_card.md", candidate, evaluation, split)
         manifest = candidate.manifest(
             config_sha256=config.sha256,
             data_sha256=file_sha256(dataset_path),
@@ -287,13 +334,14 @@ def default_services():
         return {
             "quality_ready": True,
             "model_status": evaluation.model_status,
-            "holdout_metrics": str(root / "holdout_metrics.csv"),
-            "model_metrics": str(root / "model_metrics.json"),
-            "model_card": str(root / "model_card.md"),
+            "holdout_metrics": str(output / "holdout_metrics.csv"),
+            "model_metrics": str(output / "model_metrics.json"),
+            "model_card": str(output / "model_card.md"),
             "predictions": str(predictions_path),
+            **{f"prediction_{quadrant}": str(path) for quadrant, path in sorted(quadrant_paths.items())},
         }
 
-    return {"preflight": preflight, "probe": collect("probe", bounded_probe=True), "pilot-build": lambda config, root, artifacts: collect("pilot-build", with_panel=True)(pilot_config(config), root, artifacts), "full-build": full_build, "feature-audit": feature_audit, "dev-train": dev_train, "final-evaluate": final_evaluate, "final-holdout-evaluate": final_holdout_evaluate}
+    return {"preflight": preflight, "probe": collect("probe", bounded_probe=True), "pilot-build": lambda config, root, artifacts: collect("pilot-build", with_panel=True)(pilot_config(config), root, artifacts), "full-build": full_build, "feature-audit": feature_audit, "dev-train": dev_train, "final-evaluate": final_evaluate, "final-fit": final_fit, "final-holdout-evaluate": final_holdout_evaluate}
 
 
 def main() -> int:

@@ -32,6 +32,10 @@ class FullMarketMLPipelineTests(FullMarketMLTestCase):
         pipeline.run("dev-train")
         pipeline.run("final-evaluate", frozen_model_sha="fixture-frozen-sha")
 
+        final_fit = pipeline.run("final-fit", frozen_model_sha="fixture-frozen-sha")
+
+        self.assertEqual(final_fit.stage_states["final-fit"]["status"], "complete")
+
         with self.assertRaises(FrozenModelMismatchError):
             pipeline.run("final-holdout-evaluate", frozen_model_sha="wrong")
 

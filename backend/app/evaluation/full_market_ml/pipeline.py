@@ -32,6 +32,7 @@ STAGES = (
     "feature-audit",
     "dev-train",
     "final-evaluate",
+    "final-fit",
     "final-holdout-evaluate",
 )
 DEFAULT_STAGE_TIMEOUTS_SECONDS = {
@@ -42,6 +43,7 @@ DEFAULT_STAGE_TIMEOUTS_SECONDS = {
     "feature-audit": 60 * 60,
     "dev-train": 45 * 60,
     "final-evaluate": 15 * 60,
+    "final-fit": 30 * 60,
     "final-holdout-evaluate": 30 * 60,
 }
 
@@ -92,7 +94,7 @@ class FullMarketMLPipeline:
     def run(self, stage: str, *, resume: bool = False, frozen_model_sha: str | None = None) -> PipelineRunResult:
         if stage not in STAGES:
             raise ValueError("stage must be one of " + ", ".join(STAGES))
-        if frozen_model_sha is not None and stage not in {"final-evaluate", "final-holdout-evaluate"}:
+        if frozen_model_sha is not None and stage not in {"final-evaluate", "final-fit", "final-holdout-evaluate"}:
             raise ValueError("frozen_model_sha is only accepted for final evaluation stages")
 
         states: dict[str, dict[str, Any]] = {}
@@ -107,7 +109,7 @@ class FullMarketMLPipeline:
             if existing and existing.get("status") == "complete":
                 raise ValueError(f"stage already complete: {current}; rerun with resume")
 
-            if current in {"final-evaluate", "final-holdout-evaluate"}:
+            if current in {"final-evaluate", "final-fit", "final-holdout-evaluate"}:
                 self._require_frozen_sha(frozen_model_sha)
             states[current] = self._run_stage(current, inputs, states)
 
