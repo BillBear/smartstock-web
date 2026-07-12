@@ -111,6 +111,18 @@ def backup_dataset_assets(
         raise
 
 
+def ensure_local_dataset_backup(
+    runtime_root: str | Path,
+    local_backup_root: str | Path,
+    registry: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Create or verify the mandatory local immutable backup for a formal run."""
+    destination = Path(local_backup_root) / str(registry["dataset_id"])
+    if destination.exists():
+        return verify_dataset_backup(local_backup_root, registry)
+    return backup_dataset_assets(runtime_root, local_backup_root, registry)
+
+
 def verify_dataset_backup(backup_root: str | Path, registry: Mapping[str, Any]) -> dict[str, Any]:
     """Verify that immutable base data exists in an external backup before final fitting."""
     dataset_id = str(registry["dataset_id"])

@@ -10,6 +10,7 @@ from app.evaluation.full_market_ml.assets import (
     backup_dataset_assets,
     backup_stage_assets,
     build_dataset_registry,
+    ensure_local_dataset_backup,
     verify_dataset_backup,
     verify_stage_completion_manifest,
     write_stage_completion_manifest,
@@ -61,6 +62,18 @@ class FullMarketMLAssetTests(FullMarketMLTestCase):
         self.assertTrue((target / registry["dataset_id"] / "raw" / "endpoint=daily" / "trade_date=20260102" / "data.parquet").is_file())
         self.assertTrue((target / registry["dataset_id"] / "artifacts" / "full-build" / "dataset.parquet").is_file())
         self.assertEqual(result["verification_status"], "verified")
+
+    def test_local_dataset_backup_is_created_and_reused_without_external_disk(self):
+        runtime = self._runtime()
+        registry = build_dataset_registry(runtime, code_revision="commit-sha", environment={})
+        target = self.temp_path / "local-backup"
+
+        first = ensure_local_dataset_backup(runtime, target, registry)
+        second = ensure_local_dataset_backup(runtime, target, registry)
+
+        self.assertEqual(first["verification_status"], "verified")
+        self.assertEqual(second["verification_status"], "verified")
+        self.assertEqual(first, second)
 
     def test_verified_backup_is_required_before_a_formal_final_fit(self):
         runtime = self._runtime()

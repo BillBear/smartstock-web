@@ -18,6 +18,7 @@ from app.evaluation.full_market_ml.assets import (
     backup_dataset_assets,
     backup_stage_assets,
     build_dataset_registry,
+    ensure_local_dataset_backup,
     verify_dataset_backup,
     verify_stage_completion_manifest,
     write_stage_completion_manifest,
@@ -296,16 +297,22 @@ def default_services(*, readiness_mode: str = "online"):
         return {"quality_ready": True, "status": "research_only_failed_gate", "skipped": str(output)}
 
     def verified_backup(root):
-        backup_root = os.environ.get("ML_BACKUP_ROOT", "").strip()
-        if not backup_root:
-            raise ValueError("ML_BACKUP_ROOT is required before formal final-fit")
-        backup_path = validate_backup_root(backup_root, root)
         registry_path = artifact(root, "full-build") / "dataset_registry.json"
         if not registry_path.is_file():
             raise FileNotFoundError("dataset registry is required before formal final-fit")
         registry = json.loads(registry_path.read_text(encoding="utf-8"))
-        verify_dataset_backup(backup_path, registry)
-        return backup_path, registry
+        local_root = os.environ.get("ML_LOCAL_BACKUP_ROOT", "").strip() or str(root.parent / "backups")
+        local_path = validate_backup_root(local_root, root)
+        ensure_local_dataset_backup(root, local_path, registry)
+        external_root = os.environ.get("ML_BACKUP_ROOT", "").strip()
+        if external_root:
+            external_path = validate_backup_root(external_root, root)
+            external_destination = external_path / registry["dataset_id"]
+            if external_destination.exists():
+                verify_dataset_backup(external_path, registry)
+            else:
+                backup_dataset_assets(root, external_path, registry)
+        return local_path, registry
 
     def final_holdout_contract(root, split, frozen_sha):
         candidate_manifest_path = artifact(root, "dev-train") / "candidate_manifest.json"
@@ -531,11 +538,14 @@ def main() -> int:
     if arguments.register_assets:
         registry = build_dataset_registry(root, code_revision=os.environ.get("GIT_COMMIT", "unknown"))
         registry_path = write_dataset_registry(root, registry)
+        local_root = os.environ.get("ML_LOCAL_BACKUP_ROOT", "").strip() or str(root.parent / "backups")
+        local_path = validate_backup_root(local_root, root)
+        local_backup = ensure_local_dataset_backup(root, local_path, registry)
         if arguments.backup_root:
             result = backup_dataset_assets(root, arguments.backup_root, registry)
-            print(json.dumps({"dataset_id": registry["dataset_id"], "backup": result}, ensure_ascii=True, sort_keys=True))
+            print(json.dumps({"dataset_id": registry["dataset_id"], "local_backup": local_backup, "backup": result}, ensure_ascii=True, sort_keys=True))
         else:
-            print(json.dumps({"dataset_id": registry["dataset_id"], "registry": str(registry_path)}, ensure_ascii=True, sort_keys=True))
+            print(json.dumps({"dataset_id": registry["dataset_id"], "registry": str(registry_path), "local_backup": local_backup}, ensure_ascii=True, sort_keys=True))
         return 0
     if not arguments.stage:
         parser.error("--stage is required unless --abort-stage, --register-assets, --status, or --recover-stale-seconds is supplied")
