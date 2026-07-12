@@ -93,6 +93,46 @@ class FullMarketMLPreflightTests(unittest.TestCase):
         self.assertEqual(result["observed"]["daily_probe_count"], None)
         self.assertNotIn("tushare_token_missing", result["blocking_codes"])
 
+    def test_preflight_offline_mode_allows_failed_optional_partition(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            runtime_root = Path(temporary_directory)
+            offline_config = replace(
+                self.config,
+                dates=DatesConfig(
+                    signal_start="2026-07-09",
+                    signal_end="2026-07-09",
+                    holdout_start="2026-07-09",
+                    holdout_end="2026-07-09",
+                ),
+            )
+            collect_full_market_raw(
+                offline_config,
+                FakeTuShareClient(),
+                runtime_root,
+                "full-build",
+                resume=True,
+            )
+            manifest_path = runtime_root / "manifests" / "full-build.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            optional = next(partition for partition in manifest["partitions"] if partition["endpoint"] == "moneyflow")
+            optional["status"] = "failed"
+            manifest["optional_failures"] = ["moneyflow"]
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            result = run_preflight(
+                offline_config,
+                env={},
+                probe_client=None,
+                memory_bytes=16 * 1024**3,
+                free_disk_bytes=100 * 1024**3,
+                python_version=(3, 13, 1),
+                module_versions=self.module_versions,
+                runtime_root=runtime_root,
+                readiness_mode="offline",
+            )
+
+        self.assertTrue(result["ready"])
+
     def test_preflight_requires_token_without_exposing_it(self):
         result = run_preflight(
             self.config,

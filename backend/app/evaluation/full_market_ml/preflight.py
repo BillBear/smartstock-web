@@ -168,8 +168,11 @@ def _verify_offline_assets(
         blocking_codes.append("offline_trade_calendar_unavailable")
         return
     observed["trade_calendar_date"] = max(manifest.trade_cal_open_dates).replace("-", "")
+    optional_failed_endpoints = set(manifest.optional_failures)
     try:
         for record in manifest.partitions:
+            if record.status == "failed" and record.endpoint in optional_failed_endpoints:
+                continue
             validate_partition(root, record)
     except ValueError:
         blocking_codes.append("offline_raw_assets_invalid")
