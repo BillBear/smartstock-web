@@ -270,8 +270,10 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
         self.assertTrue(all(rows["quadrant"].eq(quadrant).all() for quadrant, rows in persisted.items()))
 
     def test_final_fit_model_artifacts_round_trip(self):
-        candidate = run_development_training(self.config, predictive_fixture(), self._split())
-        fitted = fit_final_candidate(predictive_fixture(), self._split(), candidate, frozen_model_sha=candidate.frozen_model_sha256)
+        dataset = predictive_fixture(symbols_per_date=300)
+        split = sealed_split_fixture(symbols_per_date=300)
+        candidate = run_development_training(self.config, dataset, split)
+        fitted = fit_final_candidate(dataset, split, candidate, frozen_model_sha=candidate.frozen_model_sha256)
         target = self.temp_path / "final-fit"
 
         save_final_fit(fitted, target)
@@ -285,8 +287,10 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
         self.assertEqual(restored.calibrators, candidate.calibrators)
 
     def test_final_fit_rejects_a_tampered_model_binary(self):
-        candidate = run_development_training(self.config, predictive_fixture(), self._split())
-        fitted = fit_final_candidate(predictive_fixture(), self._split(), candidate, frozen_model_sha=candidate.frozen_model_sha256)
+        dataset = predictive_fixture(symbols_per_date=300)
+        split = sealed_split_fixture(symbols_per_date=300)
+        candidate = run_development_training(self.config, dataset, split)
+        fitted = fit_final_candidate(dataset, split, candidate, frozen_model_sha=candidate.frozen_model_sha256)
         target = self.temp_path / "tampered-final-fit"
         save_final_fit(fitted, target)
         model_path = target / "rank_00.txt"
@@ -360,9 +364,9 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
                 self.config,
                 complete,
                 split,
-                candidate,
+                replace(candidate, selected_risk_alpha=candidate.selected_risk_alpha + 0.1),
                 frozen_model_sha=candidate.frozen_model_sha256,
-                final_fit=replace(fitted, selected_risk_alpha=fitted.selected_risk_alpha + 0.1),
+                final_fit=fitted,
             )
 
 
