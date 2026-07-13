@@ -858,6 +858,7 @@ def _ranker_oof(
     params,
     seeds,
     *,
+    ranking_label_col: str = "relevance_grade_10d",
     dataset_cache=None,
     checkpoint_dir: str | Path | None = None,
     checkpoint_key: str = "ranker",
@@ -878,6 +879,7 @@ def _ranker_oof(
             params,
             seeds,
             fold.fold,
+            ranking_label_col=ranking_label_col,
             checkpoint_contract=checkpoint_contract,
         )
         if checkpoint is not None and checkpoint.is_file():
@@ -887,10 +889,10 @@ def _ranker_oof(
             _report_progress(on_progress, checkpoint_key, fold.fold, progress_total or len(split_plan.walk_forward), status="reused")
             continue
         fit_train, fit_valid = _inner_time_split(train)
-        cache_key = (tuple(features), int(fold.fold))
+        cache_key = (tuple(features), int(fold.fold), ranking_label_col)
         cached = None if dataset_cache is None else dataset_cache.get(cache_key)
         if cached is None:
-            cached = _build_ranker_datasets(fit_train, fit_valid, features)
+            cached = _build_ranker_datasets(fit_train, fit_valid, features, ranking_label_col=ranking_label_col)
             if dataset_cache is not None:
                 dataset_cache[cache_key] = cached
         train_set, validation_sets = cached
@@ -902,6 +904,7 @@ def _ranker_oof(
                 params,
                 seed,
                 fit_valid,
+                ranking_label_col=ranking_label_col,
                 train_set=train_set,
                 validation_sets=validation_sets,
             )
@@ -923,6 +926,7 @@ def _unseen_stock_oof(
     params,
     seeds,
     *,
+    ranking_label_col: str = "relevance_grade_10d",
     dataset_cache=None,
     checkpoint_dir: str | Path | None = None,
     checkpoint_key: str = "unseen-stocks",
@@ -949,6 +953,7 @@ def _unseen_stock_oof(
             params,
             seeds,
             fold.fold,
+            ranking_label_col=ranking_label_col,
             checkpoint_contract=checkpoint_contract,
         )
         if checkpoint is not None and checkpoint.is_file():
@@ -958,10 +963,10 @@ def _unseen_stock_oof(
             _report_progress(on_progress, checkpoint_key, fold.fold, len(split_plan.walk_forward), status="reused")
             continue
         fit_train, fit_valid = _inner_time_split(train)
-        cache_key = ("C_dev_unseen", tuple(features), int(fold.fold))
+        cache_key = ("C_dev_unseen", tuple(features), int(fold.fold), ranking_label_col)
         cached = None if dataset_cache is None else dataset_cache.get(cache_key)
         if cached is None:
-            cached = _build_ranker_datasets(fit_train, fit_valid, features)
+            cached = _build_ranker_datasets(fit_train, fit_valid, features, ranking_label_col=ranking_label_col)
             if dataset_cache is not None:
                 dataset_cache[cache_key] = cached
         train_set, validation_sets = cached
@@ -973,6 +978,7 @@ def _unseen_stock_oof(
                 params,
                 seed,
                 fit_valid,
+                ranking_label_col=ranking_label_col,
                 train_set=train_set,
                 validation_sets=validation_sets,
             )
@@ -1014,6 +1020,7 @@ def _fold_checkpoint_path(
     seeds: tuple[int, ...],
     fold: int,
     *,
+    ranking_label_col: str = "relevance_grade_10d",
     checkpoint_contract: str | None = None,
 ) -> Path | None:
     if checkpoint_dir is None:
@@ -1025,6 +1032,8 @@ def _fold_checkpoint_path(
         "seeds": list(seeds),
         "checkpoint_contract": checkpoint_contract,
     }
+    if ranking_label_col != "relevance_grade_10d":
+        payload["ranking_label_col"] = ranking_label_col
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()[:16]
     root = Path(checkpoint_dir)
     root.mkdir(parents=True, exist_ok=True)
@@ -1152,23 +1161,27 @@ def _fold_data(data, fold):
     return train, valid
 
 
-def _build_ranker_datasets(train, valid, features):
+def _build_ranker_datasets(train, valid, features, *, ranking_label_col: str = "relevance_grade_10d"):
     features = list(features)
+    if ranking_label_col not in train:
+        raise ValueError(f"ranker training label is missing: {ranking_label_col}")
     ordered = train.sort_values(["trade_date", "symbol"], kind="stable")
     groups = ordered.groupby("trade_date", sort=True).size().tolist()
     train_set = lgb.Dataset(
         ordered[features],
-        label=pd.to_numeric(ordered["relevance_grade_10d"], errors="coerce").fillna(0),
+        label=pd.to_numeric(ordered[ranking_label_col], errors="coerce").fillna(0),
         group=groups,
         free_raw_data=False,
     )
     validation_sets = []
     if valid is not None and not valid.empty:
+        if ranking_label_col not in valid:
+            raise ValueError(f"ranker validation label is missing: {ranking_label_col}")
         validation = valid.sort_values(["trade_date", "symbol"], kind="stable")
         validation_sets = [
             lgb.Dataset(
                 validation[features],
-                label=pd.to_numeric(validation["relevance_grade_10d"], errors="coerce").fillna(0),
+                label=pd.to_numeric(validation[ranking_label_col], errors="coerce").fillna(0),
                 group=validation.groupby("trade_date", sort=True).size().tolist(),
                 reference=train_set,
                 free_raw_data=False,
@@ -1180,10 +1193,22 @@ def _build_ranker_datasets(train, valid, features):
     return train_set, validation_sets
 
 
-def _train_ranker(train, features, params, seed, valid=None, *, train_set=None, validation_sets=None):
+def _train_ranker(
+    train,
+    features,
+    params,
+    seed,
+    valid=None,
+    *,
+    ranking_label_col: str = "relevance_grade_10d",
+    train_set=None,
+    validation_sets=None,
+):
     features = list(features)
     if train_set is None:
-        train_set, default_validation_sets = _build_ranker_datasets(train, valid, features)
+        train_set, default_validation_sets = _build_ranker_datasets(
+            train, valid, features, ranking_label_col=ranking_label_col
+        )
         validation_sets = default_validation_sets
     validation_sets = validation_sets or []
     model = lgb.train(
