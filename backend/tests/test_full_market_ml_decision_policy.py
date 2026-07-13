@@ -8,6 +8,7 @@ from app.evaluation.full_market_ml.decision_policy import (
     DecisionPolicySpec,
     apply_decision_policy,
     derive_confidence_threshold,
+    evaluate_policy_metrics,
 )
 
 
@@ -76,6 +77,14 @@ class FullMarketMLDecisionPolicyTests(unittest.TestCase):
         output = apply_decision_policy(predictions, DecisionPolicySpec(score_mode="combined"))
 
         self.assertEqual(output.groupby("trade_date")["risk_eligible"].sum().tolist(), [7, 7])
+
+    def test_policy_metrics_report_top5_mean_and_median_return(self):
+        predictions = apply_decision_policy(self._predictions(), DecisionPolicySpec(score_mode="success"))
+
+        metrics = evaluate_policy_metrics(predictions, score_col="policy_score", eligible_col="risk_eligible")
+
+        self.assertIn("top5_mean_return", metrics)
+        self.assertIn("top5_median_return", metrics)
 
 
 if __name__ == "__main__":

@@ -154,7 +154,13 @@ def _topk_metrics(rows: pd.DataFrame, *, score_col: str, eligible_col: str | Non
     selected_rows = rows if eligible_col is None else rows.loc[rows[eligible_col].eq(True)]
     selected = _daily_topk(selected_rows, score_col)
     if selected.empty:
-        return {"precision_at_5": 0.0, "ndcg_at_10": 0.0, "top5_median_return": 0.0, "severe_rate": 1.0}
+        return {
+            "precision_at_5": 0.0,
+            "ndcg_at_10": 0.0,
+            "top5_mean_return": 0.0,
+            "top5_median_return": 0.0,
+            "severe_rate": 1.0,
+        }
     ndcgs = []
     for trade_date, current in rows.groupby("trade_date", sort=True):
         eligible = selected_rows.loc[selected_rows["trade_date"].eq(trade_date)].sort_values(
@@ -170,10 +176,12 @@ def _topk_metrics(rows: pd.DataFrame, *, score_col: str, eligible_col: str | Non
         dcg = float(np.sum((2**grades - 1) / discounts))
         idcg = float(np.sum((2**ideal - 1) / discounts))
         ndcgs.append(dcg / idcg if idcg else 0.0)
+    selected_returns = pd.to_numeric(selected["target_clipped_return_10d"], errors="coerce")
     return {
         "precision_at_5": float(selected["label_actionable_positive_10d"].eq(True).mean()),
         "ndcg_at_10": float(np.mean(ndcgs)) if ndcgs else 0.0,
-        "top5_median_return": float(pd.to_numeric(selected["target_clipped_return_10d"], errors="coerce").median()),
+        "top5_mean_return": float(selected_returns.mean()),
+        "top5_median_return": float(selected_returns.median()),
         "severe_rate": float(selected["label_severe_negative_10d_v2"].eq(True).mean()),
     }
 

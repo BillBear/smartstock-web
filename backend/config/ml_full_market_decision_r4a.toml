@@ -1,0 +1,143 @@
+[run]
+id = "ml_decision_rebuild_20260713_r1"
+minimum_free_disk_gb = 50
+
+[labels]
+horizon = 10
+actionable_return_floor = 0.03
+actionable_mae_floor = -0.06
+severe_return_ceiling = -0.05
+severe_mae_ceiling = -0.08
+clipped_return_floor = -0.15
+clipped_return_ceiling = 0.20
+
+[models]
+families = ["logistic", "lightgbm_shallow"]
+seeds = [17, 42, 73]
+
+[policy]
+risk_quantile_gate = 0.70
+
+[bootstrap]
+iterations = 1000
+block_length = 10
+seed = 42
+
+[budgets]
+verify_assets = 900
+build_decision_labels = 2700
+build_r4a_features = 5400
+feature_audit = 3600
+nested_a_c_oof = 2700
+policy_evaluation = 1800
+gate_decision = 900
+write_model_card = 900
+
+[feature_blocks]
+momentum_trend = [
+  "adjusted_return_1d",
+  "adjusted_return_5d",
+  "adjusted_return_20d",
+  "adjusted_return_60d",
+  "adjusted_return_5d_rank",
+  "adjusted_return_20d_rank",
+  "price_to_sma_5d",
+  "price_to_sma_20d",
+  "price_to_sma_60d",
+  "sma_5d_to_sma_20d",
+  "sma_20d_to_sma_60d",
+  "macd_line",
+  "macd_signal_gap",
+]
+amount_turnover = [
+  "amount_log",
+  "amount_log_rank",
+  "amount_ratio_5d",
+  "amount_ratio_20d",
+  "amount_change_1d",
+  "volume_ratio_5d",
+  "volume_ratio_20d",
+  "turnover_rate",
+  "turnover_rate_rank",
+  "turnover_ratio_20d",
+]
+risk_path = [
+  "realized_volatility_5d",
+  "realized_volatility_20d",
+  "downside_volatility_20d",
+  "atr_pct_5d",
+  "atr_pct_14d",
+  "range_mean_5d",
+  "range_mean_20d",
+  "adjusted_high_low_range",
+  "adjusted_close_to_high",
+]
+valuation_size = [
+  "total_mv_log",
+  "total_mv_log_rank",
+  "circ_mv_log",
+  "float_market_value_ratio",
+  "pe_rank",
+  "pb_rank",
+]
+market_industry = [
+  "market_positive_breadth_1d",
+  "market_above_sma20_rate",
+  "market_cross_section_return_median_1d",
+  "market_cross_section_return_median_5d",
+  "market_cross_section_return_median_20d",
+  "market_return_dispersion_5d",
+  "market_return_dispersion_20d",
+  "market_limit_up_rate",
+  "market_limit_down_rate",
+  "small_minus_large_return_5d",
+  "small_minus_large_return_20d",
+  "industry_return_concentration_5d",
+  "industry_return_concentration_20d",
+  "industry_signal_return_median_5d",
+  "industry_signal_return_median_20d",
+  "industry_strength_rank_5d",
+  "industry_strength_rank_20d",
+  "stock_excess_vs_industry_5d",
+  "stock_excess_vs_industry_20d",
+  "industry_positive_breadth_1d",
+  "industry_above_sma20_rate",
+  "industry_amount_acceleration_5d",
+  "industry_signal_turnover_median",
+  "industry_limit_up_rate",
+  "industry_limit_down_rate",
+]
+interactions = [
+  "return_5d_x_amount_ratio_5d",
+  "return_20d_x_turnover_rank",
+  "return_60d_x_volatility_20d",
+  "close_to_high_x_amount_ratio_5d",
+  "reversal_5d_x_trend_60d",
+  "amount_turnover_joint_decile",
+  "amount_rank_u_shape",
+  "turnover_rank_u_shape",
+  "atr_rank_u_shape",
+  "return_60d_rank_u_shape",
+]
+moneyflow = [
+  "main_net_inflow_ratio",
+  "main_net_inflow_ratio_rank",
+  "moneyflow_5d_mean",
+  "moneyflow_20d_mean",
+  "small_net_flow_ratio",
+  "medium_net_flow_ratio",
+  "large_net_flow_ratio",
+  "extra_large_net_flow_ratio",
+  "small_net_flow_persistence_5d",
+  "small_net_flow_persistence_20d",
+  "medium_net_flow_persistence_5d",
+  "medium_net_flow_persistence_20d",
+  "large_net_flow_persistence_5d",
+  "large_net_flow_persistence_20d",
+  "extra_large_net_flow_persistence_5d",
+  "extra_large_net_flow_persistence_20d",
+  "large_minus_small_flow_ratio",
+  "price_flow_divergence_5d",
+  "price_flow_divergence_20d",
+  "flow_minus_industry_median",
+]
