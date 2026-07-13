@@ -224,6 +224,25 @@ def write_stage_completion_manifest(
     return path
 
 
+def write_decision_research_closure(target: str | Path, closure: Mapping[str, Any]) -> Path:
+    """Persist a path-free terminal research decision as an atomic JSON artifact."""
+    payload = dict(closure)
+    allowed = {
+        "research_only_candidate_frozen",
+        "research_only_risk_candidate",
+        "research_only_failed_gate",
+    }
+    if payload.get("status") not in allowed:
+        raise ValueError("unsupported decision research closure status")
+    if payload.get("final_holdout_used") is not False:
+        raise ValueError("decision research closure must keep final holdout sealed")
+    if _contains_runtime_path(payload):
+        raise ValueError("decision research closure cannot contain a mutable runtime path")
+    path = Path(target)
+    _write_json_atomic(path, payload)
+    return path
+
+
 def verify_stage_completion_manifest(
     stage_root: str | Path,
     *,
@@ -249,6 +268,16 @@ def verify_stage_completion_manifest(
 def _feature_schema(root: Path) -> Any:
     path = root / "panel" / "stage=full-build" / "feature_contract.json"
     return _load_json(path) if path.is_file() else {}
+
+
+def _contains_runtime_path(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        return any(_contains_runtime_path(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_runtime_path(item) for item in value)
+    if isinstance(value, str):
+        return value.startswith("/") or "worktrees/" in value
+    return False
 
 
 def _backup_relative_asset_path(source_path: Path) -> str | None:

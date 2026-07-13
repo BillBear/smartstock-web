@@ -7,6 +7,8 @@ from app.evaluation.full_market_ml.trainer import (
     FIXED_RANKER_GRID,
     FIXED_SEEDS,
     fit_final_candidate,
+    close_decision_research,
+    freeze_decision_candidate,
     load_final_fit,
     _classifier_oof,
     _development_checkpoint_contract,
@@ -39,6 +41,59 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
         portfolio = _portfolio_or_empty(dataset)
 
         self.assertEqual(portfolio["closed_trade_count"], 10)
+
+    def test_failed_rounds_cannot_freeze_positive_ranker(self):
+        failed = {
+            "round_id": "r4a",
+            "status": "research_only_failed_gate",
+            "failed_gates": ["precision"],
+        }
+
+        with self.assertRaisesRegex(PermissionError, "development gate"):
+            freeze_decision_candidate(failed, failed)
+
+    def test_frozen_manifest_contains_reproducible_contract_without_runtime_path(self):
+        passing = {
+            "round_id": "r4b",
+            "status": "r4a_passed_development_gate",
+            "dataset_id": "fm-fixture",
+            "code_sha256": "code-sha",
+            "split_sha256": "split-sha",
+            "label_contract": {"horizon": 10},
+            "feature_schema": ["amount_log"],
+            "model_contract": {"family": "logistic"},
+            "policy_contract": {"mode": "combined"},
+            "risk_gate": 0.70,
+            "confidence_threshold": None,
+            "calibration": {"display_allowed": False},
+            "seeds": [17, 42, 73],
+            "oof_artifact_hashes": {"a": "a-sha", "c": "c-sha"},
+            "metrics": {"precision_at_5": 0.66},
+            "gate_results": {"failed_gates": []},
+            "run_root": "/tmp/worktrees/mutable-run",
+        }
+
+        manifest = freeze_decision_candidate(
+            {"round_id": "r4a", "status": "research_only_failed_gate"}, passing
+        )
+
+        self.assertEqual(manifest["selected_round"], "r4b")
+        self.assertEqual(manifest["dataset_id"], "fm-fixture")
+        self.assertFalse(manifest["final_holdout_used"])
+        self.assertNotIn("worktrees", __import__("json").dumps(manifest))
+
+    def test_risk_head_requires_independent_a_and_c_validation(self):
+        failed = {"round_id": "r4a", "status": "research_only_failed_gate"}
+        weak_risk = {
+            "A": {"roc_auc": 0.61, "brier": 0.22, "prevalence_brier": 0.23, "deciles_monotonic": False},
+            "C": {"roc_auc": 0.61, "brier": 0.22, "prevalence_brier": 0.23, "deciles_monotonic": False},
+        }
+
+        closure = close_decision_research(failed, failed, risk_validation=weak_risk)
+
+        self.assertEqual(closure["status"], "research_only_failed_gate")
+        self.assertEqual(closure["outcome"], "no_useful_ml_candidate")
+        self.assertEqual(closure["risk_head_status"], "diagnostic_only")
 
     def test_group_ablation_is_leave_one_out_with_frozen_candidate_params(self):
         dataset = predictive_fixture(symbols_per_date=220)

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import lightgbm as lgb
 import numpy as np
@@ -49,6 +49,117 @@ PRE_REGISTERED_RISK_ALPHA = 0.2
 _GROUP_SEQUENCE = ("momentum", "amount_turnover", "technical", "risk", "market_industry", "moneyflow")
 _GROUPS = {spec.name: spec.feature_group for spec in (*CORE_FEATURE_SPECS, *OPTIONAL_FEATURE_SPECS)}
 _LOADED_FINAL_FITS: weakref.WeakKeyDictionary["FinalFit", tuple[Path, str]] = weakref.WeakKeyDictionary()
+
+
+def freeze_decision_candidate(
+    r4a_evidence: Mapping[str, Any],
+    r4b_evidence: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Freeze only a development-gate-passing research contract, never runtime paths."""
+    passing_status = "r4a_passed_development_gate"
+    selected = next(
+        (
+            evidence
+            for evidence in (r4a_evidence, r4b_evidence)
+            if evidence is not None and evidence.get("status") == passing_status
+        ),
+        None,
+    )
+    if selected is None:
+        raise PermissionError("positive ranker cannot be frozen before the development gate passes")
+    required = (
+        "round_id",
+        "dataset_id",
+        "code_sha256",
+        "split_sha256",
+        "label_contract",
+        "feature_schema",
+        "model_contract",
+        "policy_contract",
+        "risk_gate",
+        "confidence_threshold",
+        "calibration",
+        "seeds",
+        "oof_artifact_hashes",
+        "metrics",
+        "gate_results",
+    )
+    missing = [name for name in required if name not in selected]
+    if missing:
+        raise ValueError("passing candidate evidence missing: " + ", ".join(missing))
+    if selected.get("final_holdout_used") is True:
+        raise ValueError("development candidate evidence cannot claim final holdout use")
+    contract = {
+        "schema_version": 1,
+        "status": "research_only_candidate_frozen",
+        "selected_round": str(selected["round_id"]),
+        **{name: selected[name] for name in required if name != "round_id"},
+        "final_holdout_used": False,
+        "production_allowed": False,
+    }
+    contract["candidate_id"] = "ml_decision_" + hashlib.sha256(
+        json.dumps(contract, sort_keys=True, separators=(",", ":"), default=str).encode()
+    ).hexdigest()[:20]
+    return contract
+
+
+def close_decision_research(
+    r4a_evidence: Mapping[str, Any],
+    r4b_evidence: Mapping[str, Any] | None,
+    *,
+    risk_validation: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Return exactly one conservative research outcome after the two registered rounds."""
+    try:
+        candidate = freeze_decision_candidate(r4a_evidence, r4b_evidence)
+    except PermissionError:
+        candidate = None
+    if candidate is not None:
+        return {
+            "schema_version": 1,
+            "status": "research_only_candidate_frozen",
+            "outcome": "positive_ranking_candidate",
+            "candidate_id": candidate["candidate_id"],
+            "selected_round": candidate["selected_round"],
+            "risk_head_status": "included_in_frozen_candidate",
+            "final_holdout_used": False,
+            "production_allowed": False,
+        }
+    risk_passed = _risk_head_independently_validated(risk_validation)
+    return {
+        "schema_version": 1,
+        "status": "research_only_risk_candidate" if risk_passed else "research_only_failed_gate",
+        "outcome": "risk_only_candidate" if risk_passed else "no_useful_ml_candidate",
+        "risk_head_status": "research_only_risk_candidate" if risk_passed else "diagnostic_only",
+        "rounds": [
+            {
+                "round_id": str(evidence.get("round_id", name)),
+                "status": str(evidence.get("status", "unknown")),
+                "failed_gates": list(evidence.get("failed_gates", ())),
+            }
+            for name, evidence in (("r4a", r4a_evidence), ("r4b", r4b_evidence or {}))
+        ],
+        "final_holdout_used": False,
+        "production_allowed": False,
+    }
+
+
+def _risk_head_independently_validated(
+    evidence: Mapping[str, Mapping[str, Any]] | None,
+) -> bool:
+    if not evidence:
+        return False
+    for scope in ("A", "C"):
+        metrics = evidence.get(scope)
+        if not metrics:
+            return False
+        if float(metrics.get("roc_auc", 0.0)) < 0.65:
+            return False
+        if float(metrics.get("brier", 1.0)) >= float(metrics.get("prevalence_brier", 0.0)):
+            return False
+        if metrics.get("deciles_monotonic") is not True:
+            return False
+    return True
 
 
 @dataclass(frozen=True)

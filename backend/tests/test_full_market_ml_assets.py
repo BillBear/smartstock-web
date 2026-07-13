@@ -14,6 +14,7 @@ from app.evaluation.full_market_ml.assets import (
     verify_dataset_backup,
     verify_stage_completion_manifest,
     write_stage_completion_manifest,
+    write_decision_research_closure,
 )
 from tests.test_full_market_ml_collector import FullMarketMLTestCase
 
@@ -50,6 +51,23 @@ class FullMarketMLAssetTests(FullMarketMLTestCase):
         self.assertEqual(first["split_sha256"], "split-sha")
         self.assertEqual(first["assets"]["dataset"]["sha256"], second["assets"]["dataset"]["sha256"])
         self.assertEqual(first["environment"]["python_version"], "3.11")
+
+    def test_research_closure_is_atomic_and_rejects_mutable_runtime_paths(self):
+        target = self.temp_path / "closure.json"
+        closure = {
+            "status": "research_only_failed_gate",
+            "outcome": "no_useful_ml_candidate",
+            "final_holdout_used": False,
+        }
+
+        written = write_decision_research_closure(target, closure)
+
+        self.assertEqual(json.loads(written.read_text(encoding="utf-8")), closure)
+        with self.assertRaisesRegex(ValueError, "runtime path"):
+            write_decision_research_closure(
+                self.temp_path / "invalid.json",
+                {**closure, "run_root": "/tmp/worktrees/run"},
+            )
 
     def test_backup_copies_required_assets_and_verifies_manifest(self):
         runtime = self._runtime()
