@@ -1,0 +1,10 @@
+# Reproducible Python 3.13 research and full-backend verification environment.
+-r requirements-ml.txt
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+pydantic==2.11.7
+pydantic-settings==2.10.1
+akshare==1.18.64
+python-multipart==0.0.20
+aiofiles==24.1.0
+SQLAlchemy==2.0.38
