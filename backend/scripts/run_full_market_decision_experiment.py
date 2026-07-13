@@ -69,6 +69,7 @@ class DecisionExperimentRunner:
         self.run_root = Path(run_root).resolve()
         self.config = tomllib.loads(self.config_path.read_text(encoding="utf-8"))
         self.config_sha256 = _file_sha256(self.config_path)
+        self.code_sha256 = _research_code_sha256()
         self.asset_manifest = self.asset_root / "asset_manifest.json"
         if not self.asset_manifest.is_file():
             raise FileNotFoundError(f"asset manifest is missing: {self.asset_manifest}")
@@ -91,6 +92,7 @@ class DecisionExperimentRunner:
             upstream[name] = state
         inputs = {
             "config_sha256": self.config_sha256,
+            "code_sha256": self.code_sha256,
             "asset_manifest_sha256": self.asset_manifest_sha256,
             **{
                 f"upstream:{name}": _json_sha256(state)
@@ -461,6 +463,23 @@ def _build_r4a_features(config: dict[str, Any], asset_root: Path, run_root: Path
         destination.parent.mkdir(parents=True, exist_ok=True)
         compact.to_parquet(destination, index=False)
         manifest_entries.append(_artifact_entry(destination, output))
+    warmup_columns = ("adjusted_return_60d", "price_to_sma_60d", "sma_20d_to_sma_60d")
+    warmup_rows = pd.concat(
+        [pd.read_parquet(path, columns=["trade_date", *warmup_columns]) for path in sorted(shard_root.glob("shard=*/data.parquet"))],
+        ignore_index=True,
+    )
+    model_dates = _dates_meeting_coverage(warmup_rows, warmup_columns, threshold=0.95)
+    model_dates_path = output / "model_dates.json"
+    _write_json_atomic(
+        model_dates_path,
+        {
+            "dates": list(model_dates),
+            "date_count": len(model_dates),
+            "minimum_signal_feature_coverage": 0.95,
+            "coverage_features": list(warmup_columns),
+            "target_columns_read": [],
+        },
+    )
     manifest_path = output / "feature_manifest.json"
     _write_json_atomic(
         manifest_path,
@@ -471,7 +490,11 @@ def _build_r4a_features(config: dict[str, Any], asset_root: Path, run_root: Path
             "development_only": True,
         },
     )
-    return {"feature_manifest": str(manifest_path), "feature_shard_root": str(shard_root)}
+    return {
+        "feature_manifest": str(manifest_path),
+        "feature_shard_root": str(shard_root),
+        "model_dates": str(model_dates_path),
+    }
 
 
 def _run_feature_audit(config: dict[str, Any], asset_root: Path, run_root: Path, _stage: str) -> Mapping[str, Any]:
@@ -848,7 +871,22 @@ def _read_feature_shards(run_root: Path, columns: list[str] | tuple[str, ...]):
     if not paths:
         raise FileNotFoundError("R4A feature shards are missing")
     unique_columns = list(dict.fromkeys(columns))
-    return pd.concat([pd.read_parquet(path, columns=unique_columns) for path in paths], ignore_index=True)
+    rows = pd.concat([pd.read_parquet(path, columns=unique_columns) for path in paths], ignore_index=True)
+    model_dates_path = _artifact_dir(run_root, "build-r4a-features") / "model_dates.json"
+    if not model_dates_path.is_file():
+        raise FileNotFoundError("model date coverage contract is missing")
+    model_dates = set(json.loads(model_dates_path.read_text(encoding="utf-8"))["dates"])
+    return rows.loc[rows["trade_date"].isin(model_dates)].reset_index(drop=True)
+
+
+def _dates_meeting_coverage(rows, features: tuple[str, ...], *, threshold: float) -> tuple[str, ...]:
+    if not 0.0 < float(threshold) <= 1.0:
+        raise ValueError("coverage threshold must be in (0, 1]")
+    missing = sorted({"trade_date", *features} - set(rows.columns))
+    if missing:
+        raise ValueError("coverage rows missing columns: " + ", ".join(missing))
+    coverage = rows.groupby("trade_date", sort=True)[list(features)].agg(lambda values: values.notna().mean())
+    return tuple(str(value) for value in coverage.index[coverage.ge(float(threshold)).all(axis=1)])
 
 
 def _bootstrap_decision_uplift(rows, *, iterations: int, block_length: int, seed: int) -> dict[str, Any]:
@@ -967,6 +1005,23 @@ def _file_sha256(path: Path) -> str:
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
+    return digest.hexdigest()
+
+
+def _research_code_sha256() -> str:
+    """Hash the executable research pipeline, including uncommitted source edits."""
+    backend_root = Path(__file__).resolve().parents[1]
+    source_paths = [Path(__file__).resolve()]
+    source_paths.extend(
+        sorted((backend_root / "app" / "evaluation" / "full_market_ml").rglob("*.py"))
+    )
+    digest = hashlib.sha256()
+    for path in sorted(set(source_paths)):
+        relative = path.relative_to(backend_root).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
     return digest.hexdigest()
 
 

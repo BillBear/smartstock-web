@@ -11,6 +11,7 @@ from scripts.run_full_market_decision_experiment import (
     decide_r4a_gate,
     _load_moneyflow_frame,
     _portfolio_ready_rows,
+    _dates_meeting_coverage,
 )
 
 
@@ -123,7 +124,30 @@ class FullMarketMLDecisionCLITests(unittest.TestCase):
             runner.run("verify-assets")
             runner.run("verify-assets", resume=True)
 
+            runner.code_sha256 = "changed-code-contract"
+            with self.assertRaises(ValueError):
+                runner.run("verify-assets", resume=True)
+
         self.assertEqual(calls, ["verify-assets"])
+
+    def test_model_dates_exclude_signal_feature_warmup_without_reading_labels(self):
+        import pandas as pd
+
+        rows = pd.DataFrame(
+            {
+                "trade_date": ["2025-01-02"] * 4 + ["2025-01-03"] * 4,
+                "adjusted_return_60d": [None, None, None, 0.1, 0.1, 0.2, 0.3, 0.4],
+                "price_to_sma_60d": [None, None, None, 0.1, 0.1, 0.2, 0.3, 0.4],
+            }
+        )
+
+        dates = _dates_meeting_coverage(
+            rows,
+            ("adjusted_return_60d", "price_to_sma_60d"),
+            threshold=0.95,
+        )
+
+        self.assertEqual(dates, ("2025-01-03",))
 
     def test_moneyflow_loader_does_not_conflict_with_hive_date_type_inference(self):
         import pandas as pd
