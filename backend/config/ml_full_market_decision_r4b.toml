@@ -3,7 +3,7 @@ id = "ml_decision_rebuild_20260713_r4b"
 minimum_free_disk_gb = 50
 
 [fundamentals]
-asset_id = "r4b_fundamentals_20260713_v1"
+asset_id = "r4b_fundamentals_20260713_v2"
 minimum_coverage = 0.70
 
 [labels]

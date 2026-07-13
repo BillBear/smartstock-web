@@ -65,6 +65,31 @@ class PointInTimeJoinTests(unittest.TestCase):
         self.assertEqual(joined["roe"].item(), 0.10)
         self.assertEqual(joined["report_end_date"].item(), "2025-03-31")
 
+    def test_same_date_correction_uses_initial_disclosure_for_historical_signal(self):
+        signals = pd.DataFrame([{"symbol": "000001", "trade_date": "2025-05-01"}])
+        reports = pd.DataFrame(
+            [
+                {
+                    "symbol": "000001",
+                    "ann_date": "2025-04-30",
+                    "end_date": "2025-03-31",
+                    "update_flag": "0",
+                    "roe": 0.10,
+                },
+                {
+                    "symbol": "000001",
+                    "ann_date": "2025-04-30",
+                    "end_date": "2025-03-31",
+                    "update_flag": "1",
+                    "roe": 0.99,
+                },
+            ]
+        )
+
+        joined = asof_announcement_join(signals, reports)
+
+        self.assertEqual(joined["roe"].item(), 0.10)
+
 
 if __name__ == "__main__":
     unittest.main()

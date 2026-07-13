@@ -24,6 +24,20 @@ CORE_STATIC_ENDPOINTS = ("namechange",)
 INDEX_CODES = ("000001.SH", "000300.SH", "000905.SH", "399006.SZ")
 RETRY_DELAYS_SECONDS = (1, 2, 4, 8)
 POINT_IN_TIME_ENDPOINTS = ("fina_indicator", "forecast", "express")
+POINT_IN_TIME_FIELDS = {
+    "fina_indicator": (
+        "ts_code,ann_date,end_date,update_flag,roe,grossprofit_margin,netprofit_margin,"
+        "debt_to_assets,current_ratio,q_ocf_to_sales,tr_yoy,netprofit_yoy,ocf_yoy"
+    ),
+    "forecast": (
+        "ts_code,ann_date,end_date,type,p_change_min,p_change_max,net_profit_min,"
+        "net_profit_max,last_parent_net,first_ann_date,update_flag"
+    ),
+    "express": (
+        "ts_code,ann_date,end_date,revenue,operate_profit,total_profit,n_income,"
+        "total_assets,total_hldr_eqy_exc_min_int,diluted_roe,yoy_net_profit,update_flag"
+    ),
+}
 
 
 def collect_point_in_time_fundamentals(
@@ -50,6 +64,7 @@ def collect_point_in_time_fundamentals(
         "start_date": _compact(start_date),
         "end_date": _compact(end_date),
         "endpoints": list(requested_endpoints),
+        "fields": {endpoint: POINT_IN_TIME_FIELDS[endpoint] for endpoint in requested_endpoints},
     }
     manifest_path_value = root / "collection_manifest.json"
     if manifest_path_value.is_file():
@@ -88,6 +103,7 @@ def collect_point_in_time_fundamentals(
                         ts_code=symbol,
                         start_date=contract["start_date"],
                         end_date=contract["end_date"],
+                        fields=contract["fields"][endpoint],
                     ),
                     pacing_seconds,
                 )

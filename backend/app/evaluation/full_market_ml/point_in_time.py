@@ -78,6 +78,13 @@ def _dates(values: pd.Series) -> pd.Series:
 def _latest_report_timeline(reports: pd.DataFrame, symbol_col: str) -> pd.DataFrame:
     """Materialize changes to the latest known report period as announcements arrive."""
     snapshots = []
+    reports = reports.copy()
+    if "update_flag" in reports:
+        reports["_initial_disclosure"] = reports["update_flag"].astype("string").eq("0").astype(int)
+        reports = reports.sort_values(
+            [symbol_col, "_announcement_date", "_report_end_sort", "_initial_disclosure", "_source_order"],
+            kind="stable",
+        ).drop_duplicates([symbol_col, "_announcement_date", "_report_end_sort"], keep="last")
     ordered = reports.sort_values(
         [symbol_col, "_announcement_date", "_report_end_sort", "_source_order"],
         kind="stable",
@@ -96,4 +103,4 @@ def _latest_report_timeline(reports: pd.DataFrame, symbol_col: str) -> pd.DataFr
             selected_source_order = selected["_source_order"]
     if not snapshots:
         return reports.iloc[0:0].copy()
-    return pd.DataFrame(snapshots).reset_index(drop=True)
+    return pd.DataFrame(snapshots).drop(columns="_initial_disclosure", errors="ignore").reset_index(drop=True)
