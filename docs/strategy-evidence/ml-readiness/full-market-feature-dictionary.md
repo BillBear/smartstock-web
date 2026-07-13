@@ -99,3 +99,19 @@ This read-only research contract contains only signal-day and historical inputs.
 | `market_index_volatility_20d` | market_context | std(index return, 20) | index_daily | raw | 21 | omit when unavailable | time_series |
 | `index_turnover_ratio_20d` | market_context | index turnover / mean(index turnover, 20) | index_dailybasic | raw | 20 | omit when unavailable | time_series |
 | `northbound_net_flow` | market_context | northbound_net_flow | moneyflow_hsgt | raw | 0 | omit when unavailable | time_series |
+
+## Decision Label Contract
+
+These columns are outcomes, never model features. They are derived from the
+canonical next-open execution result after commission and slippage. The signal
+date is excluded from every forward path.
+
+| Name | Definition | Null/ineligible policy | Role |
+| --- | --- | --- | --- |
+| `label_actionable_positive_10d` | Eligible and next-open tradeable; net 10-session return at least 3%; MAE at least -6%; no stop-loss-before-take-profit, ambiguous path, or future limit-down event | False for incomplete, ineligible, untradeable, or ambiguous rows | Primary classifier target |
+| `label_severe_negative_10d_v2` | Eligible and any of: net return at most -5%, MAE at most -8%, stop-loss before take-profit, or a future limit-down event | False for incomplete or ineligible rows | Risk classifier target |
+| `target_clipped_return_10d` | Canonical net return clipped to `[-15%, 20%]` | Null when canonical net return is null | Regression target |
+| `return_relevance_grade_10d_v2` | Fixed net-return bins: `<=0%=0`, `(0%,3%)=1`, `[3%,5%)=2`, `[5%,8%)=3`, `>=8%=4` | Null when canonical net return is null | NDCG relevance target |
+
+Daily percentile labels remain diagnostics only. They cannot replace these
+absolute labels because a daily top-decile stock may still lose money.
