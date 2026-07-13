@@ -115,6 +115,7 @@ class DecisionExperimentRunner:
         heartbeat = threading.Thread(target=self._heartbeat, args=(stage, stop), daemon=True)
         heartbeat.start()
         prior_alarm = self._start_timeout(stage)
+        prior_termination = self._start_termination_handler()
         try:
             output = dict(self.services[stage](self.config, self.asset_root, self.run_root, stage) or {})
             complete = self._state(stage, "complete", inputs, output, started_at=started, ended_at=_now())
@@ -132,6 +133,18 @@ class DecisionExperimentRunner:
             )
             self._write_state(stage, timeout)
             raise
+        except KeyboardInterrupt as error:
+            aborted = self._state(
+                stage,
+                "aborted",
+                inputs,
+                {},
+                started_at=started,
+                ended_at=_now(),
+                failure={"type": type(error).__name__, "message": str(error)},
+            )
+            self._write_state(stage, aborted)
+            raise
         except Exception as error:
             failed = self._state(
                 stage,
@@ -145,6 +158,7 @@ class DecisionExperimentRunner:
             self._write_state(stage, failed)
             raise
         finally:
+            self._stop_termination_handler(prior_termination)
             self._stop_timeout(prior_alarm)
             stop.set()
             heartbeat.join(timeout=max(1.0, self.heartbeat_interval_seconds * 2))
@@ -169,6 +183,24 @@ class DecisionExperimentRunner:
         signal.signal(signal.SIGALRM, raise_timeout)
         signal.setitimer(signal.ITIMER_REAL, timeout)
         return previous
+
+    @staticmethod
+    def _start_termination_handler():
+        if threading.current_thread() is not threading.main_thread() or not hasattr(signal, "SIGTERM"):
+            return None
+        previous = signal.getsignal(signal.SIGTERM)
+
+        def abort_stage(number, _frame):
+            raise KeyboardInterrupt(f"received signal {number}")
+
+        signal.signal(signal.SIGTERM, abort_stage)
+        return previous
+
+    @staticmethod
+    def _stop_termination_handler(previous) -> None:
+        if previous is None or not hasattr(signal, "SIGTERM"):
+            return
+        signal.signal(signal.SIGTERM, previous)
 
     @staticmethod
     def _stop_timeout(previous) -> None:

@@ -138,6 +138,7 @@ def _prepare_express(rows: pd.DataFrame | None) -> pd.DataFrame:
 
 def _normalise_reports(rows: pd.DataFrame) -> pd.DataFrame:
     result = rows.copy()
+    result["_source_order"] = range(len(result))
     if "symbol" not in result and "ts_code" in result:
         result["symbol"] = _symbols(result["ts_code"])
     elif "symbol" in result:
@@ -148,8 +149,15 @@ def _normalise_reports(rows: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("report rows missing columns: " + ", ".join(missing))
     result["ann_date"] = _date_text(result["ann_date"])
     result["end_date"] = _date_text(result["end_date"])
-    return result.loc[result.ann_date.notna() & result.end_date.notna()].sort_values(
-        ["symbol", "ann_date", "end_date"], kind="stable"
+    result = result.loc[result.ann_date.notna() & result.end_date.notna()].copy()
+    if "update_flag" in result:
+        result["_initial_disclosure"] = result["update_flag"].astype("string").eq("0").astype(int)
+        result = result.sort_values(
+            ["symbol", "ann_date", "end_date", "_initial_disclosure", "_source_order"],
+            kind="stable",
+        ).drop_duplicates(["symbol", "ann_date", "end_date"], keep="last")
+    return result.sort_values(["symbol", "ann_date", "end_date", "_source_order"], kind="stable").drop(
+        columns=["_initial_disclosure", "_source_order"], errors="ignore"
     ).reset_index(drop=True)
 
 

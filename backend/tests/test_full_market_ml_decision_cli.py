@@ -130,6 +130,35 @@ class FullMarketMLDecisionCLITests(unittest.TestCase):
 
         self.assertEqual(calls, ["verify-assets"])
 
+    def test_runner_records_aborted_state_when_stage_is_interrupted(self):
+        def interrupted(_config, _asset_root, _run_root, _stage):
+            raise KeyboardInterrupt("operator interrupted stage")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            asset_root = root / "assets"
+            asset_root.mkdir()
+            (asset_root / "asset_manifest.json").write_text(
+                '{"verification_status":"verified"}\n', encoding="utf-8"
+            )
+            config_path = root / "config.toml"
+            config_path.write_text('[run]\nid="fixture"\n', encoding="utf-8")
+            runner = DecisionExperimentRunner(
+                config_path,
+                asset_root,
+                root / "run",
+                services={stage: interrupted for stage in DECISION_STAGES},
+                heartbeat_interval_seconds=0.01,
+            )
+
+            with self.assertRaises(KeyboardInterrupt):
+                runner.run("verify-assets")
+
+            state = runner._read_state("verify-assets")
+            self.assertEqual(state["status"], "aborted")
+            self.assertEqual(state["failure"]["type"], "KeyboardInterrupt")
+            self.assertIsNotNone(state["ended_at"])
+
     def test_model_dates_exclude_signal_feature_warmup_without_reading_labels(self):
         import pandas as pd
 

@@ -60,6 +60,44 @@ class FundamentalFeatureTests(unittest.TestCase):
 
         pd.testing.assert_frame_equal(before, after)
 
+    def test_acceleration_uses_initial_value_when_prior_period_has_same_day_correction(self):
+        signals = pd.DataFrame([{"symbol": "000001", "trade_date": "2025-05-01"}])
+        fina = pd.DataFrame(
+            [
+                {
+                    "symbol": "000001",
+                    "ann_date": "2025-03-30",
+                    "end_date": "2024-12-31",
+                    "update_flag": "0",
+                    "tr_yoy": 10.0,
+                    "netprofit_yoy": 10.0,
+                    "ocf_yoy": 10.0,
+                },
+                {
+                    "symbol": "000001",
+                    "ann_date": "2025-03-30",
+                    "end_date": "2024-12-31",
+                    "update_flag": "1",
+                    "tr_yoy": 99.0,
+                    "netprofit_yoy": 99.0,
+                    "ocf_yoy": 99.0,
+                },
+                {
+                    "symbol": "000001",
+                    "ann_date": "2025-04-30",
+                    "end_date": "2025-03-31",
+                    "update_flag": "0",
+                    "tr_yoy": 20.0,
+                    "netprofit_yoy": 20.0,
+                    "ocf_yoy": 20.0,
+                },
+            ]
+        )
+
+        features = build_point_in_time_fundamental_features(signals, fina)
+
+        self.assertEqual(features["fundamental_revenue_yoy_acceleration"].item(), 10.0)
+
 
 if __name__ == "__main__":
     unittest.main()
