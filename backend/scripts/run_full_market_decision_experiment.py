@@ -529,7 +529,7 @@ def _build_r4a_features(config: dict[str, Any], asset_root: Path, run_root: Path
         destination.parent.mkdir(parents=True, exist_ok=True)
         compact.to_parquet(destination, index=False)
         manifest_entries.append(_artifact_entry(destination, output))
-    warmup_columns = ("adjusted_return_60d", "price_to_sma_60d", "sma_20d_to_sma_60d")
+    warmup_columns = _warmup_coverage_columns(required_columns)
     warmup_rows = pd.concat(
         [pd.read_parquet(path, columns=["trade_date", *warmup_columns]) for path in sorted(shard_root.glob("shard=*/data.parquet"))],
         ignore_index=True,
@@ -985,6 +985,15 @@ def _dates_meeting_coverage(rows, features: tuple[str, ...], *, threshold: float
         raise ValueError("coverage rows missing columns: " + ", ".join(missing))
     coverage = rows.groupby("trade_date", sort=True)[list(features)].agg(lambda values: values.notna().mean())
     return tuple(str(value) for value in coverage.index[coverage.ge(float(threshold)).all(axis=1)])
+
+
+def _warmup_coverage_columns(compact_schema) -> tuple[str, ...]:
+    preferred = ("adjusted_return_60d", "price_to_sma_60d", "sma_20d_to_sma_60d")
+    schema = set(compact_schema)
+    available = tuple(column for column in preferred if column in schema)
+    if "adjusted_return_60d" not in available:
+        raise ValueError("compact feature schema must include adjusted_return_60d for warmup coverage")
+    return available
 
 
 def _bootstrap_decision_uplift(rows, *, iterations: int, block_length: int, seed: int) -> dict[str, Any]:

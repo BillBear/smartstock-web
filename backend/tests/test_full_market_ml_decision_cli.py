@@ -12,6 +12,7 @@ from scripts.run_full_market_decision_experiment import (
     _load_moneyflow_frame,
     _portfolio_ready_rows,
     _dates_meeting_coverage,
+    _warmup_coverage_columns,
 )
 
 
@@ -177,6 +178,19 @@ class FullMarketMLDecisionCLITests(unittest.TestCase):
         )
 
         self.assertEqual(dates, ("2025-01-03",))
+
+    def test_warmup_columns_follow_compact_schema_without_adding_unregistered_features(self):
+        compact_schema = {
+            "trade_date",
+            "symbol",
+            "adjusted_return_60d",
+            "amount_log",
+            "fundamental_roe",
+        }
+
+        columns = _warmup_coverage_columns(compact_schema)
+
+        self.assertEqual(columns, ("adjusted_return_60d",))
 
     def test_runner_binds_r4b_stage_to_fundamental_asset_manifest(self):
         def service(_config, _asset_root, run_root, stage):
