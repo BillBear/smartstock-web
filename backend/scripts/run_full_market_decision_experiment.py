@@ -438,12 +438,24 @@ def _build_r4a_features(config: dict[str, Any], asset_root: Path, run_root: Path
     flow = _load_moneyflow_frame(raw_root)
     fundamental_config = config.get("fundamentals")
     fundamental_sources = None
+    fundamental_context = None
     if fundamental_config:
         fundamental_root = _fundamental_asset_root(config, asset_root)
         fundamental_sources = {
             endpoint: load_point_in_time_fundamentals(fundamental_root, endpoint)
             for endpoint in ("fina_indicator", "forecast", "express")
         }
+        signal_rows = pd.concat(
+            [pd.read_parquet(path, columns=["trade_date", "symbol"]) for path in labeled_paths],
+            ignore_index=True,
+        )
+        fundamental_context = build_point_in_time_fundamental_features(
+            signal_rows,
+            fundamental_sources["fina_indicator"],
+            fundamental_sources["forecast"],
+            fundamental_sources["express"],
+        )[["trade_date", "symbol", *FUNDAMENTAL_FEATURE_NAMES]]
+        del signal_rows
 
     configured_features = _configured_feature_names(config)
     required_columns = {
@@ -469,15 +481,10 @@ def _build_r4a_features(config: dict[str, Any], asset_root: Path, run_root: Path
         shard_symbols = set(rows["symbol"].astype(str).unique())
         rows = rows.merge(flow.loc[flow["symbol"].isin(shard_symbols)], on=["trade_date", "symbol"], how="left", validate="one_to_one")
         rows = build_moneyflow_features(rows)
-        if fundamental_sources is not None:
-            point_in_time = build_point_in_time_fundamental_features(
-                rows[["trade_date", "symbol"]],
-                fundamental_sources["fina_indicator"],
-                fundamental_sources["forecast"],
-                fundamental_sources["express"],
-            )
+        if fundamental_context is not None:
+            point_in_time = fundamental_context.loc[fundamental_context["symbol"].isin(shard_symbols)]
             rows = rows.merge(
-                point_in_time[["trade_date", "symbol", *FUNDAMENTAL_FEATURE_NAMES]],
+                point_in_time,
                 on=["trade_date", "symbol"],
                 how="left",
                 validate="one_to_one",
