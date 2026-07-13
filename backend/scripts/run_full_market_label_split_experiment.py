@@ -77,6 +77,10 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("dataset contains no development rows for the frozen split")
 
     checkpoint_dir = Path(arguments.checkpoint_dir).expanduser().resolve() if arguments.checkpoint_dir else output / "checkpoints"
+    checkpoint_source = _checkpoint_source_evidence(
+        checkpoint_dir,
+        external_reuse=arguments.checkpoint_dir is not None,
+    )
     output.mkdir(parents=True, exist_ok=False)
     _write_json_atomic(
         output / "input_manifest.json",
@@ -84,6 +88,7 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
             "schema_version": 1,
             "state": "validated_inputs",
             "source_inputs": input_evidence,
+            "checkpoint_source": checkpoint_source,
             "source_contract_sha256": contract_sha256,
             "split_sha256": split_plan.split_sha256,
             "selected_features": list(features),
@@ -133,6 +138,7 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
         "source_commit": _git_commit(),
         "source_contract_sha256": report.source_contract_sha256,
         "checkpoint_contract": report.checkpoint_contract,
+        "checkpoint_source": checkpoint_source,
         "split_sha256": split_plan.split_sha256,
         "label_contract": {
             "ranking_label": report.ranking_label,
@@ -441,6 +447,14 @@ def _path_evidence(path: Path) -> dict[str, Any]:
         "file_count": len(files),
         "total_bytes": total_bytes,
     }
+
+
+def _checkpoint_source_evidence(path: Path, *, external_reuse: bool) -> dict[str, Any]:
+    if external_reuse:
+        if not path.is_dir():
+            raise ValueError(f"checkpoint-dir must be an existing directory when reusing checkpoints: {path}")
+        return {"mode": "external_reuse", "evidence": _path_evidence(path)}
+    return {"mode": "generated_in_output", "path": str(path)}
 
 
 def _file_sha256(path: Path) -> str:
