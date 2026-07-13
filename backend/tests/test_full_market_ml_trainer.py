@@ -82,6 +82,12 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
         self.assertFalse(manifest["final_holdout_used"])
         self.assertNotIn("worktrees", __import__("json").dumps(manifest))
 
+        passing["oof_artifact_hashes"] = {"a": "/tmp/worktrees/mutable-predictions.parquet"}
+        with self.assertRaisesRegex(ValueError, "runtime path"):
+            freeze_decision_candidate(
+                {"round_id": "r4a", "status": "research_only_failed_gate"}, passing
+            )
+
     def test_risk_head_requires_independent_a_and_c_validation(self):
         failed = {"round_id": "r4a", "status": "research_only_failed_gate"}
         weak_risk = {

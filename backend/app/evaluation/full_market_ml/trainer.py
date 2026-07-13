@@ -97,10 +97,22 @@ def freeze_decision_candidate(
         "final_holdout_used": False,
         "production_allowed": False,
     }
+    if _contains_mutable_runtime_path(contract):
+        raise ValueError("frozen candidate contract cannot contain a mutable runtime path")
     contract["candidate_id"] = "ml_decision_" + hashlib.sha256(
         json.dumps(contract, sort_keys=True, separators=(",", ":"), default=str).encode()
     ).hexdigest()[:20]
     return contract
+
+
+def _contains_mutable_runtime_path(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        return any(_contains_mutable_runtime_path(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_mutable_runtime_path(item) for item in value)
+    if isinstance(value, str):
+        return value.startswith("/") or "worktrees/" in value
+    return False
 
 
 def close_decision_research(
