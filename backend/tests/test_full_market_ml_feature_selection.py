@@ -9,6 +9,20 @@ from tests.full_market_ml_fixtures import monotonic_fixture, three_fold_split_fi
 
 
 class FullMarketMLFeatureSelectionTests(unittest.TestCase):
+    def test_fundamental_block_requires_seventy_percent_field_coverage(self):
+        rows = monotonic_fixture()
+        rows["fundamental_roe"] = 10.0
+        rows.loc[rows.index[: int(len(rows) * 0.32)], "fundamental_roe"] = None
+
+        decision = evaluate_feature_blocks(
+            rows,
+            three_fold_split_fixture(),
+            {"fundamental_quality": ("fundamental_roe",)},
+        )[0]
+
+        self.assertEqual(decision.status, "rejected")
+        self.assertIn("coverage_below_0_70", decision.reasons)
+
     def test_stable_negative_return_feature_is_not_misclassified_as_useless(self):
         dataset = monotonic_fixture()
         dataset["inverse_signal"] = -dataset["signal"]

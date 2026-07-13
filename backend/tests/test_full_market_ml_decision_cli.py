@@ -149,6 +149,44 @@ class FullMarketMLDecisionCLITests(unittest.TestCase):
 
         self.assertEqual(dates, ("2025-01-03",))
 
+    def test_runner_binds_r4b_stage_to_fundamental_asset_manifest(self):
+        def service(_config, _asset_root, run_root, stage):
+            artifact = run_root / "artifacts" / f"{stage}.json"
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("{}\n", encoding="utf-8")
+            return {"artifact": str(artifact)}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            asset_root = root / "assets"
+            fundamental_root = asset_root / "fundamentals" / "fixture-fundamentals"
+            fundamental_root.mkdir(parents=True)
+            (asset_root / "asset_manifest.json").write_text('{"verification_status":"verified"}\n', encoding="utf-8")
+            manifest = fundamental_root / "collection_manifest.json"
+            manifest.write_text('{"status":"complete"}\n', encoding="utf-8")
+            config_path = root / "config.toml"
+            config_path.write_text(
+                '[run]\nid="fixture"\n[fundamentals]\nasset_id="fixture-fundamentals"\n',
+                encoding="utf-8",
+            )
+            runner = DecisionExperimentRunner(
+                config_path,
+                asset_root,
+                root / "run",
+                services={stage: service for stage in DECISION_STAGES},
+            )
+            runner.run("verify-assets")
+            manifest.write_text('{"status":"changed"}\n', encoding="utf-8")
+            changed = DecisionExperimentRunner(
+                config_path,
+                asset_root,
+                root / "run",
+                services={stage: service for stage in DECISION_STAGES},
+            )
+
+            with self.assertRaises(ValueError):
+                changed.run("verify-assets", resume=True)
+
     def test_moneyflow_loader_does_not_conflict_with_hive_date_type_inference(self):
         import pandas as pd
 

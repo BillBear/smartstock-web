@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from app.evaluation.full_market_ml.collector import collect_full_market_raw
+from app.evaluation.full_market_ml.collector import collect_full_market_raw, collect_point_in_time_fundamentals
 from app.evaluation.full_market_ml.config import DatesConfig, load_full_market_ml_config
 from app.evaluation.full_market_ml.manifests import load_manifest, manifest_path
 from tests.full_market_ml_fixtures import FakeTuShareClient
@@ -32,6 +32,34 @@ class FullMarketMLTestCase(unittest.TestCase):
 
 
 class FullMarketMLCollectorTests(FullMarketMLTestCase):
+    def test_fundamental_collection_is_additive_and_resumable_by_symbol(self):
+        client = FakeTuShareClient()
+        output = self.temp_path / "fundamentals"
+
+        first = collect_point_in_time_fundamentals(
+            client,
+            ("000001.SZ", "000002.SZ"),
+            output,
+            start_date="20240101",
+            end_date="20251231",
+            pacing_seconds=0.0,
+        )
+        second = collect_point_in_time_fundamentals(
+            client,
+            ("000001.SZ", "000002.SZ"),
+            output,
+            start_date="20240101",
+            end_date="20251231",
+            pacing_seconds=0.0,
+        )
+
+        self.assertEqual(first["status"], "complete")
+        self.assertEqual(second["status"], "complete")
+        self.assertEqual(client.calls["fina_indicator"], 2)
+        self.assertEqual(client.calls["forecast"], 2)
+        self.assertEqual(client.calls["express"], 2)
+        self.assertTrue((output / "endpoint=fina_indicator" / "symbol=000001.SZ" / "data.parquet").is_file())
+
     def test_persists_verified_open_calendar_dates_across_reload_and_resume(self):
         config = replace(
             self.config,

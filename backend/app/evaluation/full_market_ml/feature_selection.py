@@ -116,7 +116,13 @@ def _evaluate_block(
     }
 
     reasons = []
-    minimum_coverage = 0.90 if "moneyflow" in name.lower() else 0.95
+    lowered_name = name.lower()
+    if "fundamental" in lowered_name:
+        minimum_coverage = 0.70
+    elif "moneyflow" in lowered_name:
+        minimum_coverage = 0.90
+    else:
+        minimum_coverage = 0.95
     if coverage < minimum_coverage:
         reasons.append(f"coverage_below_{minimum_coverage:.2f}".replace(".", "_"))
     if max_psi > 0.50:

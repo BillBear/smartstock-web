@@ -94,6 +94,7 @@ class DecisionExperimentRunner:
             "config_sha256": self.config_sha256,
             "code_sha256": self.code_sha256,
             "asset_manifest_sha256": self.asset_manifest_sha256,
+            **_additional_asset_hashes(self.config, self.asset_root),
             **{
                 f"upstream:{name}": _json_sha256(state)
                 for name, state in upstream.items()
@@ -412,6 +413,11 @@ def _build_r4a_features(config: dict[str, Any], asset_root: Path, run_root: Path
         build_market_state_features,
     )
     from app.evaluation.full_market_ml.moneyflow_features import MONEYFLOW_FEATURE_NAMES, build_moneyflow_features
+    from app.evaluation.full_market_ml.collector import load_point_in_time_fundamentals
+    from app.evaluation.full_market_ml.fundamental_features import (
+        FUNDAMENTAL_FEATURE_NAMES,
+        build_point_in_time_fundamental_features,
+    )
 
     _, raw_root = _asset_sources(asset_root)
     label_root = _artifact_dir(run_root, "build-decision-labels") / "shards"
@@ -430,6 +436,14 @@ def _build_r4a_features(config: dict[str, Any], asset_root: Path, run_root: Path
     del context, market, industry
 
     flow = _load_moneyflow_frame(raw_root)
+    fundamental_config = config.get("fundamentals")
+    fundamental_sources = None
+    if fundamental_config:
+        fundamental_root = _fundamental_asset_root(config, asset_root)
+        fundamental_sources = {
+            endpoint: load_point_in_time_fundamentals(fundamental_root, endpoint)
+            for endpoint in ("fina_indicator", "forecast", "express")
+        }
 
     configured_features = _configured_feature_names(config)
     required_columns = {
@@ -455,6 +469,19 @@ def _build_r4a_features(config: dict[str, Any], asset_root: Path, run_root: Path
         shard_symbols = set(rows["symbol"].astype(str).unique())
         rows = rows.merge(flow.loc[flow["symbol"].isin(shard_symbols)], on=["trade_date", "symbol"], how="left", validate="one_to_one")
         rows = build_moneyflow_features(rows)
+        if fundamental_sources is not None:
+            point_in_time = build_point_in_time_fundamental_features(
+                rows[["trade_date", "symbol"]],
+                fundamental_sources["fina_indicator"],
+                fundamental_sources["forecast"],
+                fundamental_sources["express"],
+            )
+            rows = rows.merge(
+                point_in_time[["trade_date", "symbol", *FUNDAMENTAL_FEATURE_NAMES]],
+                on=["trade_date", "symbol"],
+                how="left",
+                validate="one_to_one",
+            )
         missing = sorted(required_columns - set(rows.columns))
         if missing:
             raise ValueError("R4A compact dataset missing columns: " + ", ".join(missing))
@@ -469,6 +496,20 @@ def _build_r4a_features(config: dict[str, Any], asset_root: Path, run_root: Path
         ignore_index=True,
     )
     model_dates = _dates_meeting_coverage(warmup_rows, warmup_columns, threshold=0.95)
+    fundamental_coverage = None
+    if fundamental_sources is not None:
+        coverage_rows = pd.concat(
+            [
+                pd.read_parquet(path, columns=["trade_date", "point_in_time_coverage_flag"])
+                for path in sorted(shard_root.glob("shard=*/data.parquet"))
+            ],
+            ignore_index=True,
+        )
+        coverage_rows = coverage_rows.loc[coverage_rows["trade_date"].isin(model_dates)]
+        fundamental_coverage = float(pd.to_numeric(coverage_rows["point_in_time_coverage_flag"], errors="coerce").mean())
+        minimum = float(fundamental_config.get("minimum_coverage", 0.70))
+        if not math.isfinite(fundamental_coverage) or fundamental_coverage < minimum:
+            raise RuntimeError(f"point-in-time fundamental coverage {fundamental_coverage:.4f} is below {minimum:.4f}")
     model_dates_path = output / "model_dates.json"
     _write_json_atomic(
         model_dates_path,
@@ -478,6 +519,7 @@ def _build_r4a_features(config: dict[str, Any], asset_root: Path, run_root: Path
             "minimum_signal_feature_coverage": 0.95,
             "coverage_features": list(warmup_columns),
             "target_columns_read": [],
+            "point_in_time_fundamental_coverage": fundamental_coverage,
         },
     )
     manifest_path = output / "feature_manifest.json"
@@ -488,6 +530,7 @@ def _build_r4a_features(config: dict[str, Any], asset_root: Path, run_root: Path
             "features": list(configured_features),
             "shards": manifest_entries,
             "development_only": True,
+            "fundamental_asset_id": fundamental_config.get("asset_id") if fundamental_config else None,
         },
     )
     return {
@@ -848,6 +891,22 @@ def _configured_feature_blocks(config: dict[str, Any]) -> dict[str, tuple[str, .
 
 def _configured_feature_names(config: dict[str, Any]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(feature for values in _configured_feature_blocks(config).values() for feature in values))
+
+
+def _fundamental_asset_root(config: dict[str, Any], asset_root: Path) -> Path:
+    fundamental = config.get("fundamentals")
+    if not isinstance(fundamental, dict) or not str(fundamental.get("asset_id", "")).strip():
+        raise ValueError("config.fundamentals.asset_id is required for R4B")
+    return asset_root / "fundamentals" / str(fundamental["asset_id"])
+
+
+def _additional_asset_hashes(config: dict[str, Any], asset_root: Path) -> dict[str, str]:
+    if not config.get("fundamentals"):
+        return {}
+    manifest = _fundamental_asset_root(config, asset_root) / "collection_manifest.json"
+    if not manifest.is_file():
+        raise FileNotFoundError(f"fundamental collection manifest is missing: {manifest}")
+    return {"fundamental_asset_manifest_sha256": _file_sha256(manifest)}
 
 
 def _artifact_dir(run_root: Path, stage: str) -> Path:

@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -21,6 +23,128 @@ CARDINALITY_GATED_ENDPOINTS = ("daily", "daily_basic", "adj_factor", "stk_limit"
 CORE_STATIC_ENDPOINTS = ("namechange",)
 INDEX_CODES = ("000001.SH", "000300.SH", "000905.SH", "399006.SZ")
 RETRY_DELAYS_SECONDS = (1, 2, 4, 8)
+POINT_IN_TIME_ENDPOINTS = ("fina_indicator", "forecast", "express")
+
+
+def collect_point_in_time_fundamentals(
+    client: Any,
+    symbols: tuple[str, ...] | list[str],
+    output_root: str | Path,
+    *,
+    start_date: str,
+    end_date: str,
+    pacing_seconds: float = 0.35,
+    endpoints: tuple[str, ...] = POINT_IN_TIME_ENDPOINTS,
+    workers: int = 1,
+) -> dict[str, Any]:
+    """Collect additive, immutable announcement data with per-symbol resume."""
+    root = Path(output_root)
+    root.mkdir(parents=True, exist_ok=True)
+    normalised_symbols = tuple(sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}))
+    requested_endpoints = tuple(dict.fromkeys(str(endpoint) for endpoint in endpoints))
+    unsupported = sorted(set(requested_endpoints) - set(POINT_IN_TIME_ENDPOINTS))
+    if unsupported:
+        raise ValueError("unsupported point-in-time endpoints: " + ", ".join(unsupported))
+    contract = {
+        "symbols": list(normalised_symbols),
+        "start_date": _compact(start_date),
+        "end_date": _compact(end_date),
+        "endpoints": list(requested_endpoints),
+    }
+    manifest_path_value = root / "collection_manifest.json"
+    if manifest_path_value.is_file():
+        manifest = json.loads(manifest_path_value.read_text(encoding="utf-8"))
+        if manifest.get("contract") != contract:
+            raise ValueError("fundamental collection contract changed; use a new immutable output root")
+    else:
+        manifest = {"contract": contract, "partitions": {}, "status": "running", "errors": []}
+        _write_json_file_atomic(manifest_path_value, manifest)
+
+    pending: list[tuple[str, str, Path]] = []
+    for endpoint in requested_endpoints:
+        endpoint_records = manifest["partitions"].setdefault(endpoint, {})
+        for symbol in normalised_symbols:
+            path = root / f"endpoint={endpoint}" / f"symbol={symbol}" / "data.parquet"
+            existing = endpoint_records.get(symbol)
+            if existing and path.is_file() and _file_digest(path) == existing.get("sha256"):
+                continue
+            if path.exists():
+                if existing:
+                    raise ValueError(f"corrupted immutable partition: {path}")
+                endpoint_records[symbol] = {
+                    "path": str(path.relative_to(root)),
+                    "row_count": pq.ParquetFile(path).metadata.num_rows,
+                    "sha256": _file_digest(path),
+                    "status": "collected",
+                }
+                continue
+            pending.append((endpoint, symbol, path))
+
+    def fetch(endpoint: str, symbol: str) -> tuple[str, str, list[dict[str, Any]], str | None]:
+        try:
+            rows = _records(
+                _request(
+                    lambda: getattr(client, endpoint)(
+                        ts_code=symbol,
+                        start_date=contract["start_date"],
+                        end_date=contract["end_date"],
+                    ),
+                    pacing_seconds,
+                )
+            )
+            return endpoint, symbol, rows, None
+        except Exception as error:
+            return endpoint, symbol, [], f"{type(error).__name__}: {error}"
+
+    max_workers = max(1, min(int(workers), 8))
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="fundamental-fetch") as executor:
+        futures = {
+            executor.submit(fetch, endpoint, symbol): (endpoint, symbol, path)
+            for endpoint, symbol, path in pending
+        }
+        for completed, future in enumerate(as_completed(futures), start=1):
+            endpoint, symbol, path = futures[future]
+            _, _, rows, failure = future.result()
+            endpoint_records = manifest["partitions"][endpoint]
+            if failure is None:
+                _write_records_atomic(path, rows)
+                endpoint_records[symbol] = {
+                    "path": str(path.relative_to(root)),
+                    "row_count": len(rows),
+                    "sha256": _file_digest(path),
+                    "status": "collected",
+                }
+            else:
+                manifest["errors"].append({"endpoint": endpoint, "symbol": symbol, "error": failure})
+                endpoint_records[symbol] = {"path": str(path.relative_to(root)), "row_count": 0, "sha256": "", "status": "failed"}
+            if completed % 25 == 0:
+                _write_json_file_atomic(manifest_path_value, manifest)
+    failed = [record for endpoints in manifest["partitions"].values() for record in endpoints.values() if record["status"] == "failed"]
+    manifest["status"] = "complete" if not failed else "partial"
+    manifest["partition_count"] = sum(len(records) for records in manifest["partitions"].values())
+    _write_json_file_atomic(manifest_path_value, manifest)
+    return manifest
+
+
+def load_point_in_time_fundamentals(output_root: str | Path, endpoint: str):
+    """Load only verified non-empty partitions registered by the additive collector."""
+    import pandas as pd
+
+    root = Path(output_root)
+    path = root / "collection_manifest.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"fundamental collection manifest is missing: {path}")
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    records = manifest.get("partitions", {}).get(endpoint, {})
+    frames = []
+    for symbol, record in sorted(records.items()):
+        if record.get("status") != "collected" or int(record.get("row_count", 0)) <= 0:
+            continue
+        partition = root / record["path"]
+        if not partition.is_file() or _file_digest(partition) != record.get("sha256"):
+            raise ValueError(f"fundamental partition hash mismatch: {endpoint}/{symbol}")
+        frames.append(pd.read_parquet(partition))
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 def collect_full_market_raw(
@@ -405,3 +529,32 @@ def _calendar_dates(start: str, end: str) -> list[str]:
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _file_digest(path: Path) -> str:
+    return _sha256(path)
+
+
+def _write_records_atomic(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    table = rows.arrow_table if isinstance(rows, _Records) and rows.arrow_table is not None else pa.Table.from_pylist(rows)
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".data-", suffix=".tmp", delete=False) as stream:
+        temporary = Path(stream.name)
+    try:
+        pq.write_table(table, temporary)
+        with temporary.open("rb") as stream:
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _write_json_file_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+        json.dump(payload, stream, ensure_ascii=True, indent=2, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+        temporary = Path(stream.name)
+    os.replace(temporary, path)

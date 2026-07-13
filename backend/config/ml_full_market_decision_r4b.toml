@@ -1,0 +1,88 @@
+[run]
+id = "ml_decision_rebuild_20260713_r4b"
+minimum_free_disk_gb = 50
+
+[fundamentals]
+asset_id = "r4b_fundamentals_20260713_v1"
+minimum_coverage = 0.70
+
+[labels]
+horizon = 10
+actionable_return_floor = 0.03
+actionable_mae_floor = -0.06
+severe_return_ceiling = -0.05
+severe_mae_ceiling = -0.08
+clipped_return_floor = -0.15
+clipped_return_ceiling = 0.20
+
+[models]
+families = ["logistic", "lightgbm_shallow"]
+seeds = [17, 42, 73]
+
+[policy]
+risk_quantile_gate = 0.70
+
+[bootstrap]
+iterations = 1000
+block_length = 10
+seed = 42
+
+[budgets]
+verify_assets = 900
+build_decision_labels = 2700
+build_r4a_features = 5400
+feature_audit = 3600
+nested_a_c_oof = 2700
+policy_evaluation = 1800
+gate_decision = 900
+write_model_card = 900
+
+[feature_blocks]
+amount_turnover = [
+  "amount_log",
+  "amount_log_rank",
+  "amount_ratio_5d",
+  "amount_ratio_20d",
+  "amount_change_1d",
+  "volume_ratio_5d",
+  "volume_ratio_20d",
+  "turnover_rate",
+  "turnover_rate_rank",
+  "turnover_ratio_20d",
+]
+moneyflow = [
+  "main_net_inflow_ratio",
+  "main_net_inflow_ratio_rank",
+  "moneyflow_5d_mean",
+  "moneyflow_20d_mean",
+  "small_net_flow_ratio",
+  "medium_net_flow_ratio",
+  "large_net_flow_ratio",
+  "extra_large_net_flow_ratio",
+  "small_net_flow_persistence_5d",
+  "small_net_flow_persistence_20d",
+  "medium_net_flow_persistence_5d",
+  "medium_net_flow_persistence_20d",
+  "large_net_flow_persistence_5d",
+  "large_net_flow_persistence_20d",
+  "extra_large_net_flow_persistence_5d",
+  "extra_large_net_flow_persistence_20d",
+  "large_minus_small_flow_ratio",
+  "price_flow_divergence_5d",
+  "price_flow_divergence_20d",
+  "flow_minus_industry_median",
+]
+fundamental_quality = [
+  "fundamental_roe",
+  "fundamental_net_margin",
+  "fundamental_debt_to_assets",
+  "fundamental_ocf_to_sales",
+  "fundamental_revenue_yoy",
+  "fundamental_profit_yoy",
+  "fundamental_ocf_yoy",
+  "fundamental_revenue_yoy_acceleration",
+  "fundamental_profit_yoy_acceleration",
+  "fundamental_ocf_yoy_acceleration",
+  "fundamental_days_since_announcement",
+  "fundamental_missing",
+]

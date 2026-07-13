@@ -16,6 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .config import FullMarketMLConfig
+from .fundamental_features import build_point_in_time_fundamental_features
 from .manifests import CollectionManifest, load_manifest, validate_partition
 
 
@@ -81,6 +82,16 @@ class PanelBuildResult:
 class _CalendarLookup:
     open_dates: tuple[str, ...]
     rank_by_date: dict[str, int]
+
+
+def augment_panel_with_point_in_time_fundamentals(
+    panel: pd.DataFrame,
+    fina_indicator: pd.DataFrame,
+    forecast: pd.DataFrame | None = None,
+    express: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Add announcement-safe research features without mutating the base panel contract."""
+    return build_point_in_time_fundamental_features(panel, fina_indicator, forecast, express)
 
 
 def build_full_market_panel(config: FullMarketMLConfig, runtime_root: str | Path, stage: str) -> PanelBuildResult:
