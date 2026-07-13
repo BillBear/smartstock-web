@@ -13,6 +13,7 @@ from scripts.run_full_market_decision_experiment import (
     _portfolio_ready_rows,
     _dates_meeting_coverage,
     _warmup_coverage_columns,
+    _quality_contract_columns,
 )
 
 
@@ -191,6 +192,11 @@ class FullMarketMLDecisionCLITests(unittest.TestCase):
         columns = _warmup_coverage_columns(compact_schema)
 
         self.assertEqual(columns, ("adjusted_return_60d",))
+
+    def test_fundamental_quality_gate_column_is_persisted_even_when_not_a_model_feature(self):
+        columns = _quality_contract_columns({"fundamentals": {"minimum_coverage": 0.70}})
+
+        self.assertEqual(columns, ("point_in_time_coverage_flag",))
 
     def test_runner_binds_r4b_stage_to_fundamental_asset_manifest(self):
         def service(_config, _asset_root, run_root, stage):

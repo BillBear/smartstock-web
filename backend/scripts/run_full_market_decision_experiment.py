@@ -499,6 +499,7 @@ def _build_r4a_features(config: dict[str, Any], asset_root: Path, run_root: Path
         "atr_pct_14d", "amount_log_rank",
     }
     required_columns.update(configured_features)
+    required_columns.update(_quality_contract_columns(config))
     output = _artifact_dir(run_root, "build-r4a-features")
     shard_root = output / "shards"
     manifest_entries = []
@@ -994,6 +995,10 @@ def _warmup_coverage_columns(compact_schema) -> tuple[str, ...]:
     if "adjusted_return_60d" not in available:
         raise ValueError("compact feature schema must include adjusted_return_60d for warmup coverage")
     return available
+
+
+def _quality_contract_columns(config: Mapping[str, Any]) -> tuple[str, ...]:
+    return ("point_in_time_coverage_flag",) if config.get("fundamentals") else ()
 
 
 def _bootstrap_decision_uplift(rows, *, iterations: int, block_length: int, seed: int) -> dict[str, Any]:
