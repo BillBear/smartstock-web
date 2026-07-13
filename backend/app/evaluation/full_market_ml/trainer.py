@@ -312,6 +312,11 @@ def run_development_training(
     features = list(features)
     if not features:
         raise ValueError("development dataset has no supported leak-free features")
+    checkpoint_contract = (
+        _development_checkpoint_contract(data, split_plan, features, seeds, config)
+        if checkpoint_dir is not None
+        else None
+    )
 
     ranker_dataset_cache: dict[tuple[tuple[str, ...], int], tuple[lgb.Dataset, list[lgb.Dataset]]] = {}
     baselines = _baselines(_oof_rows(data, split_plan))
@@ -322,6 +327,7 @@ def run_development_training(
         seeds,
         dataset_cache=ranker_dataset_cache,
         checkpoint_dir=checkpoint_dir,
+        checkpoint_contract=checkpoint_contract,
         on_progress=on_progress,
     )
     selected = {
@@ -339,6 +345,7 @@ def run_development_training(
         seeds,
         dataset_cache=ranker_dataset_cache,
         checkpoint_dir=checkpoint_dir,
+        checkpoint_contract=checkpoint_contract,
         on_progress=on_progress,
         baseline_prediction=rank_predictions,
     )
@@ -352,6 +359,7 @@ def run_development_training(
         dataset_cache=ranker_dataset_cache,
         checkpoint_dir=checkpoint_dir,
         checkpoint_key="unseen-stocks",
+        checkpoint_contract=checkpoint_contract,
         on_progress=on_progress,
     )
     strong_prob, strong_calibrator = _classifier_oof(
@@ -363,6 +371,7 @@ def run_development_training(
         seeds,
         checkpoint_dir=checkpoint_dir,
         checkpoint_key="classifier-strong",
+        checkpoint_contract=checkpoint_contract,
         on_progress=on_progress,
     )
     severe_prob, severe_calibrator = _classifier_oof(
@@ -374,6 +383,7 @@ def run_development_training(
         seeds,
         checkpoint_dir=checkpoint_dir,
         checkpoint_key="classifier-severe",
+        checkpoint_contract=checkpoint_contract,
         on_progress=on_progress,
     )
     rank_predictions["strong_probability"] = strong_prob
@@ -738,6 +748,7 @@ def _nested_ranker_oof(
     *,
     dataset_cache=None,
     checkpoint_dir: str | Path | None = None,
+    checkpoint_contract: str | None = None,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
 ):
     """Select ranker parameters inside each outer fold, then score that fold."""
@@ -748,9 +759,15 @@ def _nested_ranker_oof(
         train, outer_valid = _fold_data(data, outer_fold)
         if train.empty or outer_valid.empty:
             continue
-        selection_path = _selection_checkpoint_path(checkpoint_dir, outer_fold.fold)
+        selection_path = _selection_checkpoint_path(
+            checkpoint_dir,
+            outer_fold.fold,
+            checkpoint_contract=checkpoint_contract,
+        )
         if selection_path is not None and selection_path.is_file():
             selection = json.loads(selection_path.read_text(encoding="utf-8"))
+            if selection.get("checkpoint_contract") != checkpoint_contract:
+                raise ValueError("nested selection checkpoint contract does not match this development run")
             params = {key: int(value) for key, value in selection["params"].items()}
             inner_reports = list(selection.get("inner_reports", []))
             selection_report.append(selection)
@@ -764,7 +781,12 @@ def _nested_ranker_oof(
                     seeds,
                     dataset_cache={},
                 )
-                selection = {"fold": int(outer_fold.fold), "params": params, "inner_reports": inner_reports}
+                selection = {
+                    "fold": int(outer_fold.fold),
+                    "params": params,
+                    "inner_reports": inner_reports,
+                    "checkpoint_contract": checkpoint_contract,
+                }
             else:
                 params = dict(FIXED_RANKER_GRID[0])
                 inner_reports = []
@@ -773,6 +795,7 @@ def _nested_ranker_oof(
                     "params": params,
                     "inner_reports": [],
                     "fallback": "insufficient_pre_outer_dates",
+                    "checkpoint_contract": checkpoint_contract,
                 }
             if selection_path is not None:
                 _write_json_atomic(selection, selection_path)
@@ -789,6 +812,7 @@ def _nested_ranker_oof(
             dataset_cache=dataset_cache,
             checkpoint_dir=checkpoint_dir,
             checkpoint_key=f"nested-outer-fold-{outer_fold.fold}",
+            checkpoint_contract=checkpoint_contract,
             on_progress=on_progress,
             progress_total=len(split_plan.walk_forward),
         )
@@ -837,6 +861,7 @@ def _ranker_oof(
     dataset_cache=None,
     checkpoint_dir: str | Path | None = None,
     checkpoint_key: str = "ranker",
+    checkpoint_contract: str | None = None,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
     progress_total: int | None = None,
 ) -> pd.DataFrame:
@@ -846,7 +871,15 @@ def _ranker_oof(
         train, outer_valid = _fold_data(data, fold)
         if train.empty or outer_valid.empty:
             continue
-        checkpoint = _fold_checkpoint_path(checkpoint_dir, checkpoint_key, features, params, seeds, fold.fold)
+        checkpoint = _fold_checkpoint_path(
+            checkpoint_dir,
+            checkpoint_key,
+            features,
+            params,
+            seeds,
+            fold.fold,
+            checkpoint_contract=checkpoint_contract,
+        )
         if checkpoint is not None and checkpoint.is_file():
             cached = pd.read_parquet(checkpoint)
             _validate_fold_checkpoint(cached, outer_valid, fold.fold, "A_time_oof")
@@ -893,6 +926,7 @@ def _unseen_stock_oof(
     dataset_cache=None,
     checkpoint_dir: str | Path | None = None,
     checkpoint_key: str = "unseen-stocks",
+    checkpoint_contract: str | None = None,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
 ):
     """Score development validation dates for symbols excluded from A training."""
@@ -908,7 +942,15 @@ def _unseen_stock_oof(
         outer_valid = data.loc[data["trade_date"].isin(fold.validation_dates) & data["symbol"].isin(unseen_symbols)].copy()
         if train.empty or outer_valid.empty:
             continue
-        checkpoint = _fold_checkpoint_path(checkpoint_dir, checkpoint_key, features, params, seeds, fold.fold)
+        checkpoint = _fold_checkpoint_path(
+            checkpoint_dir,
+            checkpoint_key,
+            features,
+            params,
+            seeds,
+            fold.fold,
+            checkpoint_contract=checkpoint_contract,
+        )
         if checkpoint is not None and checkpoint.is_file():
             cached = pd.read_parquet(checkpoint)
             _validate_fold_checkpoint(cached, outer_valid, fold.fold, "C_dev_unseen")
@@ -971,22 +1013,59 @@ def _fold_checkpoint_path(
     params: dict[str, Any],
     seeds: tuple[int, ...],
     fold: int,
+    *,
+    checkpoint_contract: str | None = None,
 ) -> Path | None:
     if checkpoint_dir is None:
         return None
-    payload = {"key": checkpoint_key, "features": features, "params": params, "seeds": list(seeds)}
+    payload = {
+        "key": checkpoint_key,
+        "features": features,
+        "params": params,
+        "seeds": list(seeds),
+        "checkpoint_contract": checkpoint_contract,
+    }
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()[:16]
     root = Path(checkpoint_dir)
     root.mkdir(parents=True, exist_ok=True)
     return root / f"{checkpoint_key}-{digest}-fold-{int(fold):02d}.parquet"
 
 
-def _selection_checkpoint_path(checkpoint_dir: str | Path | None, fold: int) -> Path | None:
+def _selection_checkpoint_path(
+    checkpoint_dir: str | Path | None,
+    fold: int,
+    *,
+    checkpoint_contract: str | None = None,
+) -> Path | None:
     if checkpoint_dir is None:
         return None
     root = Path(checkpoint_dir)
     root.mkdir(parents=True, exist_ok=True)
-    return root / f"nested-selection-fold-{int(fold):02d}.json"
+    contract_digest = hashlib.sha256(str(checkpoint_contract or "unbound").encode()).hexdigest()[:16]
+    return root / f"nested-selection-{contract_digest}-fold-{int(fold):02d}.json"
+
+
+def _development_checkpoint_contract(data, split_plan: SplitPlan, features, seeds, config: Any) -> str:
+    """Bind resumable artifacts to the immutable inputs that determine their predictions."""
+    required = ["trade_date", "symbol", "relevance_grade_10d"]
+    columns = list(dict.fromkeys([*required, *features]))
+    missing = sorted(set(columns) - set(data.columns))
+    if missing:
+        raise ValueError("development checkpoint contract missing columns: " + ", ".join(missing))
+    digest = hashlib.sha256()
+    for start in range(0, len(data), 10_000):
+        chunk = data.loc[:, columns].iloc[start:start + 10_000]
+        row_hashes = pd.util.hash_pandas_object(chunk, index=False, categorize=True).to_numpy(dtype="uint64")
+        digest.update(row_hashes.tobytes())
+    payload = {
+        "schema_version": 1,
+        "config_sha256": str(getattr(config, "sha256", "")),
+        "split_sha256": split_plan.split_sha256,
+        "features": list(features),
+        "seeds": [int(seed) for seed in seeds],
+        "signal_label_feature_sha256": digest.hexdigest(),
+    }
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def _write_json_atomic(value: dict[str, Any], path: Path) -> None:
@@ -1131,6 +1210,7 @@ def _classifier_oof(
     *,
     checkpoint_dir: str | Path | None = None,
     checkpoint_key: str = "classifier",
+    checkpoint_contract: str | None = None,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
 ):
     features = list(features)
@@ -1139,7 +1219,15 @@ def _classifier_oof(
         train, valid = _fold_data(data, fold)
         if train.empty or valid.empty:
             continue
-        checkpoint = _fold_checkpoint_path(checkpoint_dir, checkpoint_key, features, params, seeds, fold.fold)
+        checkpoint = _fold_checkpoint_path(
+            checkpoint_dir,
+            checkpoint_key,
+            features,
+            params,
+            seeds,
+            fold.fold,
+            checkpoint_contract=checkpoint_contract,
+        )
         if checkpoint is not None and checkpoint.is_file():
             cached = pd.read_parquet(checkpoint)
             required = {"trade_date", "symbol", label, "raw_probability", "fold"}
@@ -1242,6 +1330,7 @@ def _run_group_ablations(
     *,
     dataset_cache=None,
     checkpoint_dir: str | Path | None = None,
+    checkpoint_contract: str | None = None,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
     baseline_prediction: pd.DataFrame | None = None,
 ):
@@ -1256,6 +1345,7 @@ def _run_group_ablations(
             dataset_cache=dataset_cache,
             checkpoint_dir=checkpoint_dir,
             checkpoint_key="ablation-all-features",
+            checkpoint_contract=checkpoint_contract,
             on_progress=on_progress,
         )
     baseline_metrics = evaluate_ranking(baseline_prediction)
@@ -1283,6 +1373,7 @@ def _run_group_ablations(
             dataset_cache=dataset_cache,
             checkpoint_dir=checkpoint_dir,
             checkpoint_key=f"ablation-without-{group}",
+            checkpoint_contract=checkpoint_contract,
             on_progress=on_progress,
         )
         metrics = evaluate_ranking(prediction)

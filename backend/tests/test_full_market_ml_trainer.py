@@ -9,16 +9,17 @@ from app.evaluation.full_market_ml.trainer import (
     fit_final_candidate,
     load_final_fit,
     _classifier_oof,
+    _development_checkpoint_contract,
     _ranker_oof,
+    _selection_checkpoint_path,
     _stable_random_score,
+    _inner_selection_plan,
+    _portfolio_or_empty,
+    _run_group_ablations,
+    _unseen_stock_oof,
     run_development_training,
     run_final_holdout_evaluation,
     save_final_fit,
-    _portfolio_or_empty,
-    _inner_selection_plan,
-    _ranker_oof,
-    _run_group_ablations,
-    _unseen_stock_oof,
 )
 from app.evaluation.full_market_ml.splits import FinalHoldoutAccessError, SplitPlan, WalkForwardFold
 from tests.full_market_ml_fixtures import overlapping_portfolio_fixture, predictive_fixture, random_label_fixture, sealed_split_fixture
@@ -104,6 +105,61 @@ class FullMarketMLTrainerTests(FullMarketMLTestCase):
         self.assertEqual(len(list(checkpoint_dir.glob("*.parquet"))), len(self._split().walk_forward))
         self.assertEqual(first.reset_index(drop=True).to_dict(), second.reset_index(drop=True).to_dict())
         self.assertTrue(any(item["status"] == "complete" for item in progress))
+
+    def test_ranker_oof_does_not_reuse_checkpoint_from_a_different_data_contract(self):
+        dataset = predictive_fixture(symbols_per_date=220)
+        checkpoint_dir = self.temp_path / "ranker-contract-checkpoints"
+
+        class FakeModel:
+            def predict(self, rows, num_iteration=None):
+                return [0.0] * len(rows)
+
+        with patch("app.evaluation.full_market_ml.trainer._build_ranker_datasets", return_value=(object(), [])), patch(
+            "app.evaluation.full_market_ml.trainer._train_ranker", return_value=FakeModel()
+        ):
+            _ranker_oof(
+                dataset,
+                self._split(),
+                ("adjusted_return_20d",),
+                FIXED_RANKER_GRID[0],
+                (FIXED_SEEDS[0],),
+                checkpoint_dir=checkpoint_dir,
+                checkpoint_key="main",
+                checkpoint_contract="dataset-contract-one",
+            )
+
+        with patch("app.evaluation.full_market_ml.trainer._build_ranker_datasets", return_value=(object(), [])), patch(
+            "app.evaluation.full_market_ml.trainer._train_ranker", return_value=FakeModel()
+        ) as retrain:
+            _ranker_oof(
+                dataset,
+                self._split(),
+                ("adjusted_return_20d",),
+                FIXED_RANKER_GRID[0],
+                (FIXED_SEEDS[0],),
+                checkpoint_dir=checkpoint_dir,
+                checkpoint_key="main",
+                checkpoint_contract="dataset-contract-two",
+            )
+
+        self.assertGreater(retrain.call_count, 0)
+        self.assertEqual(len(list(checkpoint_dir.glob("*.parquet"))), 2 * len(self._split().walk_forward))
+
+    def test_selection_checkpoint_path_is_unique_per_run_contract(self):
+        first = _selection_checkpoint_path(self.temp_path, fold=1, checkpoint_contract="dataset-contract-one")
+        second = _selection_checkpoint_path(self.temp_path, fold=1, checkpoint_contract="dataset-contract-two")
+
+        self.assertNotEqual(first, second)
+
+    def test_development_checkpoint_contract_changes_when_a_feature_value_changes(self):
+        dataset = predictive_fixture(symbols_per_date=220)
+        features = ("adjusted_return_20d", "amount_log")
+        first = _development_checkpoint_contract(dataset, self._split(), features, FIXED_SEEDS, self.config)
+        altered = dataset.copy()
+        altered.loc[altered.index[0], "amount_log"] = altered.loc[altered.index[0], "amount_log"] + 1.0
+        second = _development_checkpoint_contract(altered, self._split(), features, FIXED_SEEDS, self.config)
+
+        self.assertNotEqual(first, second)
 
     def test_outer_validation_rows_are_not_used_for_ranker_early_stopping(self):
         dataset = predictive_fixture(symbols_per_date=220)
