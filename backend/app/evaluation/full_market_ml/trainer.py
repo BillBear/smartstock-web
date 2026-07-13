@@ -30,6 +30,12 @@ from .feature_audit import FeatureAuditResult, _audit_allowed_features
 from .features import CORE_FEATURE_SPECS, OPTIONAL_FEATURE_SPECS
 from .splits import FinalHoldoutAccessError, SplitPlan
 
+# The R4A three-head research path is intentionally separate from the legacy
+# ranker below, but re-exported here so existing orchestration can adopt it
+# without duplicating training entry points.
+from .decision_model import DecisionModelSpec, run_nested_decision_oof
+from .decision_policy import DecisionPolicySpec
+
 
 FIXED_SEEDS = (17, 42, 73)
 FIXED_RANKER_GRID = tuple(
