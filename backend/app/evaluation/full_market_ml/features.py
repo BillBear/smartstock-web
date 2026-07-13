@@ -142,7 +142,7 @@ _DENIED_EXACT = {
     "exit_trade_date", "gross_return", "net_return_after_cost", "mfe", "mae",
 }
 _DENIED_PREFIXES = (
-    "next_", "future_", "label_", "relevance_", "tp_", "sl_", "path_ambiguous", "entry_tradeable_",
+    "next_", "future_", "label_", "relevance_", "return_relevance_", "tp_", "sl_", "path_ambiguous", "entry_tradeable_",
     "entry_price_", "exit_price_", "exit_trade_date_", "gross_return_", "net_return_after_cost_",
     "horizon_available_", "eligible_for_training_", "mfe_", "mae_", "market_median_",
     "industry_median_", "market_state_",

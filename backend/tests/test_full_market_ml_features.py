@@ -49,6 +49,7 @@ class FullMarketMLFeatureTests(FullMarketMLTestCase):
             "mfe_10d", "mae_10d", "market_median_future_return_10d",
             "industry_median_future_return_10d", "market_state_10d", "label_strong_path_10d",
             "label_severe_negative_10d", "relevance_grade_10d", "tp_before_sl_10d",
+            "return_relevance_grade_10d", "label_return_top10_10d",
             "sl_before_tp_10d", "path_ambiguous_10d", "return_t+1", "entry_price_t_plus_1",
             "entry_price", "entry_price_10d", "exit_price", "exit_trade_date", "gross_return",
             "net_return_after_cost", "net_return_after_cost_10d", "entry_tradeable_10d",
