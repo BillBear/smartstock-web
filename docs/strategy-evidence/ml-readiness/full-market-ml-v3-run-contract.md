@@ -70,3 +70,35 @@ Inspect or recover a run without loading data providers:
 - A failed, timed-out, aborted, or checksum-mismatched stage cannot be silently resumed as complete.
 - The invalidated historical holdout from earlier runs is diagnostic material only and cannot be used for tuning or production evidence.
 - No smoke fixture may be presented as full-market evidence.
+
+## Return-Label Split Research
+
+The V3 return-label split is a separate, fixed-contract diagnostic experiment.
+It trains only an A/time OOF and C/development-unseen-stock ranker with the
+same V3 feature list, LightGBM parameters, seeds, split, execution outcomes,
+and costs. Its only changed input is the ranker relevance label:
+`return_relevance_grade_10d`, derived from canonical
+`net_return_after_cost_10d` without overwriting path-risk labels.
+
+Run it only with explicit immutable source assets:
+
+```bash
+cd smartstock-web/backend
+.venv-ml-py313/bin/python scripts/run_full_market_label_split_experiment.py \
+  --dataset /absolute/path/to/artifacts/full-build/dataset-v3 \
+  --split-plan /absolute/path/to/artifacts/full-build/split_plan_v3.json \
+  --candidate-manifest /absolute/path/to/artifacts/dev-train-v3/candidate_manifest.json \
+  --output-dir ../runtime/ml_full_market/label-split-YYYYMMDD
+```
+
+The command hashes and records every supplied source before OOF fitting. It
+rejects a split mismatch, non-V3 parameters, changed features or seeds,
+missing data columns, any final-time row returned by the development scan, and
+a pre-existing output directory.
+It writes only to the caller-selected ignored runtime output directory:
+input manifest, label reports, A/C predictions, daily and fold metrics,
+baseline comparison, bootstrap, safety metrics, and a concise runtime review.
+
+This command has no `final-fit`, `holdout`, or production mode. A passing
+development diagnostic remains `research_only`; it cannot change SmartStock
+recommendations or authorize production integration.
