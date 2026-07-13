@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 
 from app.evaluation.full_market_ml import label_split_experiment as experiment_module
@@ -102,3 +103,28 @@ class FullMarketMLLabelSplitExperimentTests(FullMarketMLTestCase):
                 checkpoint_dir=self.temp_path / "checkpoints",
                 source_contract=self._source_contract(split),
             )
+
+    def test_baselines_use_their_score_valid_rows_without_dropping_the_full_baseline(self):
+        split = self._split()
+        dataset = self._dataset()
+        dataset["adjusted_return_60d"] = dataset["adjusted_return_20d"]
+        dataset.loc[dataset["symbol"].eq("000001"), "adjusted_return_20d"] = np.nan
+        dataset.loc[dataset["symbol"].eq("000002"), "adjusted_return_60d"] = np.nan
+        features = ("adjusted_return_20d", "adjusted_return_60d", "amount_log")
+        report = run_label_split_experiment(
+            dataset,
+            split,
+            features,
+            checkpoint_dir=self.temp_path / "checkpoints",
+            source_contract=self._source_contract(split, features),
+        )
+
+        baseline = report.baseline_metrics["A_time_oof"]["adjusted_return_60d"]
+
+        self.assertEqual(baseline["status"], "available")
+        self.assertLess(baseline["score_valid_candidate_count"], len(report.predictions.query("quadrant == 'A_time_oof'")))
+        self.assertGreater(baseline["score_valid_candidate_count"], 0)
+        self.assertEqual(
+            baseline["model_metrics_on_matching_rows"]["candidate_count"],
+            baseline["candidate_count"],
+        )

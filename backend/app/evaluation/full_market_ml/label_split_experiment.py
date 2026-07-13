@@ -232,14 +232,23 @@ def _fixed_baselines(rows: pd.DataFrame) -> dict[str, dict[str, Any]]:
         "amount_log": "amount_log",
     }
     for name, column in baseline_columns.items():
-        if column is not None and (column not in rows or pd.to_numeric(rows[column], errors="coerce").isna().any()):
+        if column is not None and column not in rows:
             baselines[name] = {"status": "unavailable"}
             continue
         score = _stable_random_score(rows) if column is None else pd.to_numeric(rows[column], errors="coerce")
+        valid_rows = rows.loc[pd.Series(score, index=rows.index).notna()].copy()
+        if valid_rows.empty:
+            baselines[name] = {"status": "unavailable"}
+            continue
+        valid_score = _stable_random_score(valid_rows) if column is None else pd.to_numeric(valid_rows[column], errors="coerce")
         baselines[name] = {
             "status": "available",
+            "score_valid_candidate_count": int(len(valid_rows)),
+            "score_valid_date_count": int(valid_rows["trade_date"].nunique()),
+            "score_coverage": float(len(valid_rows) / len(rows)),
+            "model_metrics_on_matching_rows": _return_metrics(valid_rows),
             **evaluate_ranking(
-                rows.assign(score=score),
+                valid_rows.assign(score=valid_score),
                 grade_col=RETURN_RANKING_LABEL,
                 strong_col=RETURN_STRONG_LABEL,
             ),
