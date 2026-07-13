@@ -76,6 +76,24 @@ class FullMarketMLEvaluatorTests(FullMarketMLTestCase):
         self.assertLessEqual(result["precision_at_5_uplift_ci_low"], 0)
         self.assertGreaterEqual(result["precision_at_5_uplift_ci_high"], 0)
 
+    def test_bootstrap_uses_explicit_return_label_columns(self):
+        dataset = bootstrap_date_fixture()
+        dataset["return_relevance_grade_10d"] = [4 if index % 10 == 0 else 0 for index in range(len(dataset))]
+        dataset["label_return_top10_10d"] = [index % 10 == 0 for index in range(len(dataset))]
+
+        result = bootstrap_uplift(
+            dataset,
+            score_col="score",
+            baseline_score_col="baseline_score",
+            grade_col="return_relevance_grade_10d",
+            strong_col="label_return_top10_10d",
+            iterations=20,
+            seed=17,
+        )
+
+        self.assertAlmostEqual(result["precision_at_5_uplift"], 0.2)
+        self.assertGreater(result["precision_at_5_uplift_ci_low"], 0.0)
+
     def test_bootstrap_computes_each_daily_metric_once_before_resampling(self):
         original = evaluator_module._daily_ranking_metrics
         with patch.object(evaluator_module, "_daily_ranking_metrics", wraps=original) as daily_metrics:

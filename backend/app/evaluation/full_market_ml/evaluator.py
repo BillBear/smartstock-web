@@ -78,12 +78,14 @@ def bootstrap_uplift(
     *,
     score_col: str = "score",
     baseline_score_col: str | None = None,
+    grade_col: str = _GRADE,
+    strong_col: str = _STRONG,
     iterations: int = 1000,
     seed: int = 42,
     block_length: int = 10,
 ) -> dict[str, Any]:
     """Bootstrap metric uplift by resampling circular blocks of trade dates."""
-    data = _validated_predictions(predictions, score_col, {_GRADE, _STRONG}, require_symbol=True)
+    data = _validated_predictions(predictions, score_col, {grade_col, strong_col}, require_symbol=True)
     baseline_score_col = baseline_score_col or score_col
     if baseline_score_col not in data:
         raise ValueError(f"predictions missing baseline score column: {baseline_score_col}")
@@ -107,8 +109,12 @@ def bootstrap_uplift(
     # Ranking a daily cross-section dominates runtime.  It is invariant across
     # bootstrap draws, so compute each pair once and resample only scalars.
     daily_uplifts = {
-        date: _daily_ranking_metrics(rows, score_col)["precision_at_5"]
-        - _daily_ranking_metrics(rows, baseline_score_col)["precision_at_5"]
+        date: _daily_ranking_metrics(
+            rows, score_col, grade_col=grade_col, strong_col=strong_col
+        )["precision_at_5"]
+        - _daily_ranking_metrics(
+            rows, baseline_score_col, grade_col=grade_col, strong_col=strong_col
+        )["precision_at_5"]
         for date, rows in by_date.items()
     }
     for _ in range(iterations):
