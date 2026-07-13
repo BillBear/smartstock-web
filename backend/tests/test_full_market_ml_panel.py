@@ -111,14 +111,14 @@ class FullMarketMLPanelTests(unittest.TestCase):
         fixtures = two_day_split_fixture()
         fixtures["daily_basic"] = frame(
             [
-                {"ts_code": "000001.SZ", "trade_date": "20250102", "turnover_rate": 2.5, "total_mv": 100.0, "circ_mv": 80.0, "pe": 10.0, "pb": 1.5, "ps": 2.0},
-                {"ts_code": "000001.SZ", "trade_date": "20250103", "turnover_rate": 3.0, "total_mv": 110.0, "circ_mv": 85.0, "pe": 11.0, "pb": 1.6, "ps": 2.1},
+                {"ts_code": "000001.SZ", "trade_date": "20250102", "turnover_rate": 2.5, "volume_ratio": 1.2, "total_mv": 100.0, "circ_mv": 80.0, "pe": 10.0, "pe_ttm": 12.0, "pb": 1.5, "ps": 2.0},
+                {"ts_code": "000001.SZ", "trade_date": "20250103", "turnover_rate": 3.0, "volume_ratio": 1.3, "total_mv": 110.0, "circ_mv": 85.0, "pe": 11.0, "pe_ttm": 13.0, "pb": 1.6, "ps": 2.1},
             ]
         )
         fixtures["moneyflow"] = frame(
             [
-                {"ts_code": "000001.SZ", "trade_date": "20250102", "net_mf_amount": 12.0, "net_mf_vol": 3.0},
-                {"ts_code": "000001.SZ", "trade_date": "20250103", "net_mf_amount": -4.0, "net_mf_vol": -1.0},
+                {"ts_code": "000001.SZ", "trade_date": "20250102", "net_mf_amount": 12.0, "net_mf_vol": 3.0, "buy_sm_amount": 20.0, "sell_sm_amount": 8.0, "buy_md_amount": 10.0, "sell_md_amount": 4.0, "buy_lg_amount": 30.0, "sell_lg_amount": 12.0, "buy_elg_amount": 5.0, "sell_elg_amount": 2.0},
+                {"ts_code": "000001.SZ", "trade_date": "20250103", "net_mf_amount": -4.0, "net_mf_vol": -1.0, "buy_sm_amount": 2.0, "sell_sm_amount": 6.0, "buy_md_amount": 3.0, "sell_md_amount": 5.0, "buy_lg_amount": 4.0, "sell_lg_amount": 8.0, "buy_elg_amount": 1.0, "sell_elg_amount": 2.0},
             ]
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -130,9 +130,13 @@ class FullMarketMLPanelTests(unittest.TestCase):
             panel = self._read_shards(result.shard_paths)
             first = panel.loc[panel.trade_date.eq("2025-01-02")].iloc[0]
             self.assertEqual(first["turnover_rate"], 2.5)
+            self.assertEqual(first["volume_ratio"], 1.2)
+            self.assertEqual(first["pe_ttm"], 12.0)
             self.assertEqual(first["total_mv"], 100.0)
             self.assertEqual(first["net_mf_amount"], 12.0)
             self.assertEqual(first["net_mf_vol"], 3.0)
+            self.assertEqual(first["buy_sm_amount"], 20.0)
+            self.assertEqual(first["sell_elg_amount"], 2.0)
 
     def test_panel_joins_index_context_by_trade_date(self):
         fixtures = two_day_split_fixture()

@@ -7,6 +7,7 @@ import pandas as pd
 from app.evaluation.full_market_ml.features import (
     CORE_FEATURE_SPECS,
     ALL_FEATURE_NAMES,
+    DEFAULT_FEATURE_NAMES,
     FEATURE_NAMES,
     FeatureLeakageError,
     assert_leak_free_schema,
@@ -101,6 +102,21 @@ class FullMarketMLFeatureTests(FullMarketMLTestCase):
         self.assertIn("adjusted_return_20d_robust_z", matrix.columns)
         self.assertTrue(matrix["adjusted_return_20d_rank"].between(0, 1).all())
 
+    def test_default_model_schema_stays_below_local_feature_cap(self):
+        matrix = build_features_for_date(self.config, feature_fixture(), "2025-01-10")
+
+        self.assertLessEqual(len(matrix.columns) - 2, 125)
+
+    def test_r4a_candidate_can_be_requested_explicitly_before_feature_selection(self):
+        matrix = build_features_for_date(
+            self.config,
+            feature_fixture(),
+            "2025-01-10",
+            feature_schema=["market_positive_breadth_1d"],
+        )
+
+        self.assertEqual(matrix.columns.tolist(), ["trade_date", "symbol", "market_positive_breadth_1d"])
+
     def test_market_context_features_are_built_from_signal_day_index_data(self):
         panel = feature_fixture(sessions=30)
         index_close = pd.Series(range(len(panel["trade_date"].unique())), dtype="float64") + 100.0
@@ -115,7 +131,8 @@ class FullMarketMLFeatureTests(FullMarketMLTestCase):
         self.assertIn("index_turnover_ratio_20d", matrix.columns)
         for name in ("market_index_return_5d", "market_index_volatility_20d", "index_turnover_ratio_20d"):
             self.assertIn(name, matrix.columns)
-        self.assertTrue(set(ALL_FEATURE_NAMES).issubset(matrix.columns))
+        self.assertTrue(set(DEFAULT_FEATURE_NAMES).issubset(matrix.columns))
+        self.assertFalse(set(ALL_FEATURE_NAMES).issubset(matrix.columns))
 
     def test_market_context_is_constant_by_date_when_a_symbol_has_missing_history(self):
         panel = feature_fixture(sessions=30)

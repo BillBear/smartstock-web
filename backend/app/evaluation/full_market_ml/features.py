@@ -10,6 +10,14 @@ import numpy as np
 import pandas as pd
 
 from .config import FullMarketMLConfig
+from .interaction_features import INTERACTION_FEATURE_NAMES, build_interaction_features
+from .market_industry_features import (
+    INDUSTRY_FEATURE_NAMES,
+    MARKET_FEATURE_NAMES,
+    build_industry_state_features,
+    build_market_state_features,
+)
+from .moneyflow_features import MONEYFLOW_FEATURE_NAMES, build_moneyflow_features
 
 
 @dataclass(frozen=True)
@@ -136,7 +144,14 @@ OPTIONAL_FEATURE_SPECS = (
 
 FEATURE_NAMES = [spec.name for spec in CORE_FEATURE_SPECS]
 OPTIONAL_FEATURE_NAMES = [spec.name for spec in OPTIONAL_FEATURE_SPECS]
-ALL_FEATURE_NAMES = [*FEATURE_NAMES, *OPTIONAL_FEATURE_NAMES]
+R4A_FEATURE_NAMES = [
+    *MARKET_FEATURE_NAMES,
+    *INDUSTRY_FEATURE_NAMES,
+    *INTERACTION_FEATURE_NAMES,
+    *MONEYFLOW_FEATURE_NAMES,
+]
+DEFAULT_FEATURE_NAMES = [*FEATURE_NAMES, *OPTIONAL_FEATURE_NAMES]
+ALL_FEATURE_NAMES = [*DEFAULT_FEATURE_NAMES, *R4A_FEATURE_NAMES]
 _DENIED_EXACT = {
     "entry_tradeable", "eligible_for_training", "eligible_signal_day", "entry_price", "exit_price",
     "exit_trade_date", "gross_return", "net_return_after_cost", "mfe", "mae",
@@ -162,7 +177,7 @@ def assert_leak_free_schema(columns: Iterable[str]) -> None:
 
 
 def _model_schema(feature_schema: Iterable[str] | None) -> list[str]:
-    schema = list(ALL_FEATURE_NAMES if feature_schema is None else feature_schema)
+    schema = list(DEFAULT_FEATURE_NAMES if feature_schema is None else feature_schema)
     assert_leak_free_schema(schema)
     unknown = sorted(set(schema) - set(ALL_FEATURE_NAMES))
     if unknown:
@@ -221,6 +236,16 @@ def build_time_series_features(config: FullMarketMLConfig, panel_shard: pd.DataF
         result[f"{output}_change_1d"] = result[source] / grouped[source].shift(1) - 1.0
     result["volume_cv_20d"] = grouped["volume_shares"].transform(lambda s: s.rolling(20, min_periods=20).std() / s.rolling(20, min_periods=20).mean())
     _add_optional_time_series(result, grouped)
+    detailed_flow_columns = {
+        f"{side}_{size}_amount"
+        for side in ("buy", "sell")
+        for size in ("sm", "md", "lg", "elg")
+    }
+    if detailed_flow_columns.issubset(result.columns):
+        result = build_moneyflow_features(result)
+    else:
+        for name in MONEYFLOW_FEATURE_NAMES:
+            result[name] = 1 if name.endswith("_missing") else np.nan
     return result
 
 
@@ -361,6 +386,34 @@ def _cross_section_for_date(market: pd.DataFrame) -> pd.DataFrame:
             result.loc[valid, rank_name] = industry_rows.groupby("industry_l1", sort=False)[source].rank(pct=True)
             median = industry_rows.groupby("industry_l1", sort=False)[source].transform("median")
             result.loc[valid, excess_name] = industry_rows[source] - median
+    market_required = {
+        "adjusted_return_1d", "adjusted_return_5d", "adjusted_return_20d",
+        "price_to_sma_20d", "total_mv", "at_up_limit", "at_down_limit",
+    }
+    if market_required.issubset(result.columns):
+        result = build_market_state_features(result)
+    else:
+        for name in MARKET_FEATURE_NAMES:
+            result[name] = np.nan
+    industry_required = {
+        "industry_l1", "adjusted_return_1d", "adjusted_return_5d", "adjusted_return_20d",
+        "price_to_sma_20d", "amount_ratio_5d", "turnover_rate", "at_up_limit", "at_down_limit",
+    }
+    if industry_required.issubset(result.columns):
+        result = build_industry_state_features(result)
+    else:
+        for name in INDUSTRY_FEATURE_NAMES:
+            result[name] = np.nan
+    interaction_required = {
+        "trade_date", "adjusted_return_5d", "adjusted_return_20d", "adjusted_return_60d",
+        "amount_ratio_5d", "turnover_rate_rank", "realized_volatility_20d",
+        "adjusted_close_to_high", "atr_pct_14d", "amount_log_rank",
+    }
+    if interaction_required.issubset(result.columns):
+        result = build_interaction_features(result)
+    else:
+        for name in INTERACTION_FEATURE_NAMES:
+            result[name] = np.nan
     return result
 
 

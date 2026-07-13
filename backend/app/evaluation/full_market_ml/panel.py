@@ -35,15 +35,26 @@ ALLOWED_FEATURE_COLUMNS = (
     "listing_age_trade_days",
     "valid_ohlc",
     "at_up_limit",
+    "at_down_limit",
     "median_amount_20d",
     "turnover_rate",
+    "volume_ratio",
     "total_mv",
     "circ_mv",
     "pe",
+    "pe_ttm",
     "pb",
     "ps",
     "net_mf_amount",
     "net_mf_vol",
+    "buy_sm_amount",
+    "sell_sm_amount",
+    "buy_md_amount",
+    "sell_md_amount",
+    "buy_lg_amount",
+    "sell_lg_amount",
+    "buy_elg_amount",
+    "sell_elg_amount",
     "market_index_close",
     "market_index_amount",
 )
@@ -154,13 +165,17 @@ def _build_base_panel(
         daily,
         _frame(frames, "daily_basic"),
         "daily_basic",
-        ("turnover_rate", "total_mv", "circ_mv", "pe", "pb", "ps"),
+        ("turnover_rate", "volume_ratio", "total_mv", "circ_mv", "pe", "pe_ttm", "pb", "ps"),
     )
     daily = _join_daily_endpoint_fields(
         daily,
         _frame(frames, "moneyflow"),
         "moneyflow",
-        ("net_mf_amount", "net_mf_vol"),
+        (
+            "net_mf_amount", "net_mf_vol", "buy_sm_amount", "sell_sm_amount",
+            "buy_md_amount", "sell_md_amount", "buy_lg_amount", "sell_lg_amount",
+            "buy_elg_amount", "sell_elg_amount",
+        ),
     )
     daily = _join_market_context_fields(daily, _frame(frames, "index_daily"))
     adjustments = _deduplicate_market_rows(_frame(frames, "adj_factor"), "adj_factor")
