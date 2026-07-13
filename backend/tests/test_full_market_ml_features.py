@@ -58,6 +58,10 @@ class FullMarketMLFeatureTests(FullMarketMLTestCase):
             with self.subTest(name=name), self.assertRaises(FeatureLeakageError):
                 assert_leak_free_schema(["adjusted_return_20d_rank", name])
 
+    def test_decision_regression_target_is_rejected_from_feature_schema(self):
+        with self.assertRaises(FeatureLeakageError):
+            assert_leak_free_schema(["target_clipped_return_10d"])
+
     def test_supplied_model_schema_is_checked_before_features_are_returned(self):
         with self.assertRaises(FeatureLeakageError):
             build_features_for_date(

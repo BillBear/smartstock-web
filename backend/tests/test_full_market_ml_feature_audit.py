@@ -100,6 +100,18 @@ class FullMarketMLFeatureAuditTests(FullMarketMLTestCase):
         self.assertEqual(set(result.ic["target"]), {"net_return_after_cost", "label_severe_negative_10d"})
         self.assertEqual(set(result.bucket_returns["target"]), {"net_return_after_cost", "label_severe_negative_10d"})
 
+    def test_audit_prefers_v2_decision_targets_when_present(self):
+        dataset = monotonic_fixture()
+        dataset["target_clipped_return_10d"] = dataset["future_return_10d"]
+        dataset["label_severe_negative_10d_v2"] = dataset["signal"] < 5
+
+        result = audit_features(dataset, three_fold_split_fixture(), feature_schema=["signal"])
+
+        self.assertEqual(
+            set(result.ic["target"]),
+            {"target_clipped_return_10d", "label_severe_negative_10d_v2"},
+        )
+
     def test_feature_audit_never_reads_final_holdout(self):
         with self.assertRaises(FinalHoldoutAccessError):
             audit_features(dataset_with_final_rows_exposed(), sealed_split_fixture())

@@ -22,7 +22,7 @@ _FEATURE_GROUPS = {
 }
 _FEATURE_GROUPS.update({"net_mf_amount": "moneyflow", "net_mf_vol": "moneyflow", "moneyflow": "moneyflow"})
 _NON_FEATURE_COLUMNS = {"trade_date", "symbol", TARGET_COLUMN, "eligible_for_training"}
-_LABEL_PREFIXES = ("future_", "label_", "relevance_", "mfe_", "mae_", "market_median_", "industry_median_")
+_LABEL_PREFIXES = ("future_", "label_", "target_", "relevance_", "mfe_", "mae_", "market_median_", "industry_median_")
 
 
 @dataclass(frozen=True)
@@ -87,10 +87,11 @@ def audit_features(
     correlation_rows: list[dict] = []
     drift_rows: list[dict] = []
     prior_fold_values: dict[str, pd.Series] | None = None
-    return_target = "net_return_after_cost" if "net_return_after_cost" in dataset else TARGET_COLUMN
+    return_target = _preferred_return_target(dataset.columns)
     target_columns = [return_target]
-    if "label_severe_negative_10d" in dataset:
-        target_columns.append("label_severe_negative_10d")
+    risk_target = _preferred_risk_target(dataset.columns)
+    if risk_target is not None:
+        target_columns.append(risk_target)
 
     for fold in split_plan.walk_forward:
         fold_data = dataset.loc[
@@ -322,7 +323,7 @@ def _audit_allowed_features(features: Iterable[str], audit: FeatureAuditResult |
         return requested
     if audit.ic.empty:
         return ()
-    target = "net_return_after_cost" if "net_return_after_cost" in set(audit.ic.get("target", ())) else TARGET_COLUMN
+    target = _preferred_return_target(set(audit.ic.get("target", ())))
     eligible = set(
         audit.ic.loc[
             audit.ic["target"].eq(target) & audit.ic["selection"].isin({"core_candidate", "interaction_candidate"}),
@@ -330,6 +331,27 @@ def _audit_allowed_features(features: Iterable[str], audit: FeatureAuditResult |
         ]
     )
     return tuple(feature for feature in requested if feature in eligible)
+
+
+def _preferred_return_target(columns: Iterable[str]) -> str:
+    available = set(columns)
+    for candidate in (
+        "target_clipped_return_10d",
+        "net_return_after_cost_10d",
+        "net_return_after_cost",
+        TARGET_COLUMN,
+    ):
+        if candidate in available:
+            return candidate
+    return TARGET_COLUMN
+
+
+def _preferred_risk_target(columns: Iterable[str]) -> str | None:
+    available = set(columns)
+    for candidate in ("label_severe_negative_10d_v2", "label_severe_negative_10d"):
+        if candidate in available:
+            return candidate
+    return None
 
 
 def _feature_group(feature: str) -> str:
