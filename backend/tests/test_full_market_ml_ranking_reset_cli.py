@@ -69,6 +69,7 @@ class FullMarketMLRankingResetCLITests(unittest.TestCase):
             runner = RankingResetRunner(config, root / "run", asset_root=root / "assets")
 
             self.assertIn("label-audit", runner.services)
+            self.assertIn("feature-evidence", runner.services)
 
     def test_unimplemented_stage_fails_without_complete_state(self):
         with tempfile.TemporaryDirectory() as directory:

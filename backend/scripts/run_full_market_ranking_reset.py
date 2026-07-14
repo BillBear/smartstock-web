@@ -21,6 +21,7 @@ from app.evaluation.full_market_ml.research_contract import (
     contract_from_mapping,
 )
 from app.evaluation.full_market_ml.label_stage import run_label_audit_stage
+from app.evaluation.full_market_ml.feature_stage import run_feature_evidence_stage
 
 
 RANKING_STAGES = (
@@ -41,6 +42,12 @@ STAGE_IMPLEMENTATION_FILES = {
         "app/evaluation/full_market_ml/research_contract.py",
         "app/evaluation/full_market_ml/label_stage.py",
         "app/evaluation/full_market_ml/ranking_labels.py",
+    ),
+    "feature-evidence": (
+        "app/evaluation/full_market_ml/research_contract.py",
+        "app/evaluation/full_market_ml/feature_evidence.py",
+        "app/evaluation/full_market_ml/feature_stage.py",
+        "app/evaluation/full_market_ml/fundamental_features.py",
     ),
 }
 STAGE_DEPENDENCIES = {"label-audit": "contract", "feature-evidence": "label-audit"}
@@ -83,6 +90,11 @@ class RankingResetRunner:
                 resolved_asset_root = Path(asset_root).resolve()
                 self.services["label-audit"] = (
                     lambda contract, run_root, _stage: run_label_audit_stage(
+                        contract, run_root, resolved_asset_root
+                    )
+                )
+                self.services["feature-evidence"] = (
+                    lambda contract, run_root, _stage: run_feature_evidence_stage(
                         contract, run_root, resolved_asset_root
                     )
                 )

@@ -122,3 +122,34 @@ entry-tradeability rules receive ranking labels.
 `positive_net_return_10d` and `severe_negative_10d` do not change the alpha
 relevance grade. A later policy may combine independently validated alpha and
 risk models, but the primary ranker is selected only on the alpha ordering.
+# Ranking Reset Feature Evidence (2026-07-14)
+
+The ranking-reset experiment evaluates features at the after-close signal time
+against the daily cross-sectional `alpha_target_10d`. Descriptive evidence is
+calculated only on the five registered outer validation folds. It does not by
+itself admit a feature to a model; Task 5 nested-OOF block ablation remains the
+admission gate.
+
+Point-in-time rules:
+
+- Price, volume, turnover, market breadth, and industry-relative features use
+  only the signal date and prior sessions.
+- Fundamental values require a non-future announcement. Financial indicators
+  older than 180 calendar days and forecast/express values older than 120 days
+  are stale and become missing.
+- News and sentiment are excluded from this experiment.
+- Detailed order-size money-flow fields are not present in the immutable
+  `fmv3_ea0797d57ed62a916b3a` dataset. The five affected registered features
+  remain null and are rejected; no proxy value is fabricated.
+- Whole-market context fields such as breadth and limit rates are constant
+  within one date. They may be used as context or interaction inputs but cannot
+  establish standalone daily stock-ranking IC.
+
+Formal artifacts:
+
+- Run: `ml_ranking_reset_20260714_v3`
+- Split SHA256: `bf73da908d5773d076de6bc6ebff651e0312900c52d831d22ae69e00a470b08e`
+- Evidence SHA256: `ae1d5943830ac6cdf59313df5de94e3a68419b0d82b4f299d6a9646489950dab`
+- Matrix manifest SHA256: `953260eb07504f0fa3b5780ef17e90262b5710ca0bec15a022d17a7b78c740f2`
+- Development sample: 1,604,055 rows across 324 dates; 4,094 A-quadrant
+  training symbols and 1,021 C-quadrant unseen symbols.

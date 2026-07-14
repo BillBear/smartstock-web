@@ -33,6 +33,12 @@ FUNDAMENTAL_FEATURE_NAMES = (
     "point_in_time_coverage_flag",
 )
 
+SOURCE_MAX_AGE_DAYS = {
+    "fundamental": 180,
+    "forecast": 120,
+    "express": 120,
+}
+
 
 def build_point_in_time_fundamental_features(
     signals: pd.DataFrame,
@@ -79,8 +85,12 @@ def build_point_in_time_fundamental_features(
     signal_dates = pd.to_datetime(result["trade_date"], errors="coerce")
     for source in ("fundamental", "forecast", "express"):
         announcement = pd.to_datetime(joined.get(f"{source}_announcement_date"), errors="coerce")
-        result[f"{source}_days_since_announcement"] = (signal_dates - announcement).dt.days.astype("float64")
-        result[f"{source}_missing"] = announcement.isna().astype("float64")
+        age = (signal_dates - announcement).dt.days.astype("float64")
+        stale = age.gt(SOURCE_MAX_AGE_DAYS[source])
+        result[f"{source}_days_since_announcement"] = age
+        result[f"{source}_missing"] = (announcement.isna() | stale).astype("float64")
+        source_outputs = [name for name in mapping if name.startswith(f"{source}_")]
+        result.loc[stale, source_outputs] = np.nan
     result["point_in_time_coverage_flag"] = result["fundamental_missing"].rsub(1.0)
     return result[[*base.columns, *FUNDAMENTAL_FEATURE_NAMES]]
 

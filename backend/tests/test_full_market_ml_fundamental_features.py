@@ -98,6 +98,24 @@ class FundamentalFeatureTests(unittest.TestCase):
 
         self.assertEqual(features["fundamental_revenue_yoy_acceleration"].item(), 10.0)
 
+    def test_stale_fundamental_report_is_treated_as_missing(self):
+        signals = pd.DataFrame([{"symbol": "000001", "trade_date": "2025-12-31"}])
+        fina = pd.DataFrame(
+            [
+                {
+                    "symbol": "000001",
+                    "ann_date": "2025-01-01",
+                    "end_date": "2024-12-31",
+                    "roe": 10.0,
+                }
+            ]
+        )
+
+        features = build_point_in_time_fundamental_features(signals, fina)
+
+        self.assertEqual(features["fundamental_missing"].item(), 1.0)
+        self.assertTrue(pd.isna(features["fundamental_roe"].item()))
+        self.assertEqual(features["point_in_time_coverage_flag"].item(), 0.0)
 
 if __name__ == "__main__":
     unittest.main()
