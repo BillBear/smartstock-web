@@ -52,6 +52,8 @@ def archive_research_paths(
         dir=target.parent, prefix=f".{target.name}-", suffix=".tmp", delete=False
     ) as handle:
         temporary = Path(handle.name)
+    target_created = False
+    deletion_started = False
     try:
         with tarfile.open(temporary, mode="w:gz", compresslevel=6) as archive:
             for relative in sorted(files):
@@ -62,10 +64,12 @@ def archive_research_paths(
             info.mode = 0o600
             archive.addfile(info, io.BytesIO(payload))
         os.replace(temporary, target)
+        target_created = True
         verified = verify_research_archive(target)
         sidecar = target.with_suffix(target.suffix + ".manifest.json")
         _write_json_atomic(sidecar, verified)
         if delete_after_verify:
+            deletion_started = True
             for source in sorted(sources, key=lambda path: len(path.parts), reverse=True):
                 if source.is_dir():
                     shutil.rmtree(source)
@@ -74,6 +78,9 @@ def archive_research_paths(
         return verified
     except BaseException:
         temporary.unlink(missing_ok=True)
+        if target_created and not deletion_started:
+            target.unlink(missing_ok=True)
+            target.with_suffix(target.suffix + ".manifest.json").unlink(missing_ok=True)
         raise
 
 
