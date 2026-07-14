@@ -65,7 +65,10 @@ def build_amount_tail_scores(
     )["score__amount_raw"].rank(method="average", pct=True)
     result["score__neutral_amount_tail"] = _cross_sectional_neutral_residual(result)
     result["score__neutral_amount_tail_diversified"] = np.nan
-    for _, index in result.groupby("trade_date", sort=True).groups.items():
+    diversification_groups = ["trade_date"]
+    if "quadrant" in result:
+        diversification_groups.append("quadrant")
+    for _, index in result.groupby(diversification_groups, sort=True).groups.items():
         current = result.loc[index]
         result.loc[index, "score__neutral_amount_tail_diversified"] = _diversified_order_score(
             current,

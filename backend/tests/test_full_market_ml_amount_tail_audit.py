@@ -96,6 +96,19 @@ class FullMarketMLAmountTailAuditTests(unittest.TestCase):
 
         self.assertTrue(scored["score__neutral_amount_tail_diversified"].notna().all())
 
+    def test_diversification_is_applied_inside_each_evaluation_quadrant(self):
+        rows = _signal_rows()
+        rows["quadrant"] = np.where(rows["symbol"].astype(int).le(10), "A", "C")
+
+        scored = build_amount_tail_scores(rows)
+
+        for _, current in scored.groupby(["trade_date", "quadrant"]):
+            selected = current.sort_values(
+                ["score__neutral_amount_tail_diversified", "symbol"],
+                ascending=[False, True],
+            ).head(5)
+            self.assertEqual(selected["industry_l1"].nunique(), 5)
+
     def test_daily_metrics_and_block_bootstrap_use_precomputed_dates(self):
         rows = build_amount_tail_scores(_signal_rows())
         rows["score__random"] = -rows["score__amount_raw"]
