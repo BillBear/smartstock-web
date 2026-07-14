@@ -9,6 +9,8 @@ from app.evaluation.full_market_ml.evaluator import (
     evaluate_calibration,
     evaluate_ranking,
     simulate_daily_topk_portfolio,
+    simulate_daily_mark_to_market_portfolio,
+    validate_identical_comparison_rows,
 )
 from tests.full_market_ml_fixtures import (
     bootstrap_date_fixture,
@@ -155,6 +157,67 @@ class FullMarketMLEvaluatorTests(FullMarketMLTestCase):
         self.assertEqual(result["closed_trade_count"], 0)
         self.assertEqual(result["ambiguous_exit_count"], 1)
         self.assertEqual(result["untradeable_entry_count"], 1)
+
+    def test_mark_to_market_drawdown_uses_intrahorizon_daily_prices(self):
+        signals = pd.DataFrame(
+            [{"trade_date": "2025-01-02", "symbol": "000001", "score": 1.0}]
+        )
+        prices = pd.DataFrame(
+            [
+                {"trade_date": "2025-01-02", "symbol": "000001", "adjusted_open": 100.0, "adjusted_close": 100.0, "is_suspended": False, "at_up_limit_open": False},
+                {"trade_date": "2025-01-03", "symbol": "000001", "adjusted_open": 100.0, "adjusted_close": 100.0, "is_suspended": False, "at_up_limit_open": False},
+                {"trade_date": "2025-01-06", "symbol": "000001", "adjusted_open": 50.0, "adjusted_close": 50.0, "is_suspended": False, "at_up_limit_open": False},
+                {"trade_date": "2025-01-07", "symbol": "000001", "adjusted_open": 110.0, "adjusted_close": 110.0, "is_suspended": False, "at_up_limit_open": False},
+            ]
+        )
+
+        result = simulate_daily_mark_to_market_portfolio(
+            signals,
+            prices,
+            score_col="score",
+            top_k=1,
+            hold_sessions=3,
+            commission=0.0,
+            slippage=0.0,
+            daily_cohort_fraction=1.0,
+            per_stock_cap=1.0,
+        )
+
+        self.assertAlmostEqual(result["total_return"], 0.10, places=6)
+        self.assertLessEqual(result["maximum_drawdown"], -0.49)
+
+    def test_mark_to_market_portfolio_prevents_duplicate_simultaneous_positions(self):
+        signals = pd.DataFrame(
+            [
+                {"trade_date": "2025-01-02", "symbol": "000001", "score": 1.0},
+                {"trade_date": "2025-01-03", "symbol": "000001", "score": 1.0},
+            ]
+        )
+        dates = ("2025-01-02", "2025-01-03", "2025-01-06", "2025-01-07", "2025-01-08")
+        prices = pd.DataFrame(
+            [
+                {"trade_date": date, "symbol": "000001", "adjusted_open": 100.0, "adjusted_close": 100.0, "is_suspended": False, "at_up_limit_open": False}
+                for date in dates
+            ]
+        )
+
+        result = simulate_daily_mark_to_market_portfolio(
+            signals, prices, score_col="score", top_k=1, hold_sessions=3,
+            commission=0.0, slippage=0.0, daily_cohort_fraction=0.5, per_stock_cap=0.5,
+        )
+
+        self.assertEqual(result["opened_trade_count"], 1)
+        self.assertEqual(result["duplicate_position_skip_count"], 1)
+
+    def test_controlled_comparison_rejects_different_rows_or_risk_masks(self):
+        left = pd.DataFrame(
+            [{"trade_date": "2025-01-02", "symbol": "000001", "risk_eligible": True}]
+        )
+        right = left.copy()
+        right.loc[0, "risk_eligible"] = False
+
+        with self.assertRaisesRegex(ValueError, "risk mask"):
+            validate_identical_comparison_rows({"left": left, "right": right})
 
 
 if __name__ == "__main__":

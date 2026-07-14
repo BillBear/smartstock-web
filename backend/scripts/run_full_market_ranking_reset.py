@@ -28,6 +28,7 @@ from app.evaluation.full_market_ml.ranking_stage import (
     run_ranker_oof_stage,
 )
 from app.evaluation.full_market_ml.risk_stage import run_risk_oof_stage
+from app.evaluation.full_market_ml.controlled_stage import run_controlled_evaluation_stage
 
 
 RANKING_STAGES = (
@@ -75,6 +76,10 @@ STAGE_IMPLEMENTATION_FILES = {
         "app/evaluation/full_market_ml/risk_model.py",
         "app/evaluation/full_market_ml/risk_stage.py",
     ),
+    "controlled-evaluation": (
+        "app/evaluation/full_market_ml/controlled_stage.py",
+        "app/evaluation/full_market_ml/evaluator.py",
+    ),
 }
 STAGE_DEPENDENCIES = {
     "label-audit": "contract",
@@ -83,6 +88,7 @@ STAGE_DEPENDENCIES = {
     "nested-ablation": "baseline-oof",
     "ranker-oof": "nested-ablation",
     "risk-oof": "nested-ablation",
+    "controlled-evaluation": "risk-oof",
 }
 
 
@@ -149,6 +155,11 @@ class RankingResetRunner:
                 self.services["risk-oof"] = (
                     lambda contract, run_root, _stage: run_risk_oof_stage(
                         contract, run_root
+                    )
+                )
+                self.services["controlled-evaluation"] = (
+                    lambda contract, run_root, _stage: run_controlled_evaluation_stage(
+                        contract, run_root, resolved_asset_root
                     )
                 )
 

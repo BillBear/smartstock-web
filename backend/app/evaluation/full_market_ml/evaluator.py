@@ -216,6 +216,199 @@ def simulate_daily_topk_portfolio(
     }
 
 
+def validate_identical_comparison_rows(comparators: dict[str, pd.DataFrame]) -> None:
+    """Require every score comparator to use identical keys and risk eligibility."""
+    if len(comparators) < 2:
+        raise ValueError("at least two comparators are required")
+    reference_name, reference = next(iter(comparators.items()))
+    columns = ["trade_date", "symbol"]
+    if "risk_eligible" in reference:
+        columns.append("risk_eligible")
+    reference_rows = reference[columns].sort_values(["trade_date", "symbol"], kind="stable").reset_index(drop=True)
+    for name, rows in list(comparators.items())[1:]:
+        missing = sorted(set(columns) - set(rows.columns))
+        if missing:
+            raise ValueError(f"comparator {name} missing comparison columns: {', '.join(missing)}")
+        current = rows[columns].sort_values(["trade_date", "symbol"], kind="stable").reset_index(drop=True)
+        if not current[["trade_date", "symbol"]].equals(reference_rows[["trade_date", "symbol"]]):
+            raise ValueError(f"comparator {name} does not use identical rows as {reference_name}")
+        if "risk_eligible" in columns and not current["risk_eligible"].equals(reference_rows["risk_eligible"]):
+            raise ValueError(f"comparator {name} does not use the identical risk mask as {reference_name}")
+
+
+def simulate_daily_mark_to_market_portfolio(
+    signals: pd.DataFrame,
+    price_panel: pd.DataFrame,
+    *,
+    score_col: str,
+    eligible_col: str | None = None,
+    top_k: int = 5,
+    hold_sessions: int = 10,
+    commission: float = 0.0003,
+    slippage: float = 0.001,
+    daily_cohort_fraction: float = 0.10,
+    per_stock_cap: float = 0.02,
+    max_gross_exposure: float = 1.0,
+) -> dict[str, Any]:
+    """Simulate next-open entries and daily close mark-to-market equity."""
+    signal_required = {"trade_date", "symbol", score_col}
+    price_required = {
+        "trade_date", "symbol", "adjusted_open", "adjusted_close",
+        "is_suspended", "at_up_limit_open",
+    }
+    missing_signals = sorted(signal_required - set(signals.columns))
+    missing_prices = sorted(price_required - set(price_panel.columns))
+    if missing_signals or missing_prices:
+        raise ValueError(
+            "mark-to-market inputs missing columns: "
+            + ", ".join([*missing_signals, *missing_prices])
+        )
+    if eligible_col is not None and eligible_col not in signals:
+        raise ValueError(f"signals missing eligibility column: {eligible_col}")
+    if not 0 < daily_cohort_fraction <= 1 or not 0 < per_stock_cap <= 1 or not 0 < max_gross_exposure <= 1:
+        raise ValueError("portfolio exposure fractions must be in (0, 1]")
+    top_k = max(1, int(top_k))
+    hold_sessions = max(1, int(hold_sessions))
+    commission = max(0.0, float(commission))
+    slippage = max(0.0, float(slippage))
+    prices = price_panel.copy()
+    prices["trade_date"] = pd.to_datetime(prices["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    prices["symbol"] = prices["symbol"].astype("string").str.split(".", regex=False).str[0].str.zfill(6)
+    prices = prices.sort_values(["trade_date", "symbol"], kind="stable").drop_duplicates(
+        ["trade_date", "symbol"], keep="last"
+    )
+    calendar = tuple(sorted(prices["trade_date"].dropna().unique()))
+    calendar_index = {date: index for index, date in enumerate(calendar)}
+    lookup = prices.set_index(["trade_date", "symbol"])
+    if not lookup.index.is_unique:
+        raise ValueError("price panel contains duplicate trade_date and symbol rows")
+    signal_rows = signals.copy()
+    signal_rows["trade_date"] = pd.to_datetime(signal_rows["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    signal_rows["symbol"] = signal_rows["symbol"].astype("string").str.split(".", regex=False).str[0].str.zfill(6)
+    if eligible_col is not None:
+        signal_rows = signal_rows.loc[signal_rows[eligible_col].eq(True)]
+    orders_by_date: dict[str, list[str]] = {}
+    for signal_date, daily in signal_rows.groupby("trade_date", sort=True):
+        index = calendar_index.get(signal_date)
+        if index is None or index + 1 >= len(calendar):
+            continue
+        selected = daily.dropna(subset=[score_col]).sort_values(
+            [score_col, "symbol"], ascending=[False, True], kind="stable"
+        ).head(top_k)
+        orders_by_date.setdefault(calendar[index + 1], []).extend(selected["symbol"].tolist())
+
+    cash = 1.0
+    positions: dict[str, dict[str, float | int]] = {}
+    equity_curve = []
+    opened = closed = duplicate_skips = untradeable_skips = 0
+    turnover_notional = 0.0
+    prior_equity = 1.0
+    for date_index, trade_date in enumerate(calendar):
+        opening_values = {}
+        for symbol, position in positions.items():
+            row = _price_row(lookup, trade_date, symbol)
+            if row is not None:
+                opening_values[symbol] = float(position["quantity"]) * float(row["adjusted_open"])
+        gross_open = sum(opening_values.values())
+        capacity = max(0.0, max_gross_exposure * prior_equity - gross_open)
+        candidates = []
+        for symbol in orders_by_date.get(trade_date, []):
+            if symbol in positions:
+                duplicate_skips += 1
+                continue
+            row = _price_row(lookup, trade_date, symbol)
+            if row is None or bool(row["is_suspended"]) or bool(row["at_up_limit_open"]):
+                untradeable_skips += 1
+                continue
+            opening = float(row["adjusted_open"])
+            if not np.isfinite(opening) or opening <= 0:
+                untradeable_skips += 1
+                continue
+            candidates.append((symbol, opening))
+        cohort_budget = min(cash, prior_equity * daily_cohort_fraction, capacity)
+        per_position = min(
+            prior_equity * per_stock_cap,
+            cohort_budget / len(candidates) if candidates else 0.0,
+        )
+        for symbol, opening in candidates:
+            if per_position <= 0 or cash + 1e-12 < per_position:
+                break
+            execution_price = opening * (1.0 + slippage)
+            quantity = per_position / (execution_price * (1.0 + commission))
+            cash -= per_position
+            positions[symbol] = {
+                "quantity": quantity,
+                "entry_index": date_index,
+            }
+            turnover_notional += per_position
+            opened += 1
+
+        close_values = {}
+        exits = []
+        for symbol, position in positions.items():
+            row = _price_row(lookup, trade_date, symbol)
+            if row is None:
+                continue
+            close = float(row["adjusted_close"])
+            if not np.isfinite(close) or close <= 0:
+                continue
+            value = float(position["quantity"]) * close
+            close_values[symbol] = value
+            if date_index - int(position["entry_index"]) + 1 >= hold_sessions:
+                proceeds = value * (1.0 - slippage) * (1.0 - commission)
+                cash += proceeds
+                turnover_notional += proceeds
+                exits.append(symbol)
+                closed += 1
+        for symbol in exits:
+            positions.pop(symbol, None)
+            close_values.pop(symbol, None)
+        equity = cash + sum(close_values.values())
+        prior_equity = equity
+        equity_curve.append(
+            {
+                "trade_date": trade_date,
+                "equity": float(equity),
+                "cash": float(cash),
+                "position_count": len(positions),
+                "gross_exposure": float(sum(close_values.values()) / equity) if equity > 0 else 0.0,
+            }
+        )
+    if not equity_curve:
+        return {
+            "total_return": 0.0,
+            "maximum_drawdown": 0.0,
+            "opened_trade_count": 0,
+            "closed_trade_count": 0,
+            "duplicate_position_skip_count": 0,
+            "untradeable_entry_count": 0,
+            "turnover": 0.0,
+            "equity_curve": [],
+        }
+    equity = np.asarray([row["equity"] for row in equity_curve], dtype="float64")
+    peaks = np.maximum.accumulate(equity)
+    drawdown = equity / peaks - 1.0
+    average_equity = float(np.mean(equity))
+    return {
+        "total_return": float(equity[-1] - 1.0),
+        "maximum_drawdown": float(drawdown.min()),
+        "opened_trade_count": opened,
+        "closed_trade_count": closed,
+        "open_position_count": len(positions),
+        "duplicate_position_skip_count": duplicate_skips,
+        "untradeable_entry_count": untradeable_skips,
+        "turnover": float(turnover_notional / average_equity) if average_equity > 0 else 0.0,
+        "equity_curve": equity_curve,
+    }
+
+
+def _price_row(lookup: pd.DataFrame, trade_date: str, symbol: str):
+    try:
+        return lookup.loc[(trade_date, symbol)]
+    except KeyError:
+        return None
+
+
 def _daily_ranking_metrics(
     rows: pd.DataFrame,
     score_col: str,
