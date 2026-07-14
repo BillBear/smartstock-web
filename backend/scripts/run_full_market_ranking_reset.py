@@ -22,6 +22,7 @@ from app.evaluation.full_market_ml.research_contract import (
 )
 from app.evaluation.full_market_ml.label_stage import run_label_audit_stage
 from app.evaluation.full_market_ml.feature_stage import run_feature_evidence_stage
+from app.evaluation.full_market_ml.ablation_stage import run_nested_ablation_stage
 
 
 RANKING_STAGES = (
@@ -49,8 +50,19 @@ STAGE_IMPLEMENTATION_FILES = {
         "app/evaluation/full_market_ml/feature_stage.py",
         "app/evaluation/full_market_ml/fundamental_features.py",
     ),
+    "nested-ablation": (
+        "app/evaluation/full_market_ml/ablation.py",
+        "app/evaluation/full_market_ml/ablation_stage.py",
+        "app/evaluation/full_market_ml/baseline_model.py",
+        "app/evaluation/full_market_ml/feature_selection.py",
+    ),
 }
-STAGE_DEPENDENCIES = {"label-audit": "contract", "feature-evidence": "label-audit"}
+STAGE_DEPENDENCIES = {
+    "label-audit": "contract",
+    "feature-evidence": "label-audit",
+    "baseline-oof": "feature-evidence",
+    "nested-ablation": "baseline-oof",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -96,6 +108,11 @@ class RankingResetRunner:
                 self.services["feature-evidence"] = (
                     lambda contract, run_root, _stage: run_feature_evidence_stage(
                         contract, run_root, resolved_asset_root
+                    )
+                )
+                self.services["nested-ablation"] = (
+                    lambda contract, run_root, _stage: run_nested_ablation_stage(
+                        contract, run_root
                     )
                 )
 

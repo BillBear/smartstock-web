@@ -16,7 +16,7 @@ from .splits import FinalHoldoutAccessError, SplitPlan
 @dataclass(frozen=True)
 class FeatureBlockDecision:
     name: str
-    status: Literal["accepted", "rejected", "diagnostic_only"]
+    status: Literal["accepted", "accepted_alpha", "accepted_risk_only", "rejected", "diagnostic_only"]
     coverage: float
     return_fold_directions: tuple[int, ...]
     risk_fold_directions: tuple[int, ...]
@@ -24,6 +24,9 @@ class FeatureBlockDecision:
     max_psi: float
     oof_uplift: dict[str, float]
     reasons: tuple[str, ...]
+    inner_selected_folds: tuple[bool, ...] = ()
+    outer_fold_uplifts: tuple[dict[str, float], ...] = ()
+    precision_bootstrap_ci: tuple[float, float] = (float("nan"), float("nan"))
 
 
 def evaluate_feature_blocks(
