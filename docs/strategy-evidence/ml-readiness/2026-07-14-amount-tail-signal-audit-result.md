@@ -238,6 +238,11 @@ registered key. It found zero duplicate keys, quadrants A/C, folds 1-5, equal
 comparator trade counts (`A=760`, `C=790`), and confirmed
 `production_integration_allowed=false`.
 
+The adversarial portfolio check also inspected all `7,750` selected lots over
+their 10-session holding windows. No lot had a missing valid adjusted close, so
+the reported return and drawdown did not depend on the simulator's missing-mark
+fallback path.
+
 The full backend suite emitted existing SQLAlchemy/SQLite unclosed-connection
 `ResourceWarning` messages but no test failures. This research-only change did
 not touch the frontend, so frontend lint/build were not applicable.
