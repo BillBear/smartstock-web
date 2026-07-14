@@ -31,3 +31,23 @@ cd backend
 ```
 
 The environment directory is ignored and local. Tokens remain in the shared local secret file and are never copied into the asset root or Git.
+
+## 2026-07-14 Ranking Reset
+
+Current formal evidence:
+
+```text
+${SMARTSTOCK_ROOT}/ml-assets/runs/ml_ranking_reset_20260714_v4/
+```
+
+Verified local archive of superseded process runs:
+
+```text
+${SMARTSTOCK_ROOT}/ml-assets/archives/ml_ranking_reset_20260714_superseded.tar.gz
+${SMARTSTOCK_ROOT}/ml-assets/archives/ml_ranking_reset_20260714_superseded.tar.gz.manifest.json
+```
+
+The archive contains 289 files and has SHA256
+`b535b3214abf109a83b12fe54bc1e7a141629d7141026f69ff8db0721ac5b382`.
+The archive is on the same local disk, so it saves working-directory space and
+preserves reviewability but is not disaster-recovery backup.

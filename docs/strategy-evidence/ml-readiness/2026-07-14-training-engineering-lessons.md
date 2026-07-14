@@ -155,3 +155,19 @@ The next program succeeds if it produces one of two honest outcomes:
 2. A correct experiment proves that the available features do not contain sufficient stable Top-K signal, and closes without more tuning.
 
 Running longer, generating more artifacts, or obtaining a good result on one fold is not success.
+
+## Enforcement Added on 2026-07-14
+
+The next registered ranking reset applied these lessons instead of only documenting them:
+
+- Exact baseline source columns and deterministic seeds are part of the contract hash.
+- Historical coverage is rebuilt from a corrected `stock_basic` interval snapshot; missing delist fields block the audit.
+- Daily cross-sectional alpha prevalence and market-regime correlation are tested before features.
+- Negative nested-OOF feature blocks cannot be accepted.
+- Ranker training requires a fresh, measured model preflight; editing a pass flag is insufficient because evidence is recalculated.
+- Baselines are compared on identical OOF rows and a shared risk mask.
+- Portfolio drawdown uses daily mark-to-market equity and prevents duplicate simultaneous positions.
+- Every stage writes heartbeat, elapsed time, peak RSS, terminal status, logs, and a resume command.
+- Superseded process data is deleted only after archive member checksums and the archive checksum pass.
+
+The result still failed the model gate. That is the intended behavior of a corrected process: it stopped before an unsupported model was trained or presented as progress.

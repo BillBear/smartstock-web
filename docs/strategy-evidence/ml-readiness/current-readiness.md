@@ -112,3 +112,16 @@ Precision@5 固定门槛。状态为 `research_only_failed_gate`，原时间留�
 Precision@5 为 `13.77%`、NDCG@10 为 `12.81%`，且 Top5 严重负面率为
 `56.80%`，未通过固定门槛，因此没有新模型接入生产。完整数据链路复盘、标签
 对照实验和下一轮拆分目标见 `2026-07-12-v2-corrected-oof-review.md`。
+
+## 2026-07-14 Ranking Reset v4
+
+最新正式研究运行 `ml_ranking_reset_20260714_v4` 已完成数据、标签、特征、
+baseline、风险和受控组合评估。历史覆盖与日截面 alpha 标签通过审计，但六个
+特征块均未通过 nested OOF 门槛，模型预检以
+`features:no_accepted_alpha_feature_block` 阻断 ranker 训练。终态仍为
+`research_only_failed_gate`，没有冻结模型、没有打开未来留出集、没有接入生产。
+
+风险模型在 A/C 的 AUC 约为 `0.67`，但 ECE 约为 `0.15`，只能视为风险排序，
+不能展示为可靠概率。完整证据见
+`2026-07-14-ranking-reset-development-review.md` 和
+`2026-07-14-ranking-reset-closure.md`。
