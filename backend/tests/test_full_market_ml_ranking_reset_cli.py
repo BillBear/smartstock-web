@@ -73,6 +73,7 @@ class FullMarketMLRankingResetCLITests(unittest.TestCase):
             self.assertIn("baseline-oof", runner.services)
             self.assertIn("nested-ablation", runner.services)
             self.assertIn("ranker-oof", runner.services)
+            self.assertIn("risk-oof", runner.services)
 
     def test_unimplemented_stage_fails_without_complete_state(self):
         with tempfile.TemporaryDirectory() as directory:
