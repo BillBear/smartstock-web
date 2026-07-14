@@ -67,6 +67,12 @@ _PORTFOLIO_SCORES = (
     "score__adjusted_return_60d",
     "score__random",
 )
+_BACKEND_ROOT = Path(__file__).resolve().parents[3]
+_IMPLEMENTATION_FILES = (
+    "app/evaluation/full_market_ml/amount_tail_audit.py",
+    "app/evaluation/full_market_ml/amount_tail_stage.py",
+    "scripts/run_amount_tail_signal_audit.py",
+)
 
 
 def run_amount_tail_signal_audit(
@@ -193,11 +199,14 @@ def run_amount_tail_signal_audit(
             "quadrants": sorted(rows["quadrant"].astype(str).unique()),
             "decision": decision,
         }
+        implementation_files, implementation_sha256 = _implementation_manifest()
         manifest = {
             **result,
             "source_row_count": int(len(baseline)),
             "created_at": _now(),
             "config_sha256": _sha256(config_path),
+            "implementation_sha256": implementation_sha256,
+            "implementation_files": implementation_files,
             "source_inputs": [
                 {"path": str(baseline_path), "sha256": _sha256(baseline_path)},
                 *matrix_inputs,
@@ -566,6 +575,20 @@ def _artifact_manifest(root: Path) -> list[dict[str, Any]]:
             }
         )
     return artifacts
+
+
+def _implementation_manifest() -> tuple[list[dict[str, str]], str]:
+    files = []
+    combined = hashlib.sha256()
+    for relative in _IMPLEMENTATION_FILES:
+        path = _BACKEND_ROOT / relative
+        digest = _sha256(path)
+        files.append({"path": relative, "sha256": digest})
+        combined.update(relative.encode("utf-8"))
+        combined.update(b"\0")
+        combined.update(digest.encode("ascii"))
+        combined.update(b"\n")
+    return files, combined.hexdigest()
 
 
 def _write_progress(

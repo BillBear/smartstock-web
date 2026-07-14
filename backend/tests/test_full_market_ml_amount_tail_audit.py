@@ -354,6 +354,15 @@ class FullMarketMLAmountTailAuditTests(unittest.TestCase):
             manifest = json.loads((output_root / "run_manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["source_row_count"], len(rows))
             self.assertTrue(all(item["sha256"] for item in manifest["artifacts"]))
+            self.assertEqual(len(manifest["implementation_sha256"]), 64)
+            self.assertEqual(
+                {item["path"] for item in manifest["implementation_files"]},
+                {
+                    "app/evaluation/full_market_ml/amount_tail_audit.py",
+                    "app/evaluation/full_market_ml/amount_tail_stage.py",
+                    "scripts/run_amount_tail_signal_audit.py",
+                },
+            )
 
 
 if __name__ == "__main__":
