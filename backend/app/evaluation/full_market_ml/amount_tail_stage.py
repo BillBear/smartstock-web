@@ -504,7 +504,15 @@ def _render_report(
         "| --- | --- |",
     ]
     lines.extend(f"| {gate['name']} | {str(bool(gate['passed'])).lower()} |" for gate in decision["gates"])
-    lines.extend(["", "## Ranking Summary", "", "| Quadrant | Score | P@5 | NDCG@10 | Top5 return |", "| --- | --- | ---: | ---: | ---: |"]) 
+    lines.extend(
+        [
+            "",
+            "## Ranking Summary",
+            "",
+            "| Quadrant | Score | P@5 | NDCG@10 | Top5 return |",
+            "| --- | --- | ---: | ---: | ---: |",
+        ]
+    )
     summary = daily.groupby(["quadrant", "score"])[
         ["precision_at_5", "ndcg_at_10", "top_5_mean_return"]
     ].mean().reset_index()
