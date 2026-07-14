@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import signal
 import tempfile
+import time
 import unittest
 
 from scripts.run_full_market_ranking_reset import (
@@ -227,6 +230,93 @@ class FullMarketMLRankingResetCLITests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "predecessor implementation changed"):
                 runner.run("label-audit")
+
+    def test_runner_persists_heartbeat_progress_log_and_elapsed_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.json"
+            fixture_config(config)
+
+            def service(_contract, run_root: Path, _stage: str):
+                time.sleep(0.04)
+                artifact = run_root / "artifact.json"
+                artifact.write_text("{}\n", encoding="utf-8")
+                return {"artifact": str(artifact)}
+
+            runner = RankingResetRunner(
+                config,
+                root / "run",
+                services={"contract": service},
+                heartbeat_interval_seconds=0.01,
+            )
+            state = runner.run("contract")
+
+            self.assertEqual(state["status"], "complete")
+            self.assertGreater(state["elapsed_seconds"], 0.0)
+            self.assertGreaterEqual(state["peak_rss_gb"], 0.0)
+            progress = json.loads((root / "run/progress.json").read_text(encoding="utf-8"))
+            self.assertEqual(progress["status"], "complete")
+            log = (root / "run/stages/contract/stage.log").read_text(encoding="utf-8")
+            self.assertIn('"event": "heartbeat"', log)
+
+    def test_timeout_persists_exact_terminal_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.json"
+            fixture_config(config)
+            runner = RankingResetRunner(
+                config,
+                root / "run",
+                services={"contract": lambda *_: time.sleep(0.05)},
+                stage_timeouts_seconds={"contract": 0.01},
+            )
+
+            with self.assertRaises(TimeoutError):
+                runner.run("contract")
+
+            state = json.loads((root / "run/stages/contract/stage_state.json").read_text())
+            self.assertEqual(state["status"], "timeout")
+            self.assertIn("exceeded", state["failure"]["message"])
+
+    def test_resource_limit_persists_exact_terminal_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.json"
+            fixture_config(config)
+            runner = RankingResetRunner(
+                config,
+                root / "run",
+                services={"contract": lambda *_: {}},
+                rss_reader=lambda: 13.5,
+            )
+
+            with self.assertRaisesRegex(MemoryError, "RSS limit"):
+                runner.run("contract")
+
+            state = json.loads((root / "run/stages/contract/stage_state.json").read_text())
+            self.assertEqual(state["status"], "resource_exceeded")
+
+    @unittest.skipUnless(hasattr(signal, "SIGTERM"), "SIGTERM is unavailable")
+    def test_sigterm_persists_aborted_terminal_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.json"
+            fixture_config(config)
+
+            def terminate(*_args):
+                os.kill(os.getpid(), signal.SIGTERM)
+
+            runner = RankingResetRunner(
+                config,
+                root / "run",
+                services={"contract": terminate},
+            )
+            with self.assertRaisesRegex(KeyboardInterrupt, "SIGTERM"):
+                runner.run("contract")
+
+            state = json.loads((root / "run/stages/contract/stage_state.json").read_text())
+            self.assertEqual(state["status"], "aborted")
+            self.assertEqual(state["failure"]["type"], "KeyboardInterrupt")
 
 
 if __name__ == "__main__":

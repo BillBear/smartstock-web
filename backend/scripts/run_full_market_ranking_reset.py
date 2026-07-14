@@ -6,8 +6,12 @@ import argparse
 import hashlib
 import json
 import os
+import resource
+import signal
 import sys
 import tempfile
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -47,6 +51,17 @@ RANKING_STAGES = (
     "closure",
 )
 StageService = Callable[[RankingResearchContract, Path, str], Mapping[str, Any]]
+DEFAULT_STAGE_TIMEOUTS_SECONDS = {
+    "contract": 20 * 60,
+    "label-audit": 60 * 60,
+    "feature-evidence": 90 * 60,
+    "baseline-oof": 45 * 60,
+    "nested-ablation": 120 * 60,
+    "ranker-oof": 120 * 60,
+    "risk-oof": 60 * 60,
+    "controlled-evaluation": 45 * 60,
+    "closure": 20 * 60,
+}
 STAGE_IMPLEMENTATION_FILES = {
     "contract": ("app/evaluation/full_market_ml/research_contract.py",),
     "label-audit": (
@@ -116,6 +131,9 @@ class RankingResetRunner:
         *,
         services: Mapping[str, StageService] | None = None,
         asset_root: str | Path | None = None,
+        heartbeat_interval_seconds: float = 30.0,
+        stage_timeouts_seconds: Mapping[str, float] | None = None,
+        rss_reader: Callable[[], float] | None = None,
     ):
         self.config_path = Path(config_path).resolve()
         self.run_root = Path(run_root).resolve()
@@ -127,6 +145,15 @@ class RankingResetRunner:
         self.contract = contract_from_mapping(config, source_config_sha256=self.config_sha256)
         self.contract_sha256 = self.contract.sha256()
         self.asset_root = Path(asset_root).resolve() if asset_root is not None else None
+        self.heartbeat_interval_seconds = max(0.005, float(heartbeat_interval_seconds))
+        self.stage_timeouts_seconds = {
+            **DEFAULT_STAGE_TIMEOUTS_SECONDS,
+            **dict(stage_timeouts_seconds or {}),
+        }
+        self.rss_reader = rss_reader or _process_rss_gb
+        self._state_lock = threading.Lock()
+        self._peak_rss_gb = 0.0
+        self._monitor_failure: str | None = None
         if services is not None:
             self.services = dict(services)
         else:
@@ -188,12 +215,27 @@ class RankingResetRunner:
             raise FileExistsError(f"stage already complete: {stage}; use --resume")
 
         started_at = _now()
+        self._peak_rss_gb = max(0.0, float(self.rss_reader()))
+        self._monitor_failure = None
         self._write_state(
             stage,
             self._state(stage, "running", {}, started_at=started_at),
+            event="started",
         )
+        stop = threading.Event()
+        heartbeat = threading.Thread(
+            target=self._heartbeat,
+            args=(stage, stop),
+            name=f"ranking-reset-{stage}-heartbeat",
+            daemon=True,
+        )
+        heartbeat.start()
+        previous_alarm = self._start_timeout(stage)
+        previous_termination = self._start_termination_handler()
         try:
+            self._enforce_rss_limit()
             artifacts = dict(self.services[stage](self.contract, self.run_root, stage) or {})
+            self._stop_monitor(stop, heartbeat)
             status_overrides = artifacts.pop("_status", {})
             if status_overrides and not isinstance(status_overrides, Mapping):
                 raise TypeError("stage _status override must be a mapping")
@@ -207,10 +249,22 @@ class RankingResetRunner:
                 research_design_valid=bool(status_overrides.get("research_design_valid", stage == "contract")),
                 model_gate_passed=bool(status_overrides.get("model_gate_passed", False)),
             )
-            self._write_state(stage, state)
+            self._write_state(stage, state, event="complete")
             return state
         except BaseException as error:
-            terminal = "aborted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "failed"
+            self._stop_monitor(stop, heartbeat)
+            if isinstance(error, TimeoutError):
+                terminal = "timeout"
+            elif self._monitor_failure == "resource_exceeded" or isinstance(error, MemoryError):
+                terminal = "resource_exceeded"
+                if not isinstance(error, MemoryError):
+                    error = MemoryError(
+                        f"stage={stage} exceeded RSS limit {self.contract.rss_abort_gb:.2f} GB"
+                    )
+            elif isinstance(error, (KeyboardInterrupt, SystemExit)):
+                terminal = "aborted"
+            else:
+                terminal = "failed"
             state = self._state(
                 stage,
                 terminal,
@@ -219,8 +273,12 @@ class RankingResetRunner:
                 ended_at=_now(),
                 failure={"type": type(error).__name__, "message": str(error)},
             )
-            self._write_state(stage, state)
+            self._write_state(stage, state, event=terminal)
             raise
+        finally:
+            self._stop_monitor(stop, heartbeat)
+            self._stop_termination_handler(previous_termination)
+            self._stop_timeout(previous_alarm)
 
     def _state(
         self,
@@ -250,7 +308,10 @@ class RankingResetRunner:
             "started_at": started_at,
             "ended_at": ended_at,
             "heartbeat_at": ended_at or _now(),
+            "elapsed_seconds": _elapsed_seconds(started_at, ended_at),
+            "peak_rss_gb": float(self._peak_rss_gb),
             "pid": os.getpid(),
+            "resume_command": self._resume_command(stage),
             "failure": dict(failure) if failure else None,
         }
 
@@ -298,8 +359,113 @@ class RankingResetRunner:
         path = self._state_path(stage)
         return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
 
-    def _write_state(self, stage: str, state: Mapping[str, Any]) -> None:
-        _write_json_atomic(self._state_path(stage), state)
+    def _write_state(
+        self, stage: str, state: Mapping[str, Any], *, event: str | None = None
+    ) -> None:
+        with self._state_lock:
+            _write_json_atomic(self._state_path(stage), state)
+            _write_json_atomic(self.run_root / "progress.json", state)
+            log_path = self._state_path(stage).parent / "stage.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "at": _now(),
+                            "event": event or str(state.get("status", "state")),
+                            "status": state.get("status"),
+                            "peak_rss_gb": state.get("peak_rss_gb"),
+                        },
+                        ensure_ascii=True,
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+
+    def _heartbeat(self, stage: str, stop: threading.Event) -> None:
+        while not stop.wait(self.heartbeat_interval_seconds):
+            rss = max(0.0, float(self.rss_reader()))
+            self._peak_rss_gb = max(self._peak_rss_gb, rss)
+            state = self._read_state(stage)
+            if not state or state.get("status") != "running":
+                return
+            state["heartbeat_at"] = _now()
+            state["peak_rss_gb"] = float(self._peak_rss_gb)
+            state["elapsed_seconds"] = _elapsed_seconds(str(state["started_at"]), None)
+            self._write_state(stage, state, event="heartbeat")
+            if rss >= self.contract.rss_abort_gb:
+                self._monitor_failure = "resource_exceeded"
+                if hasattr(signal, "SIGTERM"):
+                    os.kill(os.getpid(), signal.SIGTERM)
+                return
+
+    def _enforce_rss_limit(self) -> None:
+        rss = max(0.0, float(self.rss_reader()))
+        self._peak_rss_gb = max(self._peak_rss_gb, rss)
+        if rss >= self.contract.rss_abort_gb:
+            self._monitor_failure = "resource_exceeded"
+            raise MemoryError(
+                f"RSS limit exceeded: observed={rss:.3f}GB limit={self.contract.rss_abort_gb:.3f}GB"
+            )
+
+    def _start_timeout(self, stage: str):
+        timeout = float(self.stage_timeouts_seconds.get(stage, 0.0))
+        if (
+            timeout <= 0
+            or not hasattr(signal, "SIGALRM")
+            or threading.current_thread() is not threading.main_thread()
+        ):
+            return None
+        previous = signal.getsignal(signal.SIGALRM)
+
+        def raise_timeout(_number, _frame):
+            raise TimeoutError(f"stage={stage} exceeded timeout_seconds={timeout}")
+
+        signal.signal(signal.SIGALRM, raise_timeout)
+        signal.setitimer(signal.ITIMER_REAL, timeout)
+        return previous
+
+    @staticmethod
+    def _stop_timeout(previous) -> None:
+        if previous is None or not hasattr(signal, "SIGALRM"):
+            return
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+    @staticmethod
+    def _start_termination_handler():
+        if (
+            not hasattr(signal, "SIGTERM")
+            or threading.current_thread() is not threading.main_thread()
+        ):
+            return None
+        previous = signal.getsignal(signal.SIGTERM)
+
+        def abort_stage(_number, _frame):
+            raise KeyboardInterrupt("received SIGTERM")
+
+        signal.signal(signal.SIGTERM, abort_stage)
+        return previous
+
+    @staticmethod
+    def _stop_termination_handler(previous) -> None:
+        if previous is not None and hasattr(signal, "SIGTERM"):
+            signal.signal(signal.SIGTERM, previous)
+
+    @staticmethod
+    def _stop_monitor(stop: threading.Event, heartbeat: threading.Thread) -> None:
+        stop.set()
+        if heartbeat.is_alive() and heartbeat is not threading.current_thread():
+            heartbeat.join(timeout=1.0)
+
+    def _resume_command(self, stage: str) -> str:
+        command = (
+            f"python scripts/run_full_market_ranking_reset.py --config {self.config_path} "
+            f"--run-root {self.run_root} --stage {stage} --resume"
+        )
+        if self.asset_root is not None:
+            command += f" --asset-root {self.asset_root}"
+        return command
 
     @staticmethod
     def _artifacts_valid(state: Mapping[str, Any]) -> bool:
@@ -356,6 +522,18 @@ def _write_json_atomic(path: Path, value: Mapping[str, Any]) -> None:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _elapsed_seconds(started_at: str, ended_at: str | None) -> float:
+    start = datetime.fromisoformat(started_at)
+    end = datetime.fromisoformat(ended_at) if ended_at else datetime.now(timezone.utc)
+    return max(0.0, float((end - start).total_seconds()))
+
+
+def _process_rss_gb() -> float:
+    usage = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    divisor = 1024.0 ** 3 if sys.platform == "darwin" else 1024.0 ** 2
+    return usage / divisor
 
 
 def main(argv: list[str] | None = None) -> int:
