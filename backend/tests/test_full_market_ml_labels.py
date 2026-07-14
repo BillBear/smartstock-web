@@ -100,6 +100,7 @@ class FullMarketMLLabelTests(FullMarketMLTestCase):
         self.assertTrue(pd.isna(labeled.iloc[0]["future_return_10d"]))
         self.assertTrue(pd.isna(labeled.iloc[0]["relevance_grade_10d"]))
         self.assertTrue(pd.isna(labeled.iloc[0]["label_strong_path_10d"]))
+        self.assertTrue(pd.isna(labeled.iloc[0]["alpha_relevance_grade_10d"]))
 
     def test_adjusted_mfe_and_mae_include_entry_through_exit_window(self):
         fixture = next_open_gap_fixture(signal_close=10, next_open=20, day10_close=20)
@@ -117,6 +118,10 @@ class FullMarketMLLabelTests(FullMarketMLTestCase):
         self.assertEqual(len(eligible), 4)
         self.assertAlmostEqual(eligible.iloc[0]["market_median_future_return_10d"], 0.015)
         self.assertTrue(pd.isna(signal_rows.loc[signal_rows["symbol"] == "999999", "market_median_future_return_10d"].item()))
+        self.assertTrue(eligible["industry_fallback_to_market_10d"].eq(True).all())
+        self.assertTrue(
+            eligible["industry_median_net_return_10d"].eq(eligible["market_median_net_return_10d"]).all()
+        )
 
     def test_grades_use_net_execution_return_contract(self):
         panels = []
@@ -130,6 +135,8 @@ class FullMarketMLLabelTests(FullMarketMLTestCase):
 
         expected = signal["net_return_after_cost"].median()
         self.assertAlmostEqual(signal["market_median_net_return_10d"].dropna().iloc[0], expected)
+        self.assertIn("alpha_target_10d", signal.columns)
+        self.assertIn("alpha_relevance_grade_10d", signal.columns)
 
     def test_report_exposes_distribution_and_path_ambiguity(self):
         labeled = self._aggregate(eligible_cross_section_fixture())["shard-0"]

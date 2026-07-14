@@ -100,18 +100,25 @@ This read-only research contract contains only signal-day and historical inputs.
 | `index_turnover_ratio_20d` | market_context | index turnover / mean(index turnover, 20) | index_dailybasic | raw | 20 | omit when unavailable | time_series |
 | `northbound_net_flow` | market_context | northbound_net_flow | moneyflow_hsgt | raw | 0 | omit when unavailable | time_series |
 
-## Decision Label Contract
+## Ranking Label Contract
 
-These columns are outcomes, never model features. They are derived from the
-canonical next-open execution result after commission and slippage. The signal
-date is excluded from every forward path.
+These columns are outcomes, never model features. They use the exact next-session
+open, tenth holding-session close, commission, and slippage registered by the
+research contract. Only rows passing the 120-session historical eligibility and
+entry-tradeability rules receive ranking labels.
 
 | Name | Definition | Null/ineligible policy | Role |
 | --- | --- | --- | --- |
-| `label_actionable_positive_10d` | Eligible and next-open tradeable; net 10-session return at least 3%; MAE at least -6%; no stop-loss-before-take-profit, ambiguous path, or future limit-down event | False for incomplete, ineligible, untradeable, or ambiguous rows | Primary classifier target |
-| `label_severe_negative_10d_v2` | Eligible and any of: net return at most -5%, MAE at most -8%, stop-loss before take-profit, or a future limit-down event | False for incomplete or ineligible rows | Risk classifier target |
-| `target_clipped_return_10d` | Canonical net return clipped to `[-15%, 20%]` | Null when canonical net return is null | Regression target |
-| `return_relevance_grade_10d_v2` | Fixed net-return bins: `<=0%=0`, `(0%,3%)=1`, `[3%,5%)=2`, `[5%,8%)=3`, `>=8%=4` | Null when canonical net return is null | NDCG relevance target |
+| `net_return_after_cost_10d` | Net tenth-session return after two-sided commission and slippage | Null for incomplete or invalid entry/exit paths | Absolute outcome diagnostic |
+| `market_excess_10d` | Net return minus the same-date eligible market median | Null for ineligible rows | Market-relative outcome |
+| `industry_excess_10d` | Net return minus same-date industry median when at least 30 peers exist; otherwise market excess | Null for ineligible rows | Industry-relative outcome |
+| `alpha_target_10d` | `0.5 * market_excess_10d + 0.5 * industry_excess_10d` | Null for ineligible rows | Primary continuous ranking target |
+| `alpha_percentile_10d` | Deterministic same-date ascending rank of alpha, breaking ties by symbol | Null for ineligible rows | Ranking diagnostic |
+| `alpha_top10_10d` | Top `floor(N * 10%)` rows in the eligible same-date alpha order | False for ineligible rows | Precision@K diagnostic |
+| `alpha_relevance_grade_10d` | Pure alpha-order bands: top 5%=4, next 5%=3, next 10%=2, next 30%=1, remainder=0; each cap uses `floor(N * rate)` | Null for ineligible rows | Primary NDCG relevance target |
+| `positive_net_return_10d` | Net return greater than zero | Null for ineligible rows | Absolute-profit diagnostic only |
+| `severe_negative_10d` | Net return at most -5%, MAE at most -8%, stop-loss before take-profit, or any future limit-down event | Null for ineligible rows | Separate downside-risk target |
 
-Daily percentile labels remain diagnostics only. They cannot replace these
-absolute labels because a daily top-decile stock may still lose money.
+`positive_net_return_10d` and `severe_negative_10d` do not change the alpha
+relevance grade. A later policy may combine independently validated alpha and
+risk models, but the primary ranker is selected only on the alpha ordering.

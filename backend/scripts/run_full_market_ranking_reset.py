@@ -20,6 +20,7 @@ from app.evaluation.full_market_ml.research_contract import (
     RankingResearchContract,
     contract_from_mapping,
 )
+from app.evaluation.full_market_ml.label_stage import run_label_audit_stage
 
 
 RANKING_STAGES = (
@@ -34,12 +35,22 @@ RANKING_STAGES = (
     "closure",
 )
 StageService = Callable[[RankingResearchContract, Path, str], Mapping[str, Any]]
+STAGE_IMPLEMENTATION_FILES = {
+    "contract": ("app/evaluation/full_market_ml/research_contract.py",),
+    "label-audit": (
+        "app/evaluation/full_market_ml/research_contract.py",
+        "app/evaluation/full_market_ml/label_stage.py",
+        "app/evaluation/full_market_ml/ranking_labels.py",
+    ),
+}
+STAGE_DEPENDENCIES = {"label-audit": "contract", "feature-evidence": "label-audit"}
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
     parser.add_argument("--run-root", required=True)
+    parser.add_argument("--asset-root", default=os.environ.get("SMARTSTOCK_ASSET_ROOT"))
     parser.add_argument("--stage", required=True, choices=RANKING_STAGES)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -53,6 +64,7 @@ class RankingResetRunner:
         run_root: str | Path,
         *,
         services: Mapping[str, StageService] | None = None,
+        asset_root: str | Path | None = None,
     ):
         self.config_path = Path(config_path).resolve()
         self.run_root = Path(run_root).resolve()
@@ -63,19 +75,32 @@ class RankingResetRunner:
             raise ValueError("ranking reset config must be a JSON object")
         self.contract = contract_from_mapping(config, source_config_sha256=self.config_sha256)
         self.contract_sha256 = self.contract.sha256()
-        self.services = dict(services or {"contract": _write_contract_artifact})
+        if services is not None:
+            self.services = dict(services)
+        else:
+            self.services = {"contract": _write_contract_artifact}
+            if asset_root is not None:
+                resolved_asset_root = Path(asset_root).resolve()
+                self.services["label-audit"] = (
+                    lambda contract, run_root, _stage: run_label_audit_stage(
+                        contract, run_root, resolved_asset_root
+                    )
+                )
 
     def run(self, stage: str, *, resume: bool = False) -> dict[str, Any]:
         if stage not in RANKING_STAGES:
             raise ValueError(f"unknown ranking reset stage: {stage}")
         if stage not in self.services:
             raise RuntimeError(f"stage is not implemented: {stage}")
+        self._require_predecessor(stage)
         existing = self._read_state(stage)
         if existing and existing.get("status") == "complete":
             if existing.get("contract_sha256") != self.contract_sha256:
                 raise ValueError(f"stage contract changed after completion: {stage}")
             if not self._artifacts_valid(existing):
                 raise ValueError(f"stage artifacts changed after completion: {stage}")
+            if existing.get("implementation_sha256") != _implementation_sha256(stage):
+                raise ValueError(f"stage implementation changed after completion: {stage}")
             if resume:
                 return existing
             raise FileExistsError(f"stage already complete: {stage}; use --resume")
@@ -87,6 +112,9 @@ class RankingResetRunner:
         )
         try:
             artifacts = dict(self.services[stage](self.contract, self.run_root, stage) or {})
+            status_overrides = artifacts.pop("_status", {})
+            if status_overrides and not isinstance(status_overrides, Mapping):
+                raise TypeError("stage _status override must be a mapping")
             state = self._state(
                 stage,
                 "complete",
@@ -94,7 +122,8 @@ class RankingResetRunner:
                 started_at=started_at,
                 ended_at=_now(),
                 engineering_valid=True,
-                research_design_valid=stage == "contract",
+                research_design_valid=bool(status_overrides.get("research_design_valid", stage == "contract")),
+                model_gate_passed=bool(status_overrides.get("model_gate_passed", False)),
             )
             self._write_state(stage, state)
             return state
@@ -121,6 +150,7 @@ class RankingResetRunner:
         ended_at: str | None = None,
         engineering_valid: bool = False,
         research_design_valid: bool = False,
+        model_gate_passed: bool = False,
         failure: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         return {
@@ -128,11 +158,12 @@ class RankingResetRunner:
             "status": status,
             "contract_sha256": self.contract_sha256,
             "config_sha256": self.config_sha256,
+            "implementation_sha256": _implementation_sha256(stage),
             "artifacts": dict(artifacts),
             "artifact_hashes": _artifact_hashes(artifacts),
             "engineering_valid": bool(engineering_valid),
             "research_design_valid": bool(research_design_valid),
-            "model_gate_passed": False,
+            "model_gate_passed": bool(model_gate_passed),
             "production_candidate": False,
             "started_at": started_at,
             "ended_at": ended_at,
@@ -143,6 +174,20 @@ class RankingResetRunner:
 
     def _state_path(self, stage: str) -> Path:
         return self.run_root / "stages" / stage / "stage_state.json"
+
+    def _require_predecessor(self, stage: str) -> None:
+        predecessor = STAGE_DEPENDENCIES.get(stage)
+        if not predecessor:
+            return
+        state = self._read_state(predecessor)
+        if not state or state.get("status") != "complete" or not state.get("research_design_valid"):
+            raise RuntimeError(f"required predecessor is incomplete: {predecessor}")
+        if state.get("contract_sha256") != self.contract_sha256:
+            raise ValueError(f"required predecessor contract changed: {predecessor}")
+        if state.get("implementation_sha256") != _implementation_sha256(predecessor):
+            raise ValueError(f"required predecessor implementation changed: {predecessor}")
+        if not self._artifacts_valid(state):
+            raise ValueError(f"required predecessor artifacts changed: {predecessor}")
 
     def _read_state(self, stage: str) -> dict[str, Any] | None:
         path = self._state_path(stage)
@@ -180,6 +225,17 @@ def _artifact_hashes(artifacts: Mapping[str, Any]) -> dict[str, str]:
     return hashes
 
 
+def _implementation_sha256(stage: str) -> str:
+    digest = hashlib.sha256()
+    for relative in STAGE_IMPLEMENTATION_FILES.get(stage, ("scripts/run_full_market_ranking_reset.py",)):
+        path = BACKEND_ROOT / relative
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _write_json_atomic(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = json.dumps(value, ensure_ascii=True, indent=2, sort_keys=True) + "\n"
@@ -199,7 +255,7 @@ def _now() -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    runner = RankingResetRunner(args.config, args.run_root)
+    runner = RankingResetRunner(args.config, args.run_root, asset_root=args.asset_root)
     if args.dry_run:
         print(json.dumps({"stage": args.stage, "contract_sha256": runner.contract_sha256}, sort_keys=True))
         return 0

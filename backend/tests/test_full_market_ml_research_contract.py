@@ -29,6 +29,13 @@ class FullMarketMLResearchContractTests(unittest.TestCase):
         self.assertNotEqual(self.contract.sha256(), changed.sha256())
         self.assertEqual(self.contract.canonical_payload()["future_holdout_status"], "sealed")
 
+    def test_optional_dataset_registry_hash_must_be_sha256_and_changes_contract(self):
+        bound = replace(self.contract, dataset_registry_sha256="a" * 64)
+
+        self.assertNotEqual(self.contract.sha256(), bound.sha256())
+        with self.assertRaisesRegex(ValueError, "dataset_registry_sha256"):
+            replace(self.contract, dataset_registry_sha256="not-a-sha").validate()
+
     def test_contract_rejects_listing_history_below_120_sessions(self):
         with self.assertRaisesRegex(ValueError, "minimum_listing_sessions"):
             replace(self.contract, minimum_listing_sessions=119).validate()

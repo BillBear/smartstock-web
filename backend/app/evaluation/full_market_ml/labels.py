@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from .config import FullMarketMLConfig
+from .ranking_labels import add_cross_sectional_alpha_labels
 
 
 HORIZONS = (3, 5, 10, 20)
@@ -80,6 +81,8 @@ def aggregate_full_market_labels(
             continue
         _assign_full_market_date_labels(result, eligible, trade_date)
 
+    _assign_alpha_labels(result)
+
     for shard in result.values():
         shard["relevance_grade_10d"] = pd.array(shard["relevance_grade_10d"], dtype="Int64")
         for column in ("label_strong_path_10d", "label_severe_negative_10d"):
@@ -89,6 +92,36 @@ def aggregate_full_market_labels(
     for shard in result.values():
         shard.attrs["label_report"] = report
     return result
+
+
+def _assign_alpha_labels(shards: Mapping[str, pd.DataFrame]) -> None:
+    combined = []
+    for shard_key, shard in shards.items():
+        frame = shard.copy()
+        frame["_shard_key"] = str(shard_key)
+        frame["_source_index"] = frame.index
+        combined.append(frame)
+    alpha_labeled = add_cross_sectional_alpha_labels(pd.concat(combined, ignore_index=True))
+    alpha_columns = (
+        "market_median_net_return_10d",
+        "industry_median_net_return_10d",
+        "market_excess_10d",
+        "industry_excess_10d",
+        "alpha_target_10d",
+        "alpha_percentile_10d",
+        "alpha_top10_10d",
+        "alpha_relevance_grade_10d",
+        "positive_net_return_10d",
+        "severe_negative_10d",
+        "industry_fallback_to_market_10d",
+    )
+    for shard_key, rows in alpha_labeled.groupby("_shard_key", sort=False):
+        shard = shards[str(shard_key)]
+        rows = rows.sort_values("_source_index", kind="stable")
+        if rows["_source_index"].tolist() != shard.index.tolist():
+            raise ValueError(f"alpha label rows do not align with source shard: {shard_key}")
+        for column in alpha_columns:
+            shard[column] = pd.Series(rows[column].array, index=shard.index)
 
 
 def daily_relevance_distribution(labeled: pd.DataFrame | Mapping[str, pd.DataFrame]) -> pd.DataFrame:

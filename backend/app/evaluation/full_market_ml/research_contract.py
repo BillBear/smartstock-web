@@ -30,6 +30,7 @@ class RankingResearchContract:
     run_id: str
     feature_blocks: tuple[tuple[str, tuple[str, ...]], ...]
     source_config_sha256: str = ""
+    dataset_registry_sha256: str = ""
     signal_timing: str = "after_close"
     horizon: int = 10
     minimum_listing_sessions: int = 120
@@ -53,6 +54,11 @@ class RankingResearchContract:
     def validate(self) -> None:
         if not self.dataset_id or not self.run_id:
             raise ValueError("dataset_id and run_id must not be empty")
+        if self.dataset_registry_sha256 and (
+            len(self.dataset_registry_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.dataset_registry_sha256.lower())
+        ):
+            raise ValueError("dataset_registry_sha256 must be an empty value or 64 hexadecimal characters")
         if self.signal_timing != "after_close" or self.horizon != 10:
             raise ValueError("signal_timing must be after_close and horizon must be 10")
         if self.minimum_listing_sessions < 120:
@@ -121,6 +127,7 @@ def contract_from_mapping(
         dataset_id=str(run.get("dataset_id", "")),
         run_id=str(run.get("id", "")),
         source_config_sha256=source_config_sha256,
+        dataset_registry_sha256=str(run.get("dataset_registry_sha256", "")),
         signal_timing=str(execution.get("signal_timing", "")),
         horizon=int(execution.get("horizon", 0)),
         minimum_listing_sessions=int(sample.get("minimum_listing_sessions", 0)),

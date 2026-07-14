@@ -58,6 +58,17 @@ class FullMarketMLRankingResetCLITests(unittest.TestCase):
         self.assertIn("controlled-evaluation", RANKING_STAGES)
         self.assertNotIn("future-holdout", help_text)
         self.assertNotIn("production", help_text)
+        self.assertIn("--asset-root", help_text)
+
+    def test_asset_root_registers_label_audit_stage_service(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.json"
+            fixture_config(config)
+
+            runner = RankingResetRunner(config, root / "run", asset_root=root / "assets")
+
+            self.assertIn("label-audit", runner.services)
 
     def test_unimplemented_stage_fails_without_complete_state(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -95,6 +106,7 @@ class FullMarketMLRankingResetCLITests(unittest.TestCase):
             self.assertTrue(first["research_design_valid"])
             self.assertFalse(first["model_gate_passed"])
             self.assertFalse(first["production_candidate"])
+            self.assertEqual(len(first["implementation_sha256"]), 64)
             self.assertEqual(resumed["contract_sha256"], first["contract_sha256"])
             self.assertEqual(calls, ["contract"])
 
@@ -136,6 +148,79 @@ class FullMarketMLRankingResetCLITests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "artifacts changed"):
                 runner.run("contract", resume=True)
+
+    def test_stage_service_can_report_research_gate_without_marking_production(self):
+        def contract_stage(_contract, run_root: Path, _stage: str):
+            artifact = run_root / "contract.json"
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("{}\n", encoding="utf-8")
+            return {"contract": str(artifact)}
+
+        def failed_gate(_contract, run_root: Path, _stage: str):
+            artifact = run_root / "label-report.json"
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("{}\n", encoding="utf-8")
+            return {
+                "label_report": str(artifact),
+                "_status": {"research_design_valid": False, "model_gate_passed": False},
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.json"
+            fixture_config(config)
+            runner = RankingResetRunner(
+                config,
+                root / "run",
+                services={"contract": contract_stage, "label-audit": failed_gate},
+            )
+
+            runner.run("contract")
+            state = runner.run("label-audit")
+
+            self.assertTrue(state["engineering_valid"])
+            self.assertFalse(state["research_design_valid"])
+            self.assertNotIn("_status", state["artifacts"])
+            self.assertFalse(state["production_candidate"])
+
+    def test_implemented_stage_cannot_skip_required_predecessor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.json"
+            fixture_config(config)
+            runner = RankingResetRunner(
+                config,
+                root / "run",
+                services={"label-audit": lambda *_: {}},
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "required predecessor is incomplete: contract"):
+                runner.run("label-audit")
+
+    def test_stage_rejects_predecessor_built_by_different_implementation(self):
+        def artifact_service(_contract, run_root: Path, stage: str):
+            artifact = run_root / f"{stage}.json"
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("{}\n", encoding="utf-8")
+            return {stage: str(artifact)}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.json"
+            fixture_config(config)
+            runner = RankingResetRunner(
+                config,
+                root / "run",
+                services={"contract": artifact_service, "label-audit": artifact_service},
+            )
+            runner.run("contract")
+            state_path = root / "run" / "stages" / "contract" / "stage_state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["implementation_sha256"] = "0" * 64
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "predecessor implementation changed"):
+                runner.run("label-audit")
 
 
 if __name__ == "__main__":
