@@ -198,7 +198,8 @@ Important evidence hashes:
 
 | Artifact | SHA256 |
 | --- | --- |
-| run manifest | `d838b82829743f7f0fbed9f5846de5e90dfad3560db0a6037dd115fa4cb002e4` |
+| run manifest | `0bc0fbcf9475537f0c3220c2c29843c57e546a147698f22976f300d4776489ce` |
+| implementation bundle | `38c25740272b88e610e1b377bcaafbbe3b4dac87e404bd00f8974a0e6431d8d5` |
 | decision | `a051ff111bcbee8f98df87d4a1e333ca277d764d90126510668e10b3850d08d5` |
 | compressed score rows | `a12c003fdce185323da4b63f763fad3a06ce20d4628c73e9b3d1bcc5ce4e5c84` |
 | daily metrics | `35ea80969e7c7d7499ff2c06aa1faf20f0e8863cd39288aca9a279ab31b94e20` |
