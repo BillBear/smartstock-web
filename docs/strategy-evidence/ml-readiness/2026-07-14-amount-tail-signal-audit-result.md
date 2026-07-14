@@ -206,6 +206,42 @@ Important evidence hashes:
 | quantile curves | `702eab704054d970fce9fd836ced1170319cf1ac7d048537e045e8d76e01d898` |
 | portfolio metrics | `5113ef7777da0d107e94bf17e026494b0e25f6fd5498f06ca42c74c309ff4b84` |
 
+## Verification
+
+The final branch state was verified with Homebrew Python 3.13 through the
+project ML virtual environment. These commands ran after the formal result and
+implementation provenance were frozen:
+
+```bash
+git diff eef586d..HEAD --check
+python -m compileall -q app scripts
+python -m unittest \
+  tests.test_full_market_ml_amount_tail_audit \
+  tests.test_full_market_ml_amount_tail_cli \
+  tests.test_full_market_ml_evaluator \
+  tests.test_full_market_ml_ranking_model
+python -m unittest discover -s tests
+```
+
+Key output:
+
+```text
+focused: Ran 27 tests in 1.290s - OK
+full backend: Ran 523 tests in 87.776s - OK
+git diff --check: exit 0
+compileall: exit 0
+```
+
+An independent manifest verifier recalculated all 12 artifact checksums and all
+3 implementation-file checksums, then checked `1,010,287` score rows for the
+registered key. It found zero duplicate keys, quadrants A/C, folds 1-5, equal
+comparator trade counts (`A=760`, `C=790`), and confirmed
+`production_integration_allowed=false`.
+
+The full backend suite emitted existing SQLAlchemy/SQLite unclosed-connection
+`ResourceWarning` messages but no test failures. This research-only change did
+not touch the frontend, so frontend lint/build were not applicable.
+
 ## Next Research Boundary
 
 Do not train another model on the current price/volume amount-tail candidate.
