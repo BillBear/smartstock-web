@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
+from pathlib import Path
+import tempfile
 import unittest
 
 import numpy as np
@@ -13,6 +17,7 @@ from app.evaluation.full_market_ml.amount_tail_audit import (
     evaluate_amount_tail_gate,
     simulate_equal_exposure_lot_portfolio,
 )
+from app.evaluation.full_market_ml.amount_tail_stage import run_amount_tail_signal_audit
 
 
 def _signal_rows() -> pd.DataFrame:
@@ -199,6 +204,148 @@ class FullMarketMLAmountTailAuditTests(unittest.TestCase):
         retention = next(gate for gate in decision["gates"] if gate["name"] == "unseen_stock_retention")
         self.assertFalse(retention["passed"])
 
+    def test_stage_writes_compressed_reproducible_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_run = root / "source-run"
+            asset_root = root / "assets"
+            output_root = root / "output-run"
+            config_path = root / "config.json"
+            config = {
+                "schema_version": 1,
+                "run": {
+                    "id": "fixture-amount-tail",
+                    "source_run_id": "fixture-source",
+                    "dataset_id": "fixture-dataset",
+                    "production_integration_allowed": False,
+                },
+                "comparison": {"top_k": 5, "quantile_count": 4, "industry_top5_max_share": 0.25},
+                "bootstrap": {"iterations": 20, "block_length": 1, "seed": 17},
+                "execution": {
+                    "horizon_sessions": 3,
+                    "commission_per_side": 0.0003,
+                    "slippage_per_side": 0.001,
+                    "daily_cohort_fraction": 0.10,
+                    "per_stock_fraction": 0.02,
+                },
+            }
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            (source_run / "artifacts").mkdir(parents=True)
+            (source_run / "artifacts/research_contract.json").write_text(
+                json.dumps({
+                    "contract": {
+                        "run_id": "fixture-source",
+                        "dataset_id": "fixture-dataset",
+                    },
+                    "contract_sha256": "fixture",
+                }),
+                encoding="utf-8",
+            )
+
+            rows = _signal_rows()
+            rows["quadrant"] = np.where(rows["symbol"].astype(int).le(10), "A", "C")
+            rows["score__adjusted_return_20d"] = rows["amount_ratio_5d"]
+            rows["score__adjusted_return_60d"] = rows["amount_ratio_20d"]
+            rows["score__random"] = rows["symbol"].astype(int) % 7
+            baseline_columns = [
+                "trade_date", "symbol", "fold", "quadrant", "industry_l1", "market_state",
+                "alpha_relevance_grade_10d", "alpha_top10_10d", "net_return_after_cost_10d",
+                "severe_negative_10d", "mae_10d", "score__adjusted_return_20d",
+                "score__adjusted_return_60d", "score__random",
+            ]
+            baseline_path = source_run / "artifacts/baseline-oof/baseline_predictions.parquet"
+            baseline_path.parent.mkdir(parents=True)
+            rows[baseline_columns].to_parquet(baseline_path, compression="zstd", index=False)
+
+            matrix_source_columns = [
+                "trade_date", "symbol", "amount_cny", "amount_ratio_5d", "amount_ratio_20d",
+                "turnover_rate", "turnover_ratio_20d",
+            ]
+            matrix_path = source_run / "artifacts/feature-evidence/matrix/shard=00/data.parquet"
+            matrix_path.parent.mkdir(parents=True)
+            matrix = rows[matrix_source_columns].copy()
+            matrix["total_mv"] = rows["circ_mv"] * 1.2
+            matrix["size_bucket"] = "medium"
+            matrix["liquidity_bucket"] = "medium"
+            matrix.to_parquet(matrix_path, compression="zstd", index=False)
+            matrix_manifest = {
+                "row_count": len(matrix),
+                "files": [{
+                    "path": "shard=00/data.parquet",
+                    "row_count": len(matrix),
+                    "bytes": matrix_path.stat().st_size,
+                    "sha256": _sha256(matrix_path),
+                }],
+            }
+            (source_run / "artifacts/feature-evidence/feature_matrix_manifest.json").write_text(
+                json.dumps(matrix_manifest), encoding="utf-8"
+            )
+
+            panel_rows = []
+            dates = tuple(date.strftime("%Y-%m-%d") for date in pd.bdate_range("2025-01-02", periods=15))
+            base_by_symbol = rows.drop_duplicates("symbol").set_index("symbol")
+            for date_index, trade_date in enumerate(dates):
+                for symbol, base in base_by_symbol.iterrows():
+                    panel_rows.append(
+                        {
+                            "trade_date": trade_date,
+                            "symbol": symbol,
+                            "circ_mv": base["circ_mv"],
+                            "adjusted_close": base["adjusted_close"] * (1 + date_index * 0.002),
+                            "adjusted_open": base["adjusted_close"] * (1 + date_index * 0.002),
+                            "median_amount_20d": base["median_amount_20d"],
+                            "is_suspended": False,
+                            "at_up_limit_open": False,
+                            "entry_tradeable_10d": True,
+                            "horizon_available_10d": True,
+                            "path_ambiguous_10d": False,
+                        }
+                    )
+            dataset_path = asset_root / "datasets/fixture-dataset/artifacts/full-build/dataset-v3/shard=00/data.parquet"
+            dataset_path.parent.mkdir(parents=True)
+            pd.DataFrame(panel_rows).to_parquet(dataset_path, compression="zstd", index=False)
+            registry_path = asset_root / "datasets/fixture-dataset/artifacts/full-build/dataset_registry_v3.json"
+            registry_path.write_text(
+                json.dumps({
+                    "dataset_id": "fixture-dataset",
+                    "files": [{
+                        "path": "artifacts/full-build/dataset-v3/shard=00/data.parquet",
+                        "bytes": dataset_path.stat().st_size,
+                        "sha256": _sha256(dataset_path),
+                    }],
+                }),
+                encoding="utf-8",
+            )
+
+            result = run_amount_tail_signal_audit(
+                config_path,
+                source_run,
+                asset_root,
+                output_root,
+            )
+
+            self.assertEqual(result["row_count"], len(rows))
+            self.assertFalse(result["decision"]["production_integration_allowed"])
+            for name in (
+                "score_rows.parquet",
+                "quantile_curves.csv",
+                "daily_metrics.csv",
+                "fold_metrics.csv",
+                "portfolio_metrics.json",
+                "equity_curves.parquet",
+                "decision.json",
+                "run_manifest.json",
+                "report.md",
+            ):
+                self.assertTrue((output_root / name).is_file(), name)
+            manifest = json.loads((output_root / "run_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["source_row_count"], len(rows))
+            self.assertTrue(all(item["sha256"] for item in manifest["artifacts"]))
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
