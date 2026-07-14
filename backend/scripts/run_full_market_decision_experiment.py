@@ -223,6 +223,10 @@ class DecisionExperimentRunner:
         return {
             "stage": stage,
             "status": status,
+            "engineering_valid": status == "complete",
+            "research_design_valid": None,
+            "model_gate_passed": None,
+            "production_candidate": False,
             "input_hashes": dict(inputs),
             "artifacts": dict(artifacts),
             "artifact_hashes": _artifact_hashes(artifacts),
