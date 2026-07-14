@@ -29,6 +29,10 @@ from app.evaluation.full_market_ml.ranking_stage import (
 )
 from app.evaluation.full_market_ml.risk_stage import run_risk_oof_stage
 from app.evaluation.full_market_ml.controlled_stage import run_controlled_evaluation_stage
+from app.evaluation.full_market_ml.research_preflight import (
+    collect_research_evidence,
+    evaluate_research_preflight,
+)
 
 
 RANKING_STAGES = (
@@ -70,6 +74,7 @@ STAGE_IMPLEMENTATION_FILES = {
     "ranker-oof": (
         "app/evaluation/full_market_ml/ranking_model.py",
         "app/evaluation/full_market_ml/ranking_stage.py",
+        "app/evaluation/full_market_ml/research_preflight.py",
         "app/evaluation/full_market_ml/splits.py",
     ),
     "risk-oof": (
@@ -121,12 +126,13 @@ class RankingResetRunner:
             raise ValueError("ranking reset config must be a JSON object")
         self.contract = contract_from_mapping(config, source_config_sha256=self.config_sha256)
         self.contract_sha256 = self.contract.sha256()
+        self.asset_root = Path(asset_root).resolve() if asset_root is not None else None
         if services is not None:
             self.services = dict(services)
         else:
             self.services = {"contract": _write_contract_artifact}
-            if asset_root is not None:
-                resolved_asset_root = Path(asset_root).resolve()
+            if self.asset_root is not None:
+                resolved_asset_root = self.asset_root
                 self.services["label-audit"] = (
                     lambda contract, run_root, _stage: run_label_audit_stage(
                         contract, run_root, resolved_asset_root
@@ -264,6 +270,29 @@ class RankingResetRunner:
             raise ValueError(f"required predecessor implementation changed: {predecessor}")
         if not self._artifacts_valid(state):
             raise ValueError(f"required predecessor artifacts changed: {predecessor}")
+        if stage == "ranker-oof":
+            preflight_path = (
+                self.run_root / "artifacts" / "preflight" / "model" / "preflight_report.json"
+            )
+            if not preflight_path.is_file():
+                raise RuntimeError("ranker-oof requires a completed model research preflight")
+            preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+            if self.asset_root is None:
+                raise RuntimeError("ranker-oof preflight verification requires --asset-root")
+            current = evaluate_research_preflight(
+                collect_research_evidence(
+                    self.contract, self.run_root, self.asset_root, phase="model"
+                ),
+                expected_contract_sha=self.contract_sha256,
+                phase="model",
+            )
+            if (
+                preflight.get("contract_sha256") != self.contract_sha256
+                or not preflight.get("passed")
+                or not preflight.get("model_ready")
+                or preflight != current
+            ):
+                raise RuntimeError("ranker-oof blocked by model research preflight")
 
     def _read_state(self, stage: str) -> dict[str, Any] | None:
         path = self._state_path(stage)
