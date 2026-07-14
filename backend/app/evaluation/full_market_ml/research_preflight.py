@@ -157,7 +157,11 @@ def collect_research_evidence(
                     (int(value) for value in universe_counts.values()), default=0
                 ),
                 "duplicate_key_count": int(quality.get("duplicate_key_count", -1)),
-                "invalid_adjusted_price_count": 0 if quality.get("ready", False) else -1,
+                "invalid_adjusted_price_count": max(
+                    0,
+                    int(quality.get("row_count", 0))
+                    - int(quality.get("raw_valid_row_count", 0)),
+                ),
                 "date_count": len(universe_counts),
                 "source": "immutable_dataset_quality_report",
             },
@@ -167,6 +171,9 @@ def collect_research_evidence(
     sample = _read_json(artifacts / "sample_audit.json")
     label = _read_json(artifacts / "label-audit" / "label_objective_report.json")
     feature = _read_json(artifacts / "feature-evidence" / "feature_evidence_report.json")
+    feature_manifest = _read_json(
+        artifacts / "feature-evidence" / "feature_matrix_manifest.json"
+    )
     split = _read_json(artifacts / "feature-evidence" / "development_split.json")
     baseline = _read_json(artifacts / "baseline-oof" / "baseline_report.json")
     ablation = _read_json(artifacts / "nested-ablation" / "block_decisions.json")
@@ -176,6 +183,11 @@ def collect_research_evidence(
     summaries = feature_csv.loc[feature_csv["record_type"].eq("summary")].copy()
     moneyflow = set(dict(contract.feature_blocks).get("moneyflow", ()))
     core = summaries.loc[~summaries["feature"].isin(moneyflow)]
+    forbidden_feature_names = sorted(
+        name
+        for name in feature_manifest.get("feature_names", ())
+        if str(name).startswith(("future_", "label_", "alpha_target", "mfe_", "mae_", "tp_", "sl_"))
+    )
     daily = sample.get("daily", ())
     label_daily = label.get("daily", ())
     inner_counts = []
@@ -190,7 +202,36 @@ def collect_research_evidence(
         roles_chronological &= bool(training and validation and max(training) < min(validation))
     expected_definitions = dict(contract.baseline_definitions)
     baseline_predictions = artifacts / "baseline-oof" / "baseline_predictions.parquet"
-    baseline_row_count = int(pd.read_parquet(baseline_predictions, columns=["symbol"]).shape[0])
+    score_columns = [f"score__{name}" for name in contract.required_baselines]
+    baseline_keys = pd.read_parquet(
+        baseline_predictions, columns=["trade_date", "symbol", "fold", "quadrant", *score_columns]
+    )
+    baseline_row_count = int(len(baseline_keys))
+    comparison_keys = ["trade_date", "symbol", "fold", "quadrant"]
+    scores_share_rows = bool(
+        not baseline_keys.duplicated(comparison_keys).any()
+        and baseline_keys[score_columns].notna().all().all()
+    )
+    risk_predictions = artifacts / "risk-oof" / "risk_predictions.parquet"
+    risk_keys = (
+        pd.read_parquet(risk_predictions, columns=[*comparison_keys, "risk_eligible"])
+        if risk_predictions.is_file()
+        else pd.DataFrame()
+    )
+    baseline_key_rows = baseline_keys[comparison_keys].sort_values(comparison_keys, kind="stable").reset_index(drop=True)
+    risk_key_rows = (
+        risk_keys[comparison_keys].sort_values(comparison_keys, kind="stable").reset_index(drop=True)
+        if not risk_keys.empty
+        else pd.DataFrame()
+    )
+    evaluation_rows_identical = bool(
+        not risk_keys.empty
+        and not risk_keys.duplicated(comparison_keys).any()
+        and baseline_key_rows.equals(risk_key_rows)
+    )
+    evaluation_risk_mask_complete = bool(
+        evaluation_rows_identical and risk_keys["risk_eligible"].notna().all()
+    )
     contract_hashes = [
         value
         for value in (
@@ -210,7 +251,11 @@ def collect_research_evidence(
             "minimum_coverage_ratio": min((float(item.get("coverage_ratio", 0.0)) for item in daily), default=0.0),
             "minimum_daily_symbols": min((int(item.get("valid_count", 0)) for item in daily), default=0),
             "duplicate_key_count": int(quality.get("duplicate_key_count", -1)),
-            "invalid_adjusted_price_count": 0 if quality.get("ready", False) else -1,
+            "invalid_adjusted_price_count": max(
+                0,
+                int(quality.get("row_count", 0))
+                - int(quality.get("raw_valid_row_count", 0)),
+            ),
             "date_count": int(sample.get("date_count", 0)),
             "blocking_codes": list(sample.get("blocking_codes", ())),
         },
@@ -224,7 +269,11 @@ def collect_research_evidence(
         },
         "features": {
             "passed": bool(feature.get("passed", False)),
-            "point_in_time_verified": bool(feature.get("passed", False)),
+            "point_in_time_verified": bool(
+                feature_manifest.get("contract_sha256") == contract.sha256()
+                and not forbidden_feature_names
+            ),
+            "forbidden_future_feature_names": forbidden_feature_names,
             "maximum_core_missing_ratio": float(1.0 - core["coverage"].min()) if not core.empty else 1.0,
             "feature_count": int(feature.get("feature_count", 0)),
         },
@@ -239,13 +288,16 @@ def collect_research_evidence(
         },
         "baselines": {
             "definitions_exact": baseline.get("definitions") == expected_definitions,
-            "identical_rows": baseline_row_count == int(baseline.get("row_count", baseline_row_count)),
+            "identical_rows": bool(
+                scores_share_rows
+                and baseline_row_count == int(baseline.get("row_count", baseline_row_count))
+            ),
             "row_count": baseline_row_count,
         },
         "ablation": {"decisions": list(ablation.get("decisions", ()))},
         "evaluation": {
-            "identical_rows": bool(controlled.get("comparison_key_sha256")) if controlled else True,
-            "identical_risk_mask": bool(controlled.get("comparison_key_sha256")) if controlled else True,
+            "identical_rows": evaluation_rows_identical,
+            "identical_risk_mask": evaluation_risk_mask_complete,
             "comparison_key_sha256": controlled.get("comparison_key_sha256"),
         },
     }
