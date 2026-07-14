@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "run": {
+    "id": "amount_tail_audit_20260714_v1",
+    "source_run_id": "ml_ranking_reset_20260714_v4",
+    "dataset_id": "fmv3_ea0797d57ed62a916b3a",
+    "research_status": "pre_registered",
+    "production_integration_allowed": false
+  },
+  "hypothesis": {
+    "statement": "Extreme point-in-time trading-amount activity contains stable future-10-session cross-sectional alpha after controlling industry, board, size, price, and trailing liquidity exposure.",
+    "registered_candidate": "neutral_amount_tail_diversified",
+    "diagnostic_scores": [
+      "amount_raw",
+      "amount_ratio_5d",
+      "amount_ratio_20d",
+      "turnover_rate",
+      "turnover_ratio_20d",
+      "amount_to_float_mv",
+      "industry_amount_rank",
+      "neutral_amount_tail"
+    ]
+  },
+  "comparison": {
+    "quadrants": ["A", "C"],
+    "top_k": 5,
+    "quantile_count": 20,
+    "fixed_baselines": [
+      "random",
+      "adjusted_return_20d",
+      "adjusted_return_60d",
+      "amount_raw"
+    ],
+    "metric_baselines": {
+      "precision_at_5": "amount_raw",
+      "ndcg_at_10": "adjusted_return_20d",
+      "top_5_mean_return": "amount_raw"
+    },
+    "identical_rows_required": true,
+    "industry_top5_max_share": 0.25
+  },
+  "bootstrap": {
+    "method": "circular_trade_date_block",
+    "iterations": 2000,
+    "block_length": 10,
+    "seed": 17,
+    "confidence": 0.95
+  },
+  "execution": {
+    "signal_timing": "after_close",
+    "entry_timing": "next_session_open",
+    "horizon_sessions": 10,
+    "commission_per_side": 0.0003,
+    "slippage_per_side": 0.001,
+    "daily_cohort_fraction": 0.10,
+    "per_stock_fraction": 0.02,
+    "allow_repeated_symbol_lots": true,
+    "require_full_daily_cohort": true
+  },
+  "gates": {
+    "minimum_positive_walk_forward_folds": 4,
+    "minimum_unseen_stock_uplift_retention": 0.80,
+    "bootstrap_uplift_ci_low_strictly_positive": true,
+    "maximum_drawdown_not_worse_than_amount_raw": true,
+    "require_precision_ndcg_and_return_joint_improvement": true,
+    "require_all_market_states_non_negative_uplift": true
+  }
+}
