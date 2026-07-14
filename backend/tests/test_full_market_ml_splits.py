@@ -3,7 +3,13 @@ from __future__ import annotations
 from dataclasses import replace
 
 from app.evaluation.full_market_ml.config import DatesConfig
-from app.evaluation.full_market_ml.splits import FinalHoldoutAccessError, build_split_plan
+from app.evaluation.full_market_ml.research_contract import RankingResearchContract
+from app.evaluation.full_market_ml.splits import (
+    FinalHoldoutAccessError,
+    WalkForwardFold,
+    build_inner_selection_split,
+    build_split_plan,
+)
 from tests.full_market_ml_fixtures import (
     SPLIT_FIXTURE_DATES,
     SPLIT_HOLDOUT_END,
@@ -71,6 +77,25 @@ class FullMarketMLSplitTests(FullMarketMLTestCase):
         self.assertEqual(first.development_dates[-1] < first.final_dates[0], True)
         with self.assertRaises(FinalHoldoutAccessError):
             first.load_quadrant("D", frozen_model_sha=None)
+
+    def test_inner_fit_early_stop_and_selection_roles_are_disjoint_and_ordered(self):
+        dates = tuple(f"2025-{index // 28 + 1:02d}-{index % 28 + 1:02d}" for index in range(120))
+        outer = tuple(f"2026-01-{index + 1:02d}" for index in range(20))
+        fold = WalkForwardFold(1, dates, outer, ("000001",), dates[0], dates[-1], outer[0], outer[-1])
+        contract = RankingResearchContract(
+            dataset_id="fixture",
+            run_id="fixture",
+            feature_blocks=(("momentum", ("adjusted_return_20d",)),),
+        )
+
+        split = build_inner_selection_split(contract, fold)
+
+        self.assertEqual(len(split.fit_dates), 80)
+        self.assertEqual(len(split.early_stop_dates), 20)
+        self.assertEqual(len(split.selection_dates), 20)
+        self.assertLess(max(split.fit_dates), min(split.early_stop_dates))
+        self.assertLess(max(split.early_stop_dates), min(split.selection_dates))
+        self.assertLess(max(split.selection_dates), min(fold.validation_dates))
 
 
 if __name__ == "__main__":

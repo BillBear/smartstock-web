@@ -1,0 +1,64 @@
+{
+  "artifacts": {
+    "archive_format": "tar.gz",
+    "delete_rebuildable_after_verify": true
+  },
+  "baseline_definitions": {
+    "adjusted_return_20d": "column:adjusted_return_20d",
+    "adjusted_return_60d": "column:adjusted_return_60d",
+    "amount_ascending": "column_descending:amount_log",
+    "amount_descending": "column:amount_log",
+    "random": "deterministic_hash:seed_17",
+    "registered_single_feature": "column:adjusted_return_20d_rank"
+  },
+  "baselines": [
+    "random",
+    "adjusted_return_20d",
+    "adjusted_return_60d",
+    "amount_ascending",
+    "amount_descending",
+    "registered_single_feature"
+  ],
+  "execution": {
+    "commission_per_side": 0.0003,
+    "horizon": 10,
+    "signal_timing": "after_close",
+    "slippage_per_side": 0.001
+  },
+  "features": {
+    "blocks": {
+      "liquidity": ["amount_log", "amount_log_rank", "amount_ratio_5d", "amount_ratio_20d", "turnover_rate", "turnover_rate_rank", "turnover_ratio_20d"],
+      "market_industry": ["market_positive_breadth_1d", "market_above_sma20_rate", "market_cross_section_return_median_5d", "market_return_dispersion_20d", "market_limit_up_rate", "market_limit_down_rate", "industry_strength_rank_5d", "industry_strength_rank_20d", "stock_excess_vs_industry_5d", "stock_excess_vs_industry_20d"],
+      "momentum_trend": ["adjusted_return_5d", "adjusted_return_20d", "adjusted_return_60d", "adjusted_return_20d_rank", "price_to_sma_20d", "price_to_sma_60d", "macd_line", "macd_signal_gap"],
+      "moneyflow": ["main_net_inflow_ratio", "moneyflow_5d_mean", "moneyflow_20d_mean", "medium_net_flow_persistence_20d", "large_net_flow_persistence_20d", "price_flow_divergence_5d", "price_flow_divergence_20d", "flow_minus_industry_median"],
+      "risk_path": ["realized_volatility_20d", "downside_volatility_20d", "atr_pct_14d", "range_mean_20d", "adjusted_close_to_high"],
+      "volume_price": ["return_5d_x_amount_ratio_5d", "return_20d_x_turnover_rank", "close_to_high_x_amount_ratio_5d", "reversal_5d_x_trend_60d"]
+    },
+    "maximum_count": 60
+  },
+  "models": {
+    "families": ["linear_scorecard", "lightgbm_lambdarank"],
+    "seeds": [17, 42, 73]
+  },
+  "resources": {
+    "rss_abort_gb": 13.0,
+    "rss_soft_limit_gb": 12.0
+  },
+  "run": {
+    "dataset_id": "fmv3_ea0797d57ed62a916b3a",
+    "dataset_registry_sha256": "af05ae7edbf85e509d523593bf5f0430c5dbd30125d9afecf888afa1266c9e70",
+    "future_holdout_status": "sealed",
+    "id": "ml_ranking_reset_20260714_v4"
+  },
+  "sample": {
+    "minimum_listing_sessions": 120
+  },
+  "schema_version": 3,
+  "splits": {
+    "embargo_sessions": 20,
+    "minimum_inner_early_stop_dates": 20,
+    "minimum_inner_fit_dates": 60,
+    "minimum_inner_selection_dates": 20,
+    "outer_folds": 5
+  }
+}

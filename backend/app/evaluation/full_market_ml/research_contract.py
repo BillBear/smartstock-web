@@ -15,6 +15,14 @@ REQUIRED_BASELINES = (
     "amount_descending",
     "registered_single_feature",
 )
+DEFAULT_BASELINE_DEFINITIONS = (
+    ("adjusted_return_20d", "column:adjusted_return_20d"),
+    ("adjusted_return_60d", "column:adjusted_return_60d"),
+    ("amount_ascending", "column_descending:amount_log"),
+    ("amount_descending", "column:amount_log"),
+    ("random", "deterministic_hash:seed_17"),
+    ("registered_single_feature", "column:adjusted_return_20d_rank"),
+)
 ALLOWED_MODEL_FAMILIES = ("linear_scorecard", "lightgbm_lambdarank")
 RESEARCH_STATUS_FIELDS = (
     "engineering_valid",
@@ -42,6 +50,7 @@ class RankingResearchContract:
     minimum_inner_early_stop_dates: int = 20
     minimum_inner_selection_dates: int = 20
     required_baselines: tuple[str, ...] = REQUIRED_BASELINES
+    baseline_definitions: tuple[tuple[str, str], ...] = DEFAULT_BASELINE_DEFINITIONS
     model_families: tuple[str, ...] = ALLOWED_MODEL_FAMILIES
     seeds: tuple[int, ...] = (17, 42, 73)
     maximum_feature_count: int = 60
@@ -76,6 +85,13 @@ class RankingResearchContract:
         missing_baselines = sorted(set(REQUIRED_BASELINES) - set(self.required_baselines))
         if missing_baselines:
             raise ValueError("required_baselines missing: " + ", ".join(missing_baselines))
+        baseline_names = [name for name, _ in self.baseline_definitions]
+        if (
+            set(baseline_names) != set(self.required_baselines)
+            or len(baseline_names) != len(set(baseline_names))
+            or any(not name or not source for name, source in self.baseline_definitions)
+        ):
+            raise ValueError("baseline_definitions must exactly define every required baseline")
         unsupported_models = sorted(set(self.model_families) - set(ALLOWED_MODEL_FAMILIES))
         if unsupported_models or not self.model_families:
             raise ValueError("model_families contain unsupported or empty values")
@@ -139,6 +155,7 @@ def contract_from_mapping(
         minimum_inner_early_stop_dates=int(splits.get("minimum_inner_early_stop_dates", 0)),
         minimum_inner_selection_dates=int(splits.get("minimum_inner_selection_dates", 0)),
         required_baselines=tuple(str(item) for item in _sequence(value, "baselines")),
+        baseline_definitions=_baseline_definitions(value),
         model_families=tuple(str(item) for item in _sequence(models, "families")),
         seeds=tuple(int(item) for item in _sequence(models, "seeds")),
         maximum_feature_count=int(features.get("maximum_count", 0)),
@@ -211,3 +228,12 @@ def _as_sequence(value: Any, key: str) -> Sequence[Any]:
     if not isinstance(value, list):
         raise ValueError(f"missing array: {key}")
     return value
+
+
+def _baseline_definitions(value: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
+    definitions = value.get("baseline_definitions")
+    if definitions is None:
+        return DEFAULT_BASELINE_DEFINITIONS
+    if not isinstance(definitions, Mapping):
+        raise ValueError("baseline_definitions must be a mapping")
+    return tuple(sorted((str(name), str(source)) for name, source in definitions.items()))

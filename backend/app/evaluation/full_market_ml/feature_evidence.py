@@ -250,13 +250,21 @@ def _monotonic_decile_score(rows: pd.DataFrame, feature: str, direction: float) 
 def _stratified_json(rows: pd.DataFrame, feature: str, direction: float, column: str) -> str:
     if column not in rows:
         return "{}"
-    result = {}
-    for group, subset in rows.groupby(column, dropna=False, sort=True):
-        top = _daily_top_k(subset, feature, direction, 5)
-        result[str(group)] = {
-            "rows": int(len(subset)),
-            "top5_mean_alpha": float(top["alpha"].mean()) if not top.empty else None,
+    scored = rows[[column, "trade_date", feature, "alpha_target_10d"]].copy()
+    scored["_score"] = pd.to_numeric(scored[feature], errors="coerce") * direction
+    scored["_within_group_rank"] = scored.groupby(
+        [column, "trade_date"], dropna=False, sort=False
+    )["_score"].rank(method="first", ascending=False)
+    selected = scored.loc[scored["_within_group_rank"].le(5)]
+    row_counts = scored.groupby(column, dropna=False, sort=True).size()
+    alpha_means = selected.groupby(column, dropna=False, sort=True)["alpha_target_10d"].mean()
+    result = {
+        str(group): {
+            "rows": int(count),
+            "top5_mean_alpha": float(alpha_means.loc[group]) if group in alpha_means.index else None,
         }
+        for group, count in row_counts.items()
+    }
     return json.dumps(result, ensure_ascii=True, sort_keys=True)
 
 

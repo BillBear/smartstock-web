@@ -10,6 +10,7 @@ from typing import Any
 import pandas as pd
 
 from .config import FullMarketMLConfig
+from .research_contract import RankingResearchContract, validate_inner_date_roles
 
 
 STOCK_HOLDOUT_RATIO = 0.20
@@ -43,6 +44,39 @@ class WalkForwardFold:
             "validation_start": self.validation_start,
             "validation_end": self.validation_end,
         }
+
+
+@dataclass(frozen=True)
+class InnerSelectionSplit:
+    fit_dates: tuple[str, ...]
+    early_stop_dates: tuple[str, ...]
+    selection_dates: tuple[str, ...]
+
+
+def build_inner_selection_split(
+    contract: RankingResearchContract,
+    outer_fold: WalkForwardFold,
+) -> InnerSelectionSplit:
+    """Allocate disjoint chronological inner roles from one outer training window."""
+    dates = tuple(sorted(set(outer_fold.training_dates)))
+    early_count = contract.minimum_inner_early_stop_dates
+    selection_count = contract.minimum_inner_selection_dates
+    fit_count = len(dates) - early_count - selection_count
+    if fit_count < contract.minimum_inner_fit_dates:
+        raise ValueError("outer fold has insufficient dates for registered inner roles")
+    split = InnerSelectionSplit(
+        fit_dates=dates[:fit_count],
+        early_stop_dates=dates[fit_count:fit_count + early_count],
+        selection_dates=dates[fit_count + early_count:],
+    )
+    validate_inner_date_roles(
+        contract,
+        split.fit_dates,
+        split.early_stop_dates,
+        split.selection_dates,
+        outer_fold.validation_dates,
+    )
+    return split
 
 
 @dataclass(frozen=True)

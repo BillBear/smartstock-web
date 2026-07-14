@@ -44,6 +44,19 @@ class FullMarketMLResearchContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "required_baselines"):
             replace(self.contract, required_baselines=REQUIRED_BASELINES[:-1]).validate()
 
+    def test_baseline_score_definitions_are_hashed_and_complete(self):
+        changed = replace(
+            self.contract,
+            baseline_definitions=tuple(
+                (name, "amount_log" if name == "registered_single_feature" else source)
+                for name, source in self.contract.baseline_definitions
+            ),
+        )
+
+        self.assertNotEqual(self.contract.sha256(), changed.sha256())
+        with self.assertRaisesRegex(ValueError, "baseline_definitions"):
+            replace(self.contract, baseline_definitions=self.contract.baseline_definitions[:-1]).validate()
+
     def test_contract_rejects_open_or_reused_future_holdout(self):
         with self.assertRaisesRegex(ValueError, "future_holdout_status"):
             replace(self.contract, future_holdout_status="available").validate()

@@ -23,6 +23,10 @@ from app.evaluation.full_market_ml.research_contract import (
 from app.evaluation.full_market_ml.label_stage import run_label_audit_stage
 from app.evaluation.full_market_ml.feature_stage import run_feature_evidence_stage
 from app.evaluation.full_market_ml.ablation_stage import run_nested_ablation_stage
+from app.evaluation.full_market_ml.ranking_stage import (
+    run_baseline_oof_stage,
+    run_ranker_oof_stage,
+)
 
 
 RANKING_STAGES = (
@@ -56,12 +60,23 @@ STAGE_IMPLEMENTATION_FILES = {
         "app/evaluation/full_market_ml/baseline_model.py",
         "app/evaluation/full_market_ml/feature_selection.py",
     ),
+    "baseline-oof": (
+        "app/evaluation/full_market_ml/ranking_model.py",
+        "app/evaluation/full_market_ml/ranking_stage.py",
+        "app/evaluation/full_market_ml/research_contract.py",
+    ),
+    "ranker-oof": (
+        "app/evaluation/full_market_ml/ranking_model.py",
+        "app/evaluation/full_market_ml/ranking_stage.py",
+        "app/evaluation/full_market_ml/splits.py",
+    ),
 }
 STAGE_DEPENDENCIES = {
     "label-audit": "contract",
     "feature-evidence": "label-audit",
     "baseline-oof": "feature-evidence",
     "nested-ablation": "baseline-oof",
+    "ranker-oof": "nested-ablation",
 }
 
 
@@ -112,6 +127,16 @@ class RankingResetRunner:
                 )
                 self.services["nested-ablation"] = (
                     lambda contract, run_root, _stage: run_nested_ablation_stage(
+                        contract, run_root
+                    )
+                )
+                self.services["baseline-oof"] = (
+                    lambda contract, run_root, _stage: run_baseline_oof_stage(
+                        contract, run_root
+                    )
+                )
+                self.services["ranker-oof"] = (
+                    lambda contract, run_root, _stage: run_ranker_oof_stage(
                         contract, run_root
                     )
                 )
