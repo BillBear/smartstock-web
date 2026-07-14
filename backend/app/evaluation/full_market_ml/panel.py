@@ -137,6 +137,16 @@ def build_historical_universe(stock_basic: pd.DataFrame, trade_dates: Iterable[s
     basic = stock_basic.copy()
     if basic.empty:
         return pd.DataFrame(columns=["trade_date", "symbol"])
+    if "list_status" in basic.columns:
+        delisted = basic["list_status"].astype(str).str.upper().eq("D")
+        missing_delist_date = "delist_date" not in basic.columns
+        empty_delist_date = (
+            pd.Series(False, index=basic.index)
+            if missing_delist_date
+            else basic["delist_date"].fillna("").astype(str).str.strip().eq("")
+        )
+        if bool(delisted.any()) and (missing_delist_date or bool((delisted & empty_delist_date).any())):
+            raise ValueError("delisted stock rows require delist_date for historical universe reconstruction")
     basic["symbol"] = _symbols(basic)
     basic["list_date"] = basic.get("list_date", pd.Series("", index=basic.index)).map(_date_text)
     basic["delist_date"] = basic.get("delist_date", pd.Series("", index=basic.index)).map(_date_text)
@@ -244,7 +254,7 @@ def _finalize_symbol_panel(panel: pd.DataFrame) -> pd.DataFrame:
     next_at_up_limit = panel["next_at_up_limit_open"].eq(True) | panel["next_at_up_limit_open"].isna()
     panel["entry_tradeable"] = next_valid & ~next_suspended & ~next_at_up_limit & panel["next_adjusted_open"].notna()
     panel["eligible_signal_day"] = (
-        panel["listing_age_trade_days"].ge(20)
+        panel["listing_age_trade_days"].ge(120)
         & ~panel["is_st"]
         & ~panel["is_suspended"]
         & panel["valid_ohlc"]

@@ -21,6 +21,10 @@ from .manifests import CollectionManifest, PartitionRecord, load_manifest, manif
 CORE_DAILY_ENDPOINTS = ("daily", "daily_basic", "adj_factor", "stk_limit", "suspend_d")
 CARDINALITY_GATED_ENDPOINTS = ("daily", "daily_basic", "adj_factor", "stk_limit")
 CORE_STATIC_ENDPOINTS = ("namechange",)
+STOCK_BASIC_FIELDS = (
+    "ts_code,symbol,name,area,industry,market,exchange,list_status,"
+    "list_date,delist_date,is_hs"
+)
 INDEX_CODES = ("000001.SH", "000300.SH", "000905.SH", "399006.SZ")
 RETRY_DELAYS_SECONDS = (1, 2, 4, 8)
 POINT_IN_TIME_ENDPOINTS = ("fina_indicator", "forecast", "express")
@@ -250,7 +254,10 @@ def collect_full_market_raw(
             list_status,
             _stock_basic_path(list_status),
             lambda list_status=list_status: _records(
-                _request(lambda: client.stock_basic(list_status=list_status), config.collection.request_pacing_seconds)
+                _request(
+                    lambda: client.stock_basic(list_status=list_status, fields=STOCK_BASIC_FIELDS),
+                    config.collection.request_pacing_seconds,
+                )
             ),
             core=True,
             resume=resume,

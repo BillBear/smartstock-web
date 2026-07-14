@@ -43,6 +43,14 @@ class FullMarketMLPanelTests(unittest.TestCase):
         self.assertEqual(universe.query("trade_date == '2025-01-10'")["symbol"].tolist(), ["600001"])
         self.assertTrue(universe.query("trade_date == '2025-01-20'").empty)
 
+    def test_historical_universe_rejects_delisted_stock_without_delist_date(self):
+        basic = frame(
+            [{"symbol": "600001", "list_date": "20200101", "delist_date": None, "list_status": "D"}]
+        )
+
+        with self.assertRaisesRegex(ValueError, "delisted stock rows require delist_date"):
+            build_historical_universe(basic, ["2025-01-10"])
+
     def test_full_build_excludes_daily_row_after_delist_date(self):
         config = load_full_market_ml_config(Path(__file__).parents[1] / "config" / "ml_full_market_v1.toml")
         with tempfile.TemporaryDirectory() as directory:
@@ -200,6 +208,16 @@ class FullMarketMLPanelTests(unittest.TestCase):
             final_panel = self._read_shards(result.shard_paths)
             self.assertEqual(build_lookup.call_count, 1)
             self.assertEqual(final_panel["listing_age_trade_days"].tolist(), list(range(1, 21)))
+
+    def test_signal_eligibility_requires_120_completed_listing_sessions(self):
+        panel = build_panel_from_frames(
+            twenty_session_panel_fixture(final_adj_factor=1.0, periods=121)
+        )
+
+        day_119 = panel.loc[panel["listing_age_trade_days"].eq(119)].iloc[0]
+        day_120 = panel.loc[panel["listing_age_trade_days"].eq(120)].iloc[0]
+        self.assertFalse(bool(day_119["eligible_signal_day"]))
+        self.assertTrue(bool(day_120["eligible_signal_day"]))
 
     def test_suspend_interval_uses_suspend_and_resume_dates(self):
         panel = build_panel_from_frames(suspension_interval_fixture())

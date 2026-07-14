@@ -479,8 +479,8 @@ def overlapping_portfolio_fixture() -> pd.DataFrame:
     return frame(rows)
 
 
-def twenty_session_panel_fixture(*, final_adj_factor=None) -> dict:
-    open_dates = pd.bdate_range("2025-01-02", periods=20)
+def twenty_session_panel_fixture(*, final_adj_factor=None, periods: int = 20) -> dict:
+    open_dates = pd.bdate_range("2025-01-02", periods=periods)
     daily = []
     adjustments = []
     calendar_rows = []
@@ -613,7 +613,13 @@ class FakeTuShareClient:
                 return []
             return [{"ts_code": kwargs["ts_code"], "trade_date": kwargs["trade_date"], "value": 1.0}]
         if endpoint == "stock_basic":
-            return [{"ts_code": "000001.SZ", "list_status": kwargs["list_status"], "industry": "must-not-be-used"}]
+            return [{
+                "ts_code": "000001.SZ",
+                "list_status": kwargs["list_status"],
+                "list_date": "19910403",
+                "delist_date": "20200101" if kwargs["list_status"] == "D" else None,
+                "industry": "must-not-be-used",
+            }]
         rows = [
             {"ts_code": "000001.SZ", "trade_date": kwargs.get("trade_date", "20260709"), "value": 1.0},
             {"ts_code": "000002.SZ", "trade_date": kwargs.get("trade_date", "20260709"), "value": 2.0},

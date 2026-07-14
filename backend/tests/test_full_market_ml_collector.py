@@ -152,6 +152,10 @@ class FullMarketMLCollectorTests(FullMarketMLTestCase):
         self.assertTrue(manifest.industry_relative_enabled)
         self.assertEqual(client.calls["index_classify"], 1)
         self.assertEqual(client.calls["index_member_all"], 2)
+        stock_basic_requests = [kwargs for endpoint, kwargs in client.request_kwargs if endpoint == "stock_basic"]
+        self.assertEqual([request["list_status"] for request in stock_basic_requests], ["L", "D", "P"])
+        self.assertTrue(all("delist_date" in request["fields"] for request in stock_basic_requests))
+        self.assertTrue(all("list_status" in request["fields"] for request in stock_basic_requests))
 
     def test_namechange_collection_starts_at_configured_historical_floor(self):
         client = FakeTuShareClient()
