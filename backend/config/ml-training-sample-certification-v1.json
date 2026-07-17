@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "dataset_id": "fmv3_ea0797d57ed62a916b3a",
+  "minimum_coverage": 0.95,
+  "minimum_feature_coverage": 0.95,
+  "minimum_listing_sessions": 120,
+  "production_integration_allowed": false
+}
