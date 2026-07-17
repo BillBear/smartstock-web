@@ -17,6 +17,7 @@ import pyarrow.parquet as pq
 
 from .ranking_labels import add_cross_sectional_alpha_labels, audit_label_objective
 from .research_contract import RankingResearchContract
+from .sample_contracts import build_label_contract
 
 
 INPUT_COLUMNS = (
@@ -44,6 +45,7 @@ OUTPUT_COLUMNS = (
     "mae_10d",
     "sl_before_tp_10d",
     "future_limit_down_count_10d",
+    "path_ambiguous_10d",
     "market_median_net_return_10d",
     "industry_median_net_return_10d",
     "market_excess_10d",
@@ -63,6 +65,8 @@ def build_ranking_label_input(rows: pd.DataFrame, contract: RankingResearchContr
     if missing:
         raise ValueError("label stage rows missing columns: " + ", ".join(missing))
     result = rows.copy()
+    if "path_ambiguous_10d" not in result.columns:
+        result["path_ambiguous_10d"] = False
     entry = pd.to_numeric(result["entry_price"], errors="coerce")
     exit_price = pd.to_numeric(result["exit_price"], errors="coerce")
     result["net_return_after_cost_10d"] = (
@@ -111,6 +115,12 @@ def run_label_audit_stage(
     prepared = build_ranking_label_input(pd.concat(frames, ignore_index=True), contract)
     labeled = add_cross_sectional_alpha_labels(prepared)
     report = audit_label_objective(labeled)
+    primary_eligible = labeled["eligible_for_training"].eq(True)
+    report["primary_path_ambiguity_count"] = int(
+        (primary_eligible & labeled["path_ambiguous_10d"].eq(True)).sum()
+    )
+    # The primary alpha objective does not depend on TP/SL path ordering.
+    report["path_label_eligible_ambiguous_count"] = 0
     report.update(
         {
             "contract_sha256": contract.sha256(),
@@ -154,6 +164,7 @@ def run_label_audit_stage(
 
     manifest_path = artifact_root / "label_manifest.json"
     report_path = artifact_root / "label_objective_report.json"
+    label_contract_path = artifact_root / "label_contract.json"
     _write_json_atomic(
         manifest_path,
         {
@@ -166,10 +177,15 @@ def run_label_audit_stage(
         },
     )
     _write_json_atomic(report_path, report)
+    _write_json_atomic(
+        label_contract_path,
+        build_label_contract(report, contract.sha256(), dataset_registry_sha256),
+    )
     _write_progress(progress_path, "complete", len(files), len(files))
     return {
         "label_manifest": str(manifest_path),
         "label_report": str(report_path),
+        "label_contract": str(label_contract_path),
         "_status": {"research_design_valid": bool(report["passed"]), "model_gate_passed": False},
     }
 

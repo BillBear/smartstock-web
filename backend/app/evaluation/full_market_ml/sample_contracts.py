@@ -1,0 +1,118 @@
+"""Immutable evidence contracts for full-market ML sample quality."""
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Any, Mapping, Sequence
+
+
+_SHA256_HEX_LENGTH = 64
+
+
+def build_label_contract(
+    label_audit: Mapping[str, Any],
+    contract_sha256: str,
+    dataset_registry_sha256: str,
+) -> dict[str, Any]:
+    """Define the ranking objective without conflating it with path diagnostics."""
+    _require_sha256("research contract", contract_sha256)
+    _require_sha256("dataset registry", dataset_registry_sha256)
+    primary_daily = _normalise_primary_daily(label_audit.get("daily"))
+    if not primary_daily:
+        raise ValueError("primary label audit has no labelable dates")
+    path_ambiguity_count = _nonnegative_int(
+        label_audit.get("primary_path_ambiguity_count", label_audit.get("path_ambiguity_count", 0)),
+        "primary_path_ambiguity_count",
+    )
+    path_eligible_ambiguity_count = _nonnegative_int(
+        label_audit.get("path_label_eligible_ambiguous_count", 0),
+        "path_label_eligible_ambiguous_count",
+    )
+    payload: dict[str, Any] = {
+        "label_contract_version": "alpha_risk_10d_v1",
+        "primary_label": {
+            "column": "alpha_relevance_grade_10d",
+            "objective": "cross_sectional_alpha",
+            "positive_column": "alpha_top10_10d",
+        },
+        "auxiliary_risk_labels": [
+            {"column": "severe_negative_10d", "objective": "downside_path"},
+            {"column": "sl_before_tp_10d", "objective": "stop_before_take_profit"},
+            {"column": "future_limit_down_count_10d", "objective": "limit_down_risk"},
+            {"column": "mae_10d", "objective": "maximum_adverse_excursion"},
+        ],
+        "signal_time": "after_close",
+        "entry_time": "next_session_open",
+        "horizon_sessions": 10,
+        "primary_daily": primary_daily,
+        "primary_path_ambiguity_count": path_ambiguity_count,
+        "path_label_eligible_ambiguous_count": path_eligible_ambiguity_count,
+        "source_hashes": {
+            "research_contract": contract_sha256.lower(),
+            "dataset_registry": dataset_registry_sha256.lower(),
+        },
+    }
+    return _with_sha256(payload)
+
+
+def _normalise_primary_daily(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise ValueError("primary label audit daily must be an array")
+    result: list[dict[str, Any]] = []
+    seen_dates: set[str] = set()
+    for raw in value:
+        if not isinstance(raw, Mapping):
+            raise ValueError("primary label daily row must be an object")
+        trade_date = str(raw.get("trade_date", "")).strip()
+        if not trade_date:
+            raise ValueError("primary label daily row has no trade_date")
+        if trade_date in seen_dates:
+            raise ValueError(f"duplicate primary label date: {trade_date}")
+        seen_dates.add(trade_date)
+        eligible_count = _nonnegative_int(raw.get("eligible_count"), f"eligible_count:{trade_date}")
+        if eligible_count <= 0:
+            raise ValueError(f"primary label eligible_count must be positive: {trade_date}")
+        prevalence = _probability(raw.get("alpha_top10_prevalence"), f"alpha_top10_prevalence:{trade_date}")
+        grade_rate = _probability(raw.get("grade_3_or_higher_rate"), f"grade_3_or_higher_rate:{trade_date}")
+        result.append(
+            {
+                "trade_date": trade_date,
+                "eligible_count": eligible_count,
+                "alpha_top10_prevalence": prevalence,
+                "grade_3_or_higher_rate": grade_rate,
+            }
+        )
+    return result
+
+
+def _with_sha256(payload: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(payload)
+    encoded = json.dumps(result, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    result["sha256"] = hashlib.sha256(encoded).hexdigest()
+    return result
+
+
+def _require_sha256(label: str, value: object) -> None:
+    text = str(value).strip().lower()
+    if len(text) != _SHA256_HEX_LENGTH or any(character not in "0123456789abcdef" for character in text):
+        raise ValueError(f"{label} hash must be a SHA256")
+
+
+def _nonnegative_int(value: object, label: str) -> int:
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a non-negative integer") from exc
+    if result < 0:
+        raise ValueError(f"{label} must be a non-negative integer")
+    return result
+
+
+def _probability(value: object, label: str) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be between 0 and 1") from exc
+    if not 0.0 <= result <= 1.0:
+        raise ValueError(f"{label} must be between 0 and 1")
+    return result
