@@ -125,7 +125,10 @@ def _check_labels(labels: Mapping[str, Any], blocking: set[str]) -> None:
         blocking.add("labels:signal_time_not_after_close")
     if labels.get("entry_time") != "next_session_open":
         blocking.add("labels:entry_time_not_next_session_open")
-    if int(labels.get("eligible_ambiguous_path_count", 0) or 0) != 0:
+    ambiguous_count = labels.get("eligible_ambiguous_path_count")
+    if ambiguous_count is None:
+        blocking.add("labels:ambiguous_path_eligibility_unproven")
+    elif int(ambiguous_count or 0) != 0:
         blocking.add("labels:ambiguous_path_training_rows")
 
     canonical: dict[str, float] = {}

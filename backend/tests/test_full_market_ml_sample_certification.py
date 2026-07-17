@@ -120,6 +120,14 @@ class SampleCertificationTests(unittest.TestCase):
 
         self.assertIn("labels:ambiguous_path_training_rows", result["blocking_codes"])
 
+    def test_blocks_when_ambiguity_eligibility_is_not_proven(self):
+        evidence = valid_evidence()
+        evidence["labels"]["eligible_ambiguous_path_count"] = None
+
+        result = certify_training_sample(self.config, evidence, ["adjusted_return_20d"])
+
+        self.assertIn("labels:ambiguous_path_eligibility_unproven", result["blocking_codes"])
+
     def test_blocks_missing_point_in_time_security_provenance(self):
         evidence = valid_evidence()
         evidence["security_state"]["provenance"] = None
