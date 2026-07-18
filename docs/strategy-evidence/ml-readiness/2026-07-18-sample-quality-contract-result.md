@@ -35,7 +35,7 @@ security-state collection before it can be admitted.
 Local-only derived evidence:
 
 - `$ML_ASSET_ROOT/derivations/fmv3_ea0797d57ed62a916b3a/sample-contract-v1-20260718-r3/`
-- `$ML_ASSET_ROOT/certifications/fmv3_ea0797d57ed62a916b3a-sample-contract-v1-20260718-r3/fmv3_ea0797d57ed62a916b3a/a60ea8f66bedbb61/certificate.json`
+- `$ML_ASSET_ROOT/certifications/fmv3_ea0797d57ed62a916b3a-sample-contract-v1-20260718-r4/fmv3_ea0797d57ed62a916b3a/a60ea8f66bedbb61/certificate.json`
 
 These assets are intentionally not committed to Git.
 
@@ -116,7 +116,7 @@ export ML_ASSET_ROOT="${ML_ASSET_ROOT:?set ML_ASSET_ROOT before certifying}"
   --config config/ml-training-sample-certification-v1.json \
   --asset-root "$ML_ASSET_ROOT" \
   --sample-contract "$ML_ASSET_ROOT/derivations/fmv3_ea0797d57ed62a916b3a/sample-contract-v1-20260718-r3/sample_contract.json" \
-  --output-root "$ML_ASSET_ROOT/certifications/fmv3_ea0797d57ed62a916b3a-sample-contract-v1-20260718-r3"
+  --output-root "$ML_ASSET_ROOT/certifications/fmv3_ea0797d57ed62a916b3a-sample-contract-v1-20260718-r4"
 ```
 
 Result: exit `2`, the blocking codes above were written to the immutable
