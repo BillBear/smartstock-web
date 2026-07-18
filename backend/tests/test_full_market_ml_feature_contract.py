@@ -55,6 +55,14 @@ class FullMarketFeatureContractTests(unittest.TestCase):
         self.assertGreaterEqual(len(contract.required_feature_names), 60)
         self.assertEqual(contract.sha256(), build_full_market_feature_contract(moneyflow_coverage=0.9492).sha256())
 
+    def test_cross_section_valuation_features_are_optional(self):
+        contract = build_full_market_feature_contract(moneyflow_coverage=0.9492)
+        availability = {feature.name: feature.availability for feature in contract.features}
+
+        for name in ("total_mv_log_rank", "pe_rank", "pb_rank", "ps_rank", "float_market_value_ratio_rank"):
+            self.assertEqual(availability[name], "optional")
+            self.assertNotIn(name, contract.required_feature_names)
+
     def test_contract_rejects_insufficient_observed_moneyflow_coverage(self):
         with self.assertRaisesRegex(FeatureContractError, "moneyflow coverage"):
             build_full_market_feature_contract(

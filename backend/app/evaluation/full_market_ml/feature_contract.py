@@ -19,7 +19,7 @@ import pandas as pd
 from .features import CORE_FEATURE_SPECS, FeatureSpec, build_features_for_date
 
 
-FEATURE_CONTRACT_VERSION = "full_market_online_parity_v2"
+FEATURE_CONTRACT_VERSION = "full_market_online_parity_v3"
 MINIMUM_CORE_FOLD_COVERAGE = 0.95
 PARITY_TOLERANCE = 1e-8
 MONEYFLOW_MINIMUM_COVERAGE = 0.95
@@ -118,7 +118,7 @@ class FeatureCoverageResult:
     passed: bool
 
 
-_OPTIONAL_GROUPS = {"valuation_liquidity"}
+_OPTIONAL_GROUPS = {"valuation_liquidity", "cross_section_valuation"}
 
 
 def build_full_market_feature_contract(
