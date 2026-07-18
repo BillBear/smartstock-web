@@ -10,6 +10,11 @@ import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 
+from app.models.data_provenance import (
+    is_observed_money_flow,
+    make_money_flow_provenance,
+)
+
 logger = logging.getLogger(__name__)
 
 MINIMAL_STOCK_BASIC_MAP: Dict[str, Dict[str, str]] = {
@@ -315,7 +320,13 @@ class DataSourceManager:
         logger.error(f"所有显式区间数据源均失败: {symbol} {normalized_start}..{normalized_end}")
         return pd.DataFrame()
 
-    def get_money_flow(self, symbol: str, days: int = 5) -> Optional[Dict[str, Any]]:
+    def get_money_flow(
+        self,
+        symbol: str,
+        days: int = 5,
+        *,
+        allow_estimated: bool = False,
+    ) -> Dict[str, Any]:
         """获取资金流向数据（多数据源容错）
 
         Args:
@@ -325,7 +336,7 @@ class DataSourceManager:
         Returns:
             dict: 资金流向数据
         """
-        cache_key = f"moneyflow:{symbol}:{days}"
+        cache_key = f"moneyflow:{symbol}:{days}:estimated={int(allow_estimated)}"
         cached = self._get_cache(cache_key)
         if cached is not None:
             return cached
@@ -345,7 +356,11 @@ class DataSourceManager:
                 logger.info(f"尝试从 {source_name} 获取资金流向: {symbol}")
 
                 if source_name == 'TuShare':
-                    data = service.get_money_flow(ts_code, days)
+                    data = service.get_money_flow(
+                        ts_code,
+                        days=days,
+                        allow_estimated=allow_estimated,
+                    )
                 elif source_name == 'AKShare':
                     data = service.get_money_flow(symbol, days)
                 elif source_name == 'Mock':
@@ -354,7 +369,18 @@ class DataSourceManager:
                     continue
 
                 if data:
-                    data = self._normalize_money_flow(data, symbol)
+                    data = self._normalize_money_flow(data, symbol, source_name=source_name)
+                    if not is_observed_money_flow(data) and not (
+                        allow_estimated and data.get("data_quality") == "estimated"
+                    ):
+                        self._record_failure(source_name, "moneyflow", data.get("fallback_reason") or "non-observed data")
+                        logger.warning(
+                            "⚠️ %s 未返回可观测资金流: %s quality=%s",
+                            source_name,
+                            symbol,
+                            data.get("data_quality"),
+                        )
+                        continue
                     self._record_success(source_name, "moneyflow")
                     self._set_cache(cache_key, data)
                     logger.info(f"✅ 成功从 {source_name} 获取资金流向: {symbol}")
@@ -369,7 +395,19 @@ class DataSourceManager:
                 continue
 
         logger.error(f"所有数据源均失败: {symbol}")
-        return None
+        return {
+            "symbol": symbol,
+            "main_net_inflow": None,
+            "control_ratio": None,
+            "trend": "资金流数据缺失",
+            "strength": "未知",
+            "super_large_net": None,
+            "large_net": None,
+            "medium_net": None,
+            "small_net": None,
+            "amount_unit": "yuan",
+            **make_money_flow_provenance("none", "missing", fallback_reason="all_sources_missing"),
+        }
 
     def get_a_share_snapshot(self) -> List[Dict[str, Any]]:
         """获取全A实时快照（优先快速 TuShare+Tencent，必要时回退 AKShare）。"""
@@ -810,8 +848,36 @@ class DataSourceManager:
             return None
         return parsed.date().isoformat()
 
-    def _normalize_money_flow(self, data: Dict[str, Any], symbol: str) -> Dict[str, Any]:
+    def _normalize_money_flow(
+        self,
+        data: Dict[str, Any],
+        symbol: str,
+        *,
+        source_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """统一资金流向字段，兼容Mock和真实数据源。"""
+        default_source = str(source_name or data.get("data_source") or "unknown").lower()
+        default_quality = "estimated" if default_source == "mock" else "observed"
+        provenance = make_money_flow_provenance(
+            data.get("data_source") or default_source,
+            data.get("data_quality") or default_quality,
+            as_of_date=data.get("as_of_date"),
+            fallback_reason=data.get("fallback_reason"),
+        )
+        if provenance["data_quality"] == "missing":
+            return {
+                "symbol": symbol,
+                "main_net_inflow": None,
+                "control_ratio": None,
+                "trend": data.get("trend") or "资金流数据缺失",
+                "strength": data.get("strength") or "未知",
+                "super_large_net": None,
+                "large_net": None,
+                "medium_net": None,
+                "small_net": None,
+                "amount_unit": "yuan",
+                **provenance,
+            }
         if "main_net_inflow" in data:
             amount_unit = str(data.get("amount_unit") or "").strip().lower()
             unit_multiplier = 1.0
@@ -827,6 +893,8 @@ class DataSourceManager:
                 "large_net": float(data.get("large_net", 0)) * unit_multiplier,
                 "medium_net": float(data.get("medium_net", 0)) * unit_multiplier,
                 "small_net": float(data.get("small_net", 0)) * unit_multiplier,
+                "amount_unit": "yuan",
+                **provenance,
             }
 
         summary = data.get("main_flow_summary", {})
@@ -848,6 +916,8 @@ class DataSourceManager:
             "large_net": large_flow * to_yuan,
             "medium_net": medium_flow * to_yuan,
             "small_net": small_flow * to_yuan,
+            "amount_unit": "yuan",
+            **provenance,
         }
 
     @staticmethod

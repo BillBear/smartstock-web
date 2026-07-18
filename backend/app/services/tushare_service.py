@@ -9,6 +9,8 @@ import logging
 import time
 from functools import lru_cache
 
+from app.models.data_provenance import make_money_flow_provenance
+
 logger = logging.getLogger(__name__)
 
 class TuShareService:
@@ -239,15 +241,16 @@ class TuShareService:
             logger.error(f"获取历史数据失败 {ts_code}: {str(e)}")
             return pd.DataFrame()
 
-    def get_money_flow(self, ts_code: str, days: int = 5):
+    def get_money_flow(self, ts_code: str, days: int = 5, allow_estimated: bool = False):
         """获取资金流向数据
 
         注意：TuShare的moneyflow接口需要2000积分以上权限
-        如果权限不足，将返回模拟数据
+        默认不会把估算值伪装成真实资金流。仅诊断调用可显式允许估算结果。
 
         Args:
             ts_code: 股票代码
             days: 天数
+            allow_estimated: 是否允许仅供诊断的估算结果
 
         Returns:
             dict: 资金流向数据
@@ -263,9 +266,14 @@ class TuShareService:
                 end_date=end_date.strftime('%Y%m%d')
             )
 
-            if df.empty:
-                logger.warning(f"未找到股票 {ts_code} 的资金流向数据，返回估算数据")
-                return self._get_estimated_money_flow(ts_code, days)
+            if df is None or df.empty:
+                logger.warning(f"未找到股票 {ts_code} 的资金流向数据")
+                return self._money_flow_unavailable(
+                    ts_code,
+                    days,
+                    allow_estimated=allow_estimated,
+                    reason="empty_response",
+                )
 
             # 取最近的数据
             df = df.sort_values('trade_date', ascending=False).head(days)
@@ -293,6 +301,9 @@ class TuShareService:
                 trend = "主力流出"
                 strength = "强势" if abs(main_net_inflow_wan) > total_amount * 0.1 else "一般"
 
+            as_of_raw = str(df.iloc[0].get("trade_date") or "").strip()
+            as_of_parsed = pd.to_datetime(as_of_raw, errors="coerce") if as_of_raw else pd.NaT
+            as_of_date = as_of_parsed.date().isoformat() if pd.notna(as_of_parsed) else None
             return {
                 'main_net_inflow': float(main_net_inflow),
                 'control_ratio': float(control_ratio),
@@ -303,11 +314,50 @@ class TuShareService:
                 'medium_net': float((buy_md - sell_md) * self.MONEYFLOW_AMOUNT_UNIT),
                 'small_net': float((buy_sm - sell_sm) * self.MONEYFLOW_AMOUNT_UNIT),
                 'amount_unit': 'yuan',
+                **make_money_flow_provenance("tushare", "observed", as_of_date=as_of_date),
             }
 
         except Exception as e:
-            logger.warning(f"获取资金流向失败 {ts_code}: {str(e)}，返回估算数据")
-            return self._get_estimated_money_flow(ts_code, days)
+            logger.warning(f"获取资金流向失败 {ts_code}: {str(e)}")
+            return self._money_flow_unavailable(
+                ts_code,
+                days,
+                allow_estimated=allow_estimated,
+                reason="request_error",
+            )
+
+    def _money_flow_unavailable(
+        self,
+        ts_code: str,
+        days: int,
+        *,
+        allow_estimated: bool,
+        reason: str,
+    ):
+        if allow_estimated:
+            estimated = self._get_estimated_money_flow(ts_code, days)
+            if estimated:
+                return {
+                    **estimated,
+                    **make_money_flow_provenance(
+                        "tushare",
+                        "estimated",
+                        fallback_reason=reason,
+                    ),
+                }
+
+        return {
+            "main_net_inflow": None,
+            "control_ratio": None,
+            "trend": "资金流数据缺失",
+            "strength": "未知",
+            "super_large_net": None,
+            "large_net": None,
+            "medium_net": None,
+            "small_net": None,
+            "amount_unit": "yuan",
+            **make_money_flow_provenance("tushare", "missing", fallback_reason=reason),
+        }
 
     def _get_estimated_money_flow(self, ts_code: str, days: int = 5):
         """基于成交量估算资金流向（当无权限访问moneyflow接口时使用）"""

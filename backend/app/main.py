@@ -176,6 +176,25 @@ def get_quote_price(quote: dict) -> float:
 
 def build_money_flow_payload(money_flow_raw: dict) -> dict:
     """构造资金流向统一响应结构。"""
+    if money_flow_raw.get("data_quality") == "missing":
+        return {
+            "money_flow": {
+                **money_flow_raw,
+                "analysis": {
+                    "conclusion": "资金流数据暂不可用，不生成方向性结论",
+                    "details": [
+                        f"数据源: {money_flow_raw.get('data_source') or 'unknown'}",
+                        f"原因: {money_flow_raw.get('fallback_reason') or 'unknown'}",
+                    ],
+                },
+            },
+            "signal": {
+                "overall": "数据缺失",
+                "score": None,
+                "signals": ["资金流数据缺失，未使用估算值替代。"],
+            },
+        }
+
     flow_signal = {
         'overall': money_flow_raw['trend'],
         'score': int(money_flow_raw['main_net_inflow'] / 10000000),

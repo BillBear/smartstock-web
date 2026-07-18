@@ -3,11 +3,17 @@ import { Card, Row, Col, Statistic, Tag, Divider, Timeline } from 'antd'
 import { ArrowUpOutlined, ArrowDownOutlined, DollarOutlined } from '@ant-design/icons'
 
 const MoneyFlowPanel = ({ data }) => {
-  if (!data) {
+  if (!data || data?.money_flow?.data_quality === 'missing') {
+    const unavailable = data?.money_flow
     return (
       <Card title="💰 资金流向分析" variant="borderless">
         <div style={{ textAlign: 'center', padding: '40px', color: '#999' }}>
-          暂无资金流向数据
+          <div>资金流数据暂不可用</div>
+          {unavailable?.fallback_reason && (
+            <div style={{ marginTop: 8, fontSize: 12 }}>
+              原因：{unavailable.fallback_reason}
+            </div>
+          )}
         </div>
       </Card>
     )

@@ -15,6 +15,7 @@ from threading import RLock
 
 import pandas as pd
 
+from app.models.data_provenance import is_observed_money_flow
 from app.services.coach_store import CoachStore
 from app.services.numeric_utils import clamp, safe_float
 from app.services.technical_analyzer import TechnicalAnalyzer
@@ -245,6 +246,45 @@ class CoachService:
     @staticmethod
     def _clamp(value: float, low: float, high: float) -> float:
         return clamp(value, low, high)
+
+    def _resolve_money_flow_context(
+        self,
+        symbol: str,
+        quote_override: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Resolve money-flow values without conflating observations and proxies.
+
+        Candidate-batch analysis intentionally uses a cheap price/amount proxy.  It
+        remains usable as a proxy feature, but it is never labelled as a provider
+        observation.  Direct analysis accepts only manager-normalized observed
+        values; missing or estimated data stays unavailable instead of becoming a
+        fabricated directional signal.
+        """
+        if quote_override is not None:
+            amount_yi = self._safe_float(quote_override.get("amount"), 0.0) / 100000000
+            pct_change = self._safe_float(quote_override.get("pct_change"), 0.0)
+            return {
+                "main_net_inflow_yi": self._clamp(amount_yi * pct_change / 12.0, -5.0, 5.0),
+                "data_source": "quote_amount_pct_change",
+                "data_quality": "proxy",
+                "observed_feature_eligible": False,
+            }
+
+        raw = self.data_source_manager.get_money_flow(symbol, days=3) or {}
+        if is_observed_money_flow(raw):
+            return {
+                "main_net_inflow_yi": self._safe_float(raw.get("main_net_inflow"), 0.0) / 100000000,
+                "data_source": str(raw.get("data_source") or "unknown"),
+                "data_quality": "observed",
+                "observed_feature_eligible": True,
+            }
+
+        return {
+            "main_net_inflow_yi": 0.0,
+            "data_source": str(raw.get("data_source") or "none"),
+            "data_quality": str(raw.get("data_quality") or "missing"),
+            "observed_feature_eligible": False,
+        }
 
     @staticmethod
     def _extract_symbol_from_pick_id(pick_id: str) -> str:
@@ -1467,17 +1507,11 @@ class CoachService:
         up_prob = self._clamp(0.52 + signal_score / 250.0, 0.05, 0.95)
         dd_prob = self._clamp(0.34 - signal_score / 400.0, 0.05, 0.90)
 
-        money_flow_source = "proxy"
-        if quote_override:
-            amount_yi_proxy = float(quote.get("amount") or 0) / 100000000
-            pct_proxy = float(quote.get("pct_change") or 0)
-            # 列表筛选阶段避免逐只调用高成本资金流接口，使用成交额 * 涨跌幅构造日内资金强弱代理。
-            main_net_inflow_yi = self._clamp(amount_yi_proxy * pct_proxy / 12.0, -5.0, 5.0)
-        else:
-            money_flow_raw = self.data_source_manager.get_money_flow(symbol, days=3) or {}
-            main_net_inflow = float(money_flow_raw.get("main_net_inflow", 0) or 0)
-            main_net_inflow_yi = main_net_inflow / 100000000
-            money_flow_source = "remote"
+        money_flow_context = self._resolve_money_flow_context(symbol, quote_override)
+        main_net_inflow_yi = money_flow_context["main_net_inflow_yi"]
+        money_flow_source = money_flow_context["data_source"]
+        money_flow_quality = money_flow_context["data_quality"]
+        money_flow_observed_feature_eligible = money_flow_context["observed_feature_eligible"]
 
         industry_name = (
             str((quote_override or {}).get("industry") or quote.get("industry") or "").strip()
@@ -1905,7 +1939,9 @@ class CoachService:
                     analyzed_df,
                     market_state=market_state,
                     news_factor=news_factor,
-                    money_flow_proxy_yi=main_net_inflow_yi,
+                    money_flow_proxy_yi=(
+                        main_net_inflow_yi if money_flow_quality == "proxy" else None
+                    ),
                     turnover_rate=turnover_rate,
                 )
                 model_prediction = self.ml_model_service.predict_live(
@@ -1962,6 +1998,8 @@ class CoachService:
                 "main_net_inflow_yi": round(main_net_inflow_yi, 3),
                 "turnover_rate": round(turnover_rate, 3),
                 "money_flow_source": money_flow_source,
+                "money_flow_quality": money_flow_quality,
+                "money_flow_observed_feature_eligible": money_flow_observed_feature_eligible,
             },
             "news_factor": news_factor,
             "evidence_summary": {
