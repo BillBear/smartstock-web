@@ -29,6 +29,7 @@ from .features import ALL_FEATURE_NAMES, build_time_series_features, build_cross
 
 
 FEATURE_ASSET_VERSION = "full_market_feature_asset_v2"
+DERIVED_FEATURE_ASSET_VERSION = "full_market_feature_asset_contract_derivation_v1"
 MINIMUM_ONLINE_PARITY_HISTORY_SESSIONS = 84
 ONLINE_PARITY_SYMBOL_LIMIT = 256
 _RAW_REQUIRED = {
@@ -165,6 +166,105 @@ def materialize_feature_asset(
         raise
 
 
+def certify_derived_feature_asset(
+    *,
+    source_dataset_root: str | Path,
+    parent_feature_asset_root: str | Path,
+    output_root: str | Path,
+    code_commit: str,
+) -> dict[str, Any]:
+    """Certify a new contract against an immutable, already-materialized matrix.
+
+    The derived asset contains only audit metadata and a read-only matrix
+    reference. It must never rewrite, copy, or silently relabel the parent
+    feature asset.
+    """
+    source = _load_source(Path(source_dataset_root).expanduser().resolve())
+    parent_root = Path(parent_feature_asset_root).expanduser().resolve()
+    destination = Path(output_root).expanduser().resolve()
+    if parent_root == destination:
+        raise FeatureMaterializationError("derived feature asset must use a different output root")
+
+    contract = build_full_market_feature_contract(
+        moneyflow_coverage=float(source["quality"]["moneyflow_coverage"]),
+        include_moneyflow=False,
+    )
+    parent_manifest, matrix_root, matrix_files = _verify_parent_feature_asset(parent_root, source)
+    run_contract = _derived_run_contract(
+        source,
+        parent_root,
+        parent_manifest,
+        matrix_root,
+        matrix_files,
+        contract,
+        code_commit,
+    )
+    published = _prepare_derived_destination(destination, run_contract)
+    if published is not None:
+        return published
+
+    _write_progress(destination, "verify-parent-matrix", status="running", verified_files=len(matrix_files))
+    _append_stage_log(destination, "verify-parent-matrix", "complete", files=len(matrix_files))
+    try:
+        counts, fold_dates = _coverage_counts(contract, source["split"])
+        for index, item in enumerate(matrix_files, start=1):
+            path = matrix_root / item["path"].removeprefix("matrix/")
+            _add_coverage_from_file(path, contract, counts, fold_dates)
+            _write_progress(
+                destination,
+                "recompute-core-coverage",
+                status="running",
+                completed_files=index,
+                total_files=len(matrix_files),
+            )
+        coverage = _coverage_report(contract, counts)
+        _write_json(destination / "coverage_report.json", coverage)
+        _append_stage_log(destination, "recompute-core-coverage", "complete", passed=coverage["passed"])
+
+        sessions = _sessions(source["quality"])
+        source_columns = _source_columns(source["parquet"], contract)
+        parity = _verify_last_date_parity(
+            source["parquet"],
+            source_columns,
+            sessions,
+            matrix_root,
+            contract,
+        )
+        _write_json(destination / "online_offline_parity.json", parity)
+        _append_stage_log(destination, "online-offline-parity", "complete", **parity)
+
+        coverage_passed = bool(coverage["passed"])
+        status = "complete" if coverage_passed else "blocked_core_coverage"
+        manifest = {
+            **run_contract,
+            "status": status,
+            "completed_at": _now(),
+            "row_count": sum(int(item["row_count"]) for item in matrix_files),
+            "trade_date_count": len(matrix_files),
+            "matrix_path": str(matrix_root),
+            "matrix_files": matrix_files,
+            "coverage": coverage,
+            "online_offline_parity": parity,
+            "training_eligible": coverage_passed,
+            "production_integration_allowed": False,
+        }
+        manifest["sha256"] = _payload_sha256(manifest)
+        _write_json(destination / "feature_asset_manifest.json", manifest)
+        _write_progress(destination, "complete", status=status, completed_files=len(matrix_files), total_files=len(matrix_files))
+        _append_stage_log(destination, "complete", status, rows=manifest["row_count"])
+        return manifest
+    except Exception as error:
+        _write_progress(
+            destination,
+            "failed",
+            status="failed",
+            error_type=type(error).__name__,
+            error=str(error),
+        )
+        _append_stage_log(destination, "failed", type(error).__name__, error=str(error))
+        raise
+
+
 def _load_source(source_root: Path) -> dict[str, Any]:
     registry_path = source_root / "dataset_registry_v2.json"
     quality_path = source_root / "artifacts" / "full-build" / "quality_report.json"
@@ -210,6 +310,67 @@ def _run_contract(source: Mapping[str, Any], contract: FeatureContract, code_com
     }
 
 
+def _verify_parent_feature_asset(
+    parent_root: Path,
+    source: Mapping[str, Any],
+) -> tuple[dict[str, Any], Path, list[dict[str, Any]]]:
+    manifest_path = parent_root / "feature_asset_manifest.json"
+    if not manifest_path.is_file():
+        raise FeatureMaterializationError(f"parent feature asset manifest is missing: {manifest_path}")
+    manifest = _read_json(manifest_path)
+    if str(manifest.get("status")) not in {"complete", "blocked_core_coverage"}:
+        raise FeatureMaterializationError("parent feature asset is not a published matrix")
+    if str(manifest.get("source_dataset_id")) != str(source["registry"]["dataset_id"]):
+        raise FeatureMaterializationError("parent feature asset belongs to a different source dataset")
+    source_sha = _sha256_file(source["data_path"])
+    if str(manifest.get("source_dataset_sha256")) != source_sha:
+        raise FeatureMaterializationError("parent feature asset source SHA256 does not match immutable source")
+    expected_manifest_sha = str(manifest.get("sha256", ""))
+    observed_manifest_sha = _payload_sha256({key: value for key, value in manifest.items() if key != "sha256"})
+    if expected_manifest_sha != observed_manifest_sha:
+        raise FeatureMaterializationError("parent feature asset manifest SHA256 is invalid")
+
+    matrix_root = Path(str(manifest.get("matrix_path", ""))).expanduser().resolve()
+    if not matrix_root.is_dir() or parent_root not in matrix_root.parents:
+        raise FeatureMaterializationError("parent feature matrix path is missing or outside its asset root")
+    expected_files = manifest.get("matrix_files")
+    if not isinstance(expected_files, list) or not expected_files:
+        raise FeatureMaterializationError("parent feature asset has no matrix file manifest")
+    observed_files = _matrix_file_manifest(matrix_root)
+    if observed_files != expected_files:
+        raise FeatureMaterializationError("parent feature matrix files do not match its published manifest")
+    return manifest, matrix_root, observed_files
+
+
+def _derived_run_contract(
+    source: Mapping[str, Any],
+    parent_root: Path,
+    parent_manifest: Mapping[str, Any],
+    matrix_root: Path,
+    matrix_files: list[dict[str, Any]],
+    contract: FeatureContract,
+    code_commit: str,
+) -> dict[str, Any]:
+    return {
+        "feature_asset_version": DERIVED_FEATURE_ASSET_VERSION,
+        "source_dataset_id": str(source["registry"]["dataset_id"]),
+        "source_dataset_sha256": _sha256_file(source["data_path"]),
+        "source_registry_sha256": str(source["registry"]["sha256"]),
+        "parent_feature_asset_root": str(parent_root),
+        "parent_feature_asset_manifest_sha256": str(parent_manifest["sha256"]),
+        "parent_feature_asset_status": str(parent_manifest["status"]),
+        "parent_matrix_path": str(matrix_root),
+        "parent_matrix_files_sha256": _payload_sha256({"matrix_files": matrix_files}),
+        "feature_contract": contract.to_dict(),
+        "feature_contract_sha256": contract.sha256(),
+        "code_commit": str(code_commit),
+        "moneyflow_coverage": float(source["quality"]["moneyflow_coverage"]),
+        "moneyflow_included": False,
+        "formal_future_holdout_status": str(source["registry"].get("formal_future_holdout_status", "unknown")),
+        "production_integration_allowed": False,
+    }
+
+
 def _prepare_destination(destination: Path, run_contract: Mapping[str, Any]) -> None:
     contract_path = destination / "materialization_contract.json"
     if destination.exists():
@@ -221,6 +382,32 @@ def _prepare_destination(destination: Path, run_contract: Mapping[str, Any]) -> 
         return
     destination.mkdir(parents=True, exist_ok=False)
     _write_json(contract_path, dict(run_contract))
+
+
+def _prepare_derived_destination(destination: Path, run_contract: Mapping[str, Any]) -> dict[str, Any] | None:
+    contract_path = destination / "derivation_contract.json"
+    manifest_path = destination / "feature_asset_manifest.json"
+    if destination.exists():
+        if not contract_path.is_file():
+            raise FeatureMaterializationError(f"output root exists without a derivation contract: {destination}")
+        existing = _read_json(contract_path)
+        if existing != dict(run_contract):
+            raise FeatureMaterializationError("existing derived asset belongs to a different source, parent matrix, or contract")
+        if manifest_path.is_file():
+            manifest = _read_json(manifest_path)
+            expected_sha = _payload_sha256({key: value for key, value in manifest.items() if key != "sha256"})
+            if manifest.get("sha256") != expected_sha:
+                raise FeatureMaterializationError("existing derived feature asset manifest SHA256 is invalid")
+            for key, value in run_contract.items():
+                if manifest.get(key) != value:
+                    raise FeatureMaterializationError(
+                        f"existing derived feature asset manifest does not match its derivation contract: {key}"
+                    )
+            return manifest
+        return None
+    destination.mkdir(parents=True, exist_ok=False)
+    _write_json(contract_path, dict(run_contract))
+    return None
 
 
 def _source_columns(parquet: pq.ParquetFile, contract: FeatureContract) -> tuple[str, ...]:
