@@ -87,6 +87,10 @@ def build_industry_state_features(rows: pd.DataFrame) -> pd.DataFrame:
             "at_down_limit",
         },
     )
+    # Cross-sectional construction revisits each date while retaining prior-date
+    # columns in the symbol shard. Drop stale outputs before merging fresh daily
+    # industry statistics so Pandas cannot suffix the registered feature names.
+    result = result.drop(columns=[name for name in INDUSTRY_FEATURE_NAMES if name in result], errors="ignore")
     keys = ["trade_date", "industry_l1"]
     valid = result["industry_l1"].notna()
     source = result.loc[valid].copy()

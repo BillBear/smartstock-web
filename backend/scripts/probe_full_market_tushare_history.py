@@ -15,20 +15,88 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
-DEFAULT_ENDPOINTS = (
+REQUIRED_ENDPOINTS = (
+    "stock_basic",
+    "namechange",
+    "trade_cal",
     "daily",
     "daily_basic",
     "adj_factor",
     "stk_limit",
     "suspend_d",
-    "moneyflow",
     "index_daily",
     "index_dailybasic",
+    "index_classify",
+    "index_member_all",
 )
+EXPERIMENTAL_ENDPOINTS = (
+    "moneyflow",
+    "margin",
+    "margin_detail",
+    "top_list",
+    "top_inst",
+    "block_trade",
+    "fina_indicator",
+    "income",
+    "balancesheet",
+    "cashflow",
+    "forecast",
+    "express",
+    "stk_holdernumber",
+    "top10_holders",
+    "top10_floatholders",
+    "hk_hold",
+)
+DEFAULT_ENDPOINTS = REQUIRED_ENDPOINTS + EXPERIMENTAL_ENDPOINTS
 STOCK_BASIC_FIELDS = (
     "ts_code,symbol,name,area,industry,market,exchange,list_status,"
     "list_date,delist_date,is_hs"
 )
+
+_TIMESTAMP_FIELDS = {
+    "stock_basic": ("list_date", "delist_date"),
+    "namechange": ("start_date", "end_date", "ann_date"),
+    "trade_cal": ("cal_date",),
+    "daily": ("trade_date",),
+    "daily_basic": ("trade_date",),
+    "adj_factor": ("trade_date",),
+    "stk_limit": ("trade_date",),
+    "suspend_d": ("trade_date", "suspend_date", "resume_date"),
+    "moneyflow": ("trade_date",),
+    "margin": ("trade_date",),
+    "margin_detail": ("trade_date",),
+    "top_list": ("trade_date",),
+    "top_inst": ("trade_date",),
+    "block_trade": ("trade_date",),
+    "index_daily": ("trade_date",),
+    "index_dailybasic": ("trade_date",),
+    "index_classify": (),
+    "index_member_all": ("in_date", "out_date"),
+    "fina_indicator": ("ann_date", "end_date"),
+    "income": ("ann_date", "f_ann_date", "end_date"),
+    "balancesheet": ("ann_date", "f_ann_date", "end_date"),
+    "cashflow": ("ann_date", "f_ann_date", "end_date"),
+    "forecast": ("ann_date", "first_ann_date", "end_date"),
+    "express": ("ann_date", "end_date"),
+    "stk_holdernumber": ("ann_date", "enddate"),
+    "top10_holders": ("ann_date", "end_date"),
+    "top10_floatholders": ("ann_date", "end_date"),
+    "hk_hold": ("trade_date",),
+}
+_STATIC_ENDPOINTS = {"stock_basic", "index_classify", "index_member_all"}
+_WINDOW_ENDPOINTS = {
+    "namechange",
+    "fina_indicator",
+    "income",
+    "balancesheet",
+    "cashflow",
+    "forecast",
+    "express",
+    "stk_holdernumber",
+    "top10_holders",
+    "top10_floatholders",
+}
+_SYMBOL_COLUMNS = ("ts_code", "symbol", "con_code")
 
 
 def probe_tushare_history(
@@ -44,10 +112,21 @@ def probe_tushare_history(
         raise RuntimeError("trade_cal returned no open dates for requested range")
     earliest, latest = open_dates[0], open_dates[-1]
     stock_basic = fetch_stock_basic_history(pro)
-    endpoint_results = {
-        endpoint: _probe_endpoint(pro, endpoint, earliest, latest)
-        for endpoint in endpoints
-    }
+    endpoint_results = {}
+    for endpoint in dict.fromkeys(endpoints):
+        if endpoint == "trade_cal":
+            endpoint_results[endpoint] = _probe_trade_calendar(calendar, open_dates)
+        elif endpoint == "stock_basic":
+            endpoint_results[endpoint] = _stock_basic_status(stock_basic)
+        else:
+            endpoint_results[endpoint] = _probe_endpoint(
+                pro,
+                endpoint,
+                earliest,
+                latest,
+                start_date=start_date,
+                end_date=end_date,
+            )
     return {
         "requested_date_range": [str(start_date), str(end_date)],
         "open_date_range": [earliest, latest],
@@ -73,7 +152,11 @@ def fetch_stock_basic_history(pro: Any) -> pd.DataFrame:
 
 
 def _stock_basic_status(frame: pd.DataFrame) -> dict[str, Any]:
-    result = _status_for_frames([frame])
+    result = _result_for_frames(
+        [frame],
+        endpoint="stock_basic",
+        requested_dates=(),
+    )
     statuses = frame.get("list_status", pd.Series(dtype=str)).astype(str).str.upper()
     result["list_status_counts"] = {
         key: int(value) for key, value in statuses.value_counts().sort_index().items()
@@ -85,31 +168,76 @@ def _stock_basic_status(frame: pd.DataFrame) -> dict[str, Any]:
     return result
 
 
-def _probe_endpoint(pro: Any, endpoint: str, earliest: str, latest: str) -> dict[str, Any]:
+def _probe_trade_calendar(frame: pd.DataFrame, open_dates: list[str]) -> dict[str, Any]:
+    result = _result_for_frames(
+        [frame],
+        endpoint="trade_cal",
+        requested_dates=tuple(open_dates[:1] + open_dates[-1:]),
+    )
+    result["earliest_date"] = min(open_dates) if open_dates else None
+    result["latest_date"] = max(open_dates) if open_dates else None
+    result["earliest_returned_date"] = result["earliest_date"]
+    result["latest_returned_date"] = result["latest_date"]
+    return result
+
+
+def _probe_endpoint(
+    pro: Any,
+    endpoint: str,
+    earliest: str,
+    latest: str,
+    *,
+    start_date: str,
+    end_date: str,
+) -> dict[str, Any]:
     frames: list[pd.DataFrame] = []
     returned_dates: list[str] = []
     scope_mismatches: list[dict[str, str]] = []
+    requested_dates = () if endpoint in (_STATIC_ENDPOINTS | _WINDOW_ENDPOINTS) else tuple(dict.fromkeys((earliest, latest)))
     try:
-        for date in dict.fromkeys((earliest, latest)):
-            frame = _safe_query(pro, endpoint, **_endpoint_params(endpoint, date))
+        probe_dates = requested_dates or (None,)
+        for trade_date in probe_dates:
+            frame = _safe_query(
+                pro,
+                endpoint,
+                **_endpoint_params(endpoint, trade_date, start_date=start_date, end_date=end_date),
+            )
             frames.append(frame)
             if not frame.empty:
-                frame_dates = _returned_dates(frame, date)
+                frame_dates = _returned_dates(frame)
                 returned_dates.extend(frame_dates)
-                if frame_dates != [date]:
+                if trade_date and frame_dates and frame_dates != [trade_date]:
                     scope_mismatches.append(
-                        {"requested_date": date, "returned_min": min(frame_dates), "returned_max": max(frame_dates)}
+                        {"requested_date": trade_date, "returned_min": min(frame_dates), "returned_max": max(frame_dates)}
                     )
     except Exception as exc:
         message = str(exc)
-        status = "permission_denied" if _permission_error(message) else "query_failed"
-        return {"status": status, "error_type": type(exc).__name__, "message": _sanitise(message)}
-    result = _status_for_frames(frames)
+        status = _error_status(message)
+        return {
+            "status": status,
+            "error_code": status,
+            "error_type": type(exc).__name__,
+            "message": _sanitise(message),
+            "row_count": 0,
+            "sample_row_count": 0,
+            "earliest_date": None,
+            "latest_date": None,
+            "earliest_returned_date": None,
+            "latest_returned_date": None,
+            "required_timestamp_fields": list(_TIMESTAMP_FIELDS.get(endpoint, ())),
+            "timestamp_contract_satisfied": False,
+            "date_coverage": _date_coverage(requested_dates, ()),
+            "symbol_coverage": _symbol_coverage(frames),
+        }
+    result = _result_for_frames(frames, endpoint=endpoint, requested_dates=requested_dates)
     if scope_mismatches:
         result["status"] = "query_scope_mismatch"
+        result["error_code"] = "query_scope_mismatch"
         result["scope_mismatches"] = scope_mismatches
-    result["earliest_returned_date"] = min(returned_dates) if returned_dates else None
-    result["latest_returned_date"] = max(returned_dates) if returned_dates else None
+    result["earliest_date"] = min(returned_dates) if returned_dates else None
+    result["latest_date"] = max(returned_dates) if returned_dates else None
+    result["earliest_returned_date"] = result["earliest_date"]
+    result["latest_returned_date"] = result["latest_date"]
     return result
 
 
@@ -118,10 +246,26 @@ def _safe_query(pro: Any, endpoint: str, **kwargs: Any) -> pd.DataFrame:
     return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame(frame)
 
 
-def _endpoint_params(endpoint: str, date: str) -> dict[str, str]:
+def _endpoint_params(
+    endpoint: str,
+    trade_date: str | None,
+    *,
+    start_date: str,
+    end_date: str,
+) -> dict[str, str]:
     if endpoint in {"index_daily", "index_dailybasic"}:
-        return {"ts_code": "000001.SH", "start_date": date, "end_date": date}
-    return {"trade_date": date}
+        return {"ts_code": "000001.SH", "start_date": trade_date or start_date, "end_date": trade_date or end_date}
+    if endpoint == "namechange":
+        return {"start_date": start_date, "end_date": end_date}
+    if endpoint == "index_classify":
+        return {"level": "L1", "src": "SW2021"}
+    if endpoint == "index_member_all":
+        return {"l1_code": "801010.SI"}
+    if endpoint in {"fina_indicator", "income", "balancesheet", "cashflow", "forecast", "express", "stk_holdernumber", "top10_holders", "top10_floatholders"}:
+        return {"ts_code": "000001.SZ", "start_date": start_date, "end_date": end_date}
+    if endpoint == "top_inst":
+        return {"trade_date": trade_date or end_date}
+    return {"trade_date": trade_date or end_date}
 
 
 def _open_dates(frame: pd.DataFrame) -> list[str]:
@@ -131,8 +275,8 @@ def _open_dates(frame: pd.DataFrame) -> list[str]:
     return sorted(opened["cal_date"].astype(str).str.replace("-", "", regex=False).unique().tolist())
 
 
-def _returned_dates(frame: pd.DataFrame, fallback: str) -> list[str]:
-    for column in ("trade_date", "cal_date", "suspend_date"):
+def _returned_dates(frame: pd.DataFrame) -> list[str]:
+    for column in ("trade_date", "cal_date", "suspend_date", "ann_date", "f_ann_date", "in_date"):
         if column in frame.columns and frame[column].notna().any():
             return sorted(
                 frame.loc[frame[column].notna(), column]
@@ -141,7 +285,7 @@ def _returned_dates(frame: pd.DataFrame, fallback: str) -> list[str]:
                 .unique()
                 .tolist()
             )
-    return [fallback]
+    return []
 
 
 def _status_for_frames(frames: list[pd.DataFrame]) -> dict[str, Any]:
@@ -149,9 +293,65 @@ def _status_for_frames(frames: list[pd.DataFrame]) -> dict[str, Any]:
     return {"status": "valid_with_rows" if rows else "valid_but_empty", "sample_row_count": int(rows)}
 
 
+def _result_for_frames(
+    frames: list[pd.DataFrame],
+    *,
+    endpoint: str,
+    requested_dates: tuple[str, ...],
+) -> dict[str, Any]:
+    result = _status_for_frames(frames)
+    returned_dates = tuple(sorted({value for frame in frames for value in _returned_dates(frame)}))
+    required_timestamp_fields = tuple(_TIMESTAMP_FIELDS.get(endpoint, ()))
+    fields = {str(column) for frame in frames for column in frame.columns}
+    result.update(
+        {
+            "error_code": None,
+            "row_count": result["sample_row_count"],
+            "required_timestamp_fields": list(required_timestamp_fields),
+            "timestamp_contract_satisfied": (
+                not required_timestamp_fields or any(field in fields for field in required_timestamp_fields)
+            ),
+            "date_coverage": _date_coverage(requested_dates, returned_dates),
+            "symbol_coverage": _symbol_coverage(frames),
+        }
+    )
+    return result
+
+
+def _date_coverage(requested_dates: tuple[str, ...], returned_dates: tuple[str, ...]) -> dict[str, Any]:
+    requested = tuple(sorted(set(requested_dates)))
+    returned = tuple(sorted(set(returned_dates)))
+    matched = len(set(requested) & set(returned))
+    return {
+        "requested_count": len(requested),
+        "returned_count": len(returned),
+        "matched_count": matched,
+        "fraction": (matched / len(requested)) if requested else None,
+    }
+
+
+def _symbol_coverage(frames: list[pd.DataFrame]) -> dict[str, int]:
+    symbols = set()
+    for frame in frames:
+        for column in _SYMBOL_COLUMNS:
+            if column in frame.columns:
+                symbols.update(value for value in frame[column].dropna().astype(str) if value)
+                break
+    return {"unique_symbol_count": len(symbols)}
+
+
 def _permission_error(message: str) -> bool:
     lowered = message.lower()
     return any(term in lowered for term in ("permission", "denied", "权限", "积分"))
+
+
+def _error_status(message: str) -> str:
+    if _permission_error(message):
+        return "permission_denied"
+    lowered = message.lower()
+    if any(term in lowered for term in ("正确的接口名", "invalid endpoint", "unknown api", "not support api")):
+        return "invalid_endpoint"
+    return "request_failed"
 
 
 def _sanitise(message: str) -> str:

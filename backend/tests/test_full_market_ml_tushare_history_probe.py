@@ -31,6 +31,42 @@ class FakeTuSharePro:
 
 
 class FullMarketMLTuShareHistoryProbeTests(unittest.TestCase):
+    def test_probe_reports_timestamp_and_coverage_contracts(self):
+        report = probe_tushare_history(
+            FakeTuSharePro(),
+            start_date="20200101",
+            end_date="20260714",
+            endpoints=("daily", "moneyflow", "suspend_d"),
+        )
+
+        daily = report["endpoints"]["daily"]
+        self.assertEqual(daily["row_count"], 2)
+        self.assertEqual(daily["earliest_date"], "20200102")
+        self.assertEqual(daily["latest_date"], "20260714")
+        self.assertIn("trade_date", daily["required_timestamp_fields"])
+        self.assertTrue(daily["timestamp_contract_satisfied"])
+        self.assertEqual(daily["date_coverage"]["requested_count"], 2)
+        self.assertEqual(daily["date_coverage"]["returned_count"], 2)
+        self.assertEqual(daily["symbol_coverage"]["unique_symbol_count"], 1)
+
+    def test_probe_classifies_invalid_endpoint_separately_from_request_failure(self):
+        class InvalidEndpointClient(FakeTuSharePro):
+            def query(self, endpoint: str, **kwargs):
+                if endpoint == "not_a_real_endpoint":
+                    raise RuntimeError("请指定正确的接口名")
+                return super().query(endpoint, **kwargs)
+
+        report = probe_tushare_history(
+            InvalidEndpointClient(),
+            start_date="20240603",
+            end_date="20260717",
+            endpoints=("not_a_real_endpoint",),
+        )
+
+        result = report["endpoints"]["not_a_real_endpoint"]
+        self.assertEqual(result["status"], "invalid_endpoint")
+        self.assertEqual(result["error_code"], "invalid_endpoint")
+
     def test_probe_separates_permission_empty_and_freshness(self):
         report = probe_tushare_history(
             FakeTuSharePro(),

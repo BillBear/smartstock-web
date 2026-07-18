@@ -6,6 +6,7 @@ import pandas as pd
 from pandas.testing import assert_frame_equal
 
 from app.evaluation.full_market_ml.market_industry_features import (
+    INDUSTRY_FEATURE_NAMES,
     MARKET_FEATURE_NAMES,
     build_industry_state_features,
     build_market_state_features,
@@ -53,6 +54,17 @@ class FullMarketMLMarketIndustryFeatureTests(unittest.TestCase):
             day.loc[day["industry_l1"].eq("tech"), "industry_strength_rank_5d"].iloc[0],
             day.loc[day["industry_l1"].eq("bank"), "industry_strength_rank_5d"].iloc[0],
         )
+
+    def test_industry_features_are_recomputed_when_prior_date_columns_exist(self):
+        rows = state_fixture()
+        for name in INDUSTRY_FEATURE_NAMES:
+            rows[name] = pd.NA
+
+        output = build_industry_state_features(rows)
+
+        self.assertTrue(set(INDUSTRY_FEATURE_NAMES).issubset(output.columns))
+        self.assertFalse(output["industry_signal_return_median_5d"].isna().all())
+        self.assertFalse(any(name.endswith("_x") or name.endswith("_y") for name in output.columns))
 
     def test_future_mutation_does_not_change_prior_signal_features(self):
         before = state_fixture()

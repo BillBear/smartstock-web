@@ -11,6 +11,7 @@ from app.evaluation.full_market_ml.assets import (
     backup_stage_assets,
     build_dataset_registry,
     ensure_local_dataset_backup,
+    seed_verified_raw_assets,
     verify_dataset_backup,
     verify_stage_completion_manifest,
     write_stage_completion_manifest,
@@ -20,6 +21,46 @@ from tests.test_full_market_ml_collector import FullMarketMLTestCase
 
 
 class FullMarketMLAssetTests(FullMarketMLTestCase):
+    def test_verified_raw_seed_copies_only_manifested_nonstatic_partitions(self):
+        source = self.temp_path / "source-raw"
+        daily = source / "raw" / "endpoint=daily" / "trade_date=20260102" / "data.parquet"
+        namechange = source / "raw" / "endpoint=namechange" / "data.parquet"
+        daily.parent.mkdir(parents=True)
+        namechange.parent.mkdir(parents=True)
+        daily.write_bytes(b"daily-evidence")
+        namechange.write_bytes(b"namechange-evidence")
+        manifest = {
+            "partitions": [
+                {
+                    "endpoint": "daily",
+                    "key": "20260102",
+                    "path": str(daily.relative_to(source)),
+                    "sha256": hashlib.sha256(daily.read_bytes()).hexdigest(),
+                    "status": "collected",
+                },
+                {
+                    "endpoint": "namechange",
+                    "key": "static",
+                    "path": str(namechange.relative_to(source)),
+                    "sha256": hashlib.sha256(namechange.read_bytes()).hexdigest(),
+                    "status": "collected",
+                },
+            ]
+        }
+        manifest_path = source / "manifests" / "full-build.json"
+        manifest_path.parent.mkdir(parents=True)
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        destination = self.temp_path / "seeded-run"
+
+        result = seed_verified_raw_assets(source, destination)
+
+        seeded_daily = destination / daily.relative_to(source)
+        self.assertTrue(seeded_daily.is_file())
+        self.assertEqual(seeded_daily.read_bytes(), b"daily-evidence")
+        self.assertFalse((destination / namechange.relative_to(source)).exists())
+        self.assertEqual(result["seeded_partition_count"], 1)
+        self.assertEqual(result["excluded_endpoints"], ["index_classify", "index_member_all", "namechange", "stock_basic"])
+        self.assertTrue((destination / "raw_seed_provenance.json").is_file())
     def _runtime(self):
         runtime = self.temp_path / "run"
         (runtime / "manifests").mkdir(parents=True)
@@ -51,6 +92,17 @@ class FullMarketMLAssetTests(FullMarketMLTestCase):
         self.assertEqual(first["split_sha256"], "split-sha")
         self.assertEqual(first["assets"]["dataset"]["sha256"], second["assets"]["dataset"]["sha256"])
         self.assertEqual(first["environment"]["python_version"], "3.11")
+
+    def test_registry_id_changes_when_the_registered_split_changes(self):
+        runtime = self._runtime()
+        first = build_dataset_registry(runtime, code_revision="commit-sha", environment={})
+        (runtime / "artifacts" / "full-build" / "split_plan.json").write_text(
+            '{"split_sha256":"different-split-sha"}\n', encoding="utf-8"
+        )
+
+        second = build_dataset_registry(runtime, code_revision="commit-sha", environment={})
+
+        self.assertNotEqual(first["dataset_id"], second["dataset_id"])
 
     def test_research_closure_is_atomic_and_rejects_mutable_runtime_paths(self):
         target = self.temp_path / "closure.json"

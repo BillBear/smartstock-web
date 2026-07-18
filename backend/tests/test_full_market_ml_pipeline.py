@@ -11,7 +11,7 @@ from app.evaluation.full_market_ml.pipeline import (
     FullMarketMLPipeline,
     select_probe_dates,
 )
-from scripts.run_full_market_ml_pipeline import validate_backup_root
+from scripts.run_full_market_ml_pipeline import load_split_input_dataset, resolve_runtime_root, validate_backup_root
 from app.evaluation.full_market_ml.quality import TrainingBlockedError
 from tests.full_market_ml_fixtures import fake_pipeline_services
 from tests.test_full_market_ml_collector import FullMarketMLTestCase
@@ -95,12 +95,29 @@ class FullMarketMLPipelineTests(FullMarketMLTestCase):
         pipeline = FullMarketMLPipeline(self.config, self.temp_path, fake_pipeline_services())
         running = pipeline._state("preflight", "running", {}, {}, started_at="2026-07-01T00:00:00+00:00")
         running["heartbeat_at"] = "2026-07-01T00:00:00+00:00"
+        prior_peak = running["peak_rss_bytes"]
         pipeline._write_json(pipeline._state_path("preflight"), running)
 
         recovered = pipeline.recover_stale_stages(max_idle_seconds=60, now="2026-07-01T00:02:00+00:00")
 
         self.assertEqual(recovered, ["preflight"])
-        self.assertEqual(pipeline.stage_state("preflight")["status"], "timeout")
+        state = pipeline.stage_state("preflight")
+        self.assertEqual(state["status"], "timeout")
+        self.assertEqual(state["peak_rss_bytes"], prior_peak)
+
+    def test_stale_stage_recovery_preserves_prior_peak_memory_and_pid(self):
+        pipeline = FullMarketMLPipeline(self.config, self.temp_path, fake_pipeline_services())
+        running = pipeline._state("preflight", "running", {}, {}, started_at="2026-07-01T00:00:00+00:00")
+        running["heartbeat_at"] = "2026-07-01T00:00:00+00:00"
+        running["peak_rss_bytes"] = 6_650_000_000
+        running["pid"] = 12345
+        pipeline._write_json(pipeline._state_path("preflight"), running)
+
+        pipeline.recover_stale_stages(max_idle_seconds=60, now="2026-07-01T00:02:00+00:00")
+
+        state = pipeline.stage_state("preflight")
+        self.assertEqual(6_650_000_000, state["peak_rss_bytes"])
+        self.assertEqual(12345, state["pid"])
 
     def test_running_stage_writes_heartbeat_and_progress(self):
         services = fake_pipeline_services()
@@ -155,6 +172,68 @@ class FullMarketMLPipelineTests(FullMarketMLTestCase):
         self.assertIn("--status", result.stdout)
         self.assertIn("--recover-stale-seconds", result.stdout)
         self.assertNotIn("override", result.stdout.lower())
+
+    def test_explicit_run_root_is_used_without_worktree_runtime_fallback(self):
+        explicit = self.temp_path / "formal-assets" / "run"
+
+        resolved = resolve_runtime_root("ignored-run-id", explicit)
+
+        self.assertEqual(resolved, explicit.resolve())
+
+    def test_split_input_reader_loads_only_required_columns(self):
+        import pandas as pd
+
+        source = self.temp_path / "dataset.parquet"
+        pd.DataFrame(
+            {
+                "trade_date": ["2026-01-02"],
+                "symbol": ["000001"],
+                "industry_l1": ["IND"],
+                "total_mv": [1.0],
+                "amount_cny": [2.0],
+                "eligible_for_training": [True],
+                "large_unused_feature": ["x" * 10_000],
+                "future_return_10d": [0.9],
+            }
+        ).to_parquet(source, index=False)
+
+        result = load_split_input_dataset(source)
+
+        self.assertEqual(
+            ["trade_date", "symbol", "industry_l1", "total_mv", "amount_cny", "eligible_for_training"],
+            list(result.columns),
+        )
+
+    def test_collection_full_build_reuses_probe_without_running_pilot(self):
+        pipeline = FullMarketMLPipeline(self.config, self.temp_path, fake_pipeline_services())
+        pipeline.run("probe")
+
+        result = pipeline.run_collection_stage("full-build")
+
+        self.assertEqual(result.stage_states["full-build"]["status"], "complete")
+        self.assertEqual(pipeline.status_report()["stages"]["pilot-build"]["status"], "not_started")
+
+    def test_collection_stage_prefers_raw_collection_adapter(self):
+        services = fake_pipeline_services()
+        observed = {"full_build": 0, "collection": 0}
+
+        def full_build(_config, _root, _artifacts):
+            observed["full_build"] += 1
+            return {"quality_ready": True, "built_panel": True}
+
+        def collection_only(_config, _root, _artifacts):
+            observed["collection"] += 1
+            return {"quality_ready": True, "raw_collection_only": True}
+
+        services["full-build"] = full_build
+        services["collection:full-build"] = collection_only
+        pipeline = FullMarketMLPipeline(self.config, self.temp_path, services)
+        pipeline.run("probe")
+
+        result = pipeline.run_collection_stage("full-build")
+
+        self.assertEqual(observed, {"full_build": 0, "collection": 1})
+        self.assertTrue(result.stage_states["full-build"]["artifacts"]["raw_collection_only"])
 
     def test_local_backup_root_is_allowed_outside_runtime(self):
         backup = validate_backup_root(self.temp_path.parent / "ml-backup", self.temp_path)

@@ -47,6 +47,11 @@ DEFAULT_STAGE_TIMEOUTS_SECONDS = {
     "final-holdout-evaluate": 30 * 60,
 }
 FORMAL_DOWNSTREAM_STAGES = {"final-fit", "final-holdout-evaluate"}
+COLLECTION_STAGE_UPSTREAMS = {
+    "probe": ("preflight",),
+    "pilot-build": ("preflight", "probe"),
+    "full-build": ("preflight", "probe"),
+}
 
 
 def select_probe_dates(open_dates: list[str] | tuple[str, ...], count: int = 5) -> tuple[str, ...]:
@@ -117,6 +122,40 @@ class FullMarketMLPipeline:
 
         return PipelineRunResult(stage=stage, reused_stages=reused, stage_states=states)
 
+    def run_collection_stage(self, stage: str, *, resume: bool = False) -> PipelineRunResult:
+        """Run a collection stage from its explicit data prerequisites only.
+
+        A full raw-panel build needs the environment preflight and bounded source
+        probe, but it does not need a pilot panel.  Keeping that distinction
+        prevents duplicate two-year collection merely because a later training
+        workflow also has a pilot stage.
+        """
+        if stage not in COLLECTION_STAGE_UPSTREAMS:
+            raise ValueError("collection stage must be one of " + ", ".join(sorted(COLLECTION_STAGE_UPSTREAMS)))
+
+        states: dict[str, dict[str, Any]] = {}
+        reused: list[str] = []
+        for upstream in COLLECTION_STAGE_UPSTREAMS[stage]:
+            state = self._load_state(upstream)
+            if state is None or state.get("status") != "complete":
+                raise TrainingBlockedError((f"upstream_{upstream}_incomplete",))
+            states[upstream] = state
+            reused.append(upstream)
+
+        inputs = {"config_sha256": str(self.config.sha256)}
+        for upstream in COLLECTION_STAGE_UPSTREAMS[stage]:
+            inputs[f"upstream:{upstream}"] = _sha256_bytes(_canonical_json(states[upstream]))
+        existing = self._load_state(stage)
+        if self._is_reusable(existing, inputs) and resume:
+            states[stage] = existing
+            reused.append(stage)
+        elif existing and existing.get("status") == "complete":
+            raise ValueError(f"stage already complete: {stage}; rerun with resume")
+        else:
+            collection_service = self.services.get(f"collection:{stage}", self.services[stage])
+            states[stage] = self._run_stage(stage, inputs, states, service=collection_service)
+        return PipelineRunResult(stage=stage, reused_stages=reused, stage_states=states)
+
     def stage_state(self, stage: str) -> dict[str, Any]:
         if stage not in STAGES:
             raise ValueError("unknown stage")
@@ -163,6 +202,7 @@ class FullMarketMLPipeline:
             ended_at=_timestamp(),
             failure_details={"type": "AbortedStage", "message": str(reason)},
         )
+        self._preserve_runtime_evidence(aborted, existing)
         self._write_json(self._state_path(stage), aborted)
         self._write_progress(aborted)
         self._append_stage_log(stage, "aborted", aborted)
@@ -192,13 +232,21 @@ class FullMarketMLPipeline:
                 ended_at=current.isoformat(),
                 failure_details={"type": "StageTimeout", "message": f"heartbeat_idle_seconds={int(idle_seconds)}"},
             )
+            self._preserve_runtime_evidence(timeout, existing)
             self._write_json(self._state_path(stage), timeout)
             self._write_progress(timeout)
             self._append_stage_log(stage, "timeout", timeout)
             recovered.append(stage)
         return recovered
 
-    def _run_stage(self, stage: str, inputs: dict[str, str], states: Mapping[str, dict[str, Any]]) -> dict[str, Any]:
+    def _run_stage(
+        self,
+        stage: str,
+        inputs: dict[str, str],
+        states: Mapping[str, dict[str, Any]],
+        *,
+        service: StageService | None = None,
+    ) -> dict[str, Any]:
         started = _timestamp()
         running = self._state(stage, "running", inputs, {}, started_at=started)
         self._write_json(self._state_path(stage), running)
@@ -215,7 +263,7 @@ class FullMarketMLPipeline:
         previous_alarm = self._start_stage_timer(stage)
         try:
             artifacts = {name: state.get("artifacts", {}) for name, state in states.items()}
-            output = dict(self.services[stage](self.config, self.runtime_root, artifacts) or {})
+            output = dict((service or self.services[stage])(self.config, self.runtime_root, artifacts) or {})
             if output.get("quality_ready") is False:
                 blocking_codes = tuple(str(code) for code in output.get("blocking_codes", ("quality_gate_blocked",)))
                 raise TrainingBlockedError(blocking_codes)
@@ -228,6 +276,7 @@ class FullMarketMLPipeline:
                     raise ValueError("frozen model manifest SHA does not match dev-train output")
                 self._write_json(self.runtime_root / "frozen_model_manifest.json", manifest)
             complete = self._state(stage, "complete", inputs, output, started_at=started, ended_at=_timestamp())
+            self._preserve_runtime_evidence(complete, self._load_state(stage))
             self._write_json(self._state_path(stage), complete)
             self._write_progress(complete)
             self._append_stage_log(stage, "complete", complete)
@@ -242,6 +291,7 @@ class FullMarketMLPipeline:
                 ended_at=_timestamp(),
                 failure_details={"type": "StageTimeout", "message": str(error)},
             )
+            self._preserve_runtime_evidence(timeout, self._load_state(stage))
             self._write_json(self._state_path(stage), timeout)
             self._write_progress(timeout)
             self._append_stage_log(stage, "timeout", timeout)
@@ -256,6 +306,7 @@ class FullMarketMLPipeline:
                 ended_at=_timestamp(),
                 failure_details={"type": type(error).__name__, "message": str(error)},
             )
+            self._preserve_runtime_evidence(blocked, self._load_state(stage))
             self._write_json(self._state_path(stage), blocked)
             self._write_progress(blocked)
             self._append_stage_log(stage, "blocked", blocked)
@@ -271,9 +322,19 @@ class FullMarketMLPipeline:
             if state is None or state.get("status") != "running":
                 return
             state["heartbeat_at"] = _timestamp()
-            state["peak_rss_bytes"] = _peak_rss_bytes()
+            state["peak_rss_bytes"] = max(_rss_bytes(state.get("peak_rss_bytes")), _peak_rss_bytes())
             self._write_json(self._state_path(stage), state)
             self._write_progress(state)
+
+    @staticmethod
+    def _preserve_runtime_evidence(state: dict[str, Any], previous: Mapping[str, Any] | None) -> None:
+        """Retain the original process identity and high-water mark on closure."""
+        if not previous:
+            return
+        prior_pid = previous.get("pid")
+        if isinstance(prior_pid, int) and prior_pid > 0:
+            state["pid"] = prior_pid
+        state["peak_rss_bytes"] = max(_rss_bytes(state.get("peak_rss_bytes")), _rss_bytes(previous.get("peak_rss_bytes")))
 
     def _start_stage_timer(self, stage: str):
         timeout = float(self.stage_timeouts_seconds.get(stage, 0))
@@ -455,3 +516,10 @@ def _peak_rss_bytes() -> int | None:
         return None
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return int(peak if os.name == "posix" and "darwin" in os.sys.platform else peak * 1024)
+
+
+def _rss_bytes(value: object) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0

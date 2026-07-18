@@ -1,0 +1,23 @@
+# Immutable two-year full-market collection contract. Research-only; no production integration.
+[dates]
+signal_start = "2024-06-03"
+signal_end = "2026-07-17"
+holdout_start = "2026-04-01"
+holdout_end = "2026-07-17"
+
+[sample]
+minimum_daily_symbols = 4500
+
+[splits]
+embargo_trade_days = 20
+walk_forward_folds = 5
+
+[training]
+seeds = [17, 42, 73]
+
+[resources]
+memory_limit_gb = 12
+
+[collection]
+request_pacing_seconds = 0.03
+namechange_history_start = "1990-01-01"

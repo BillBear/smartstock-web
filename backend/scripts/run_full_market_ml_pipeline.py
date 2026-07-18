@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import os
 import json
@@ -20,6 +21,7 @@ from app.evaluation.full_market_ml.assets import (
     backup_stage_assets,
     build_dataset_registry,
     ensure_local_dataset_backup,
+    seed_verified_raw_assets,
     verify_dataset_backup,
     verify_stage_completion_manifest,
     write_stage_completion_manifest,
@@ -30,6 +32,13 @@ from app.evaluation.full_market_ml.assets import (
 RUN_ID = "fm_rank_10d_20260710_r1"
 
 
+def resolve_runtime_root(run_id: str, run_root: str | Path | None = None) -> Path:
+    """Resolve a formal asset root without binding research assets to a worktree."""
+    if run_root:
+        return Path(run_root).expanduser().resolve()
+    return Path(__file__).resolve().parents[2] / "runtime" / "ml_full_market" / "runs" / run_id
+
+
 def validate_backup_root(backup_root: str | Path, runtime_root: str | Path) -> Path:
     """Allow local or external backups, but never back up into the source run."""
     backup_path = Path(backup_root).expanduser().resolve()
@@ -37,6 +46,14 @@ def validate_backup_root(backup_root: str | Path, runtime_root: str | Path) -> P
     if backup_path == runtime_path or runtime_path in backup_path.parents:
         raise ValueError("ML_BACKUP_ROOT must be outside the current runtime root")
     return backup_path
+
+
+def load_split_input_dataset(path: str | Path):
+    """Read only split-planning columns after the high-dimensional matrix is sealed."""
+    import pandas as pd
+
+    columns = ["trade_date", "symbol", "industry_l1", "total_mv", "amount_cny", "eligible_for_training"]
+    return pd.read_parquet(Path(path), columns=columns)
 
 
 def load_feature_audit_artifact(path: str | Path):
@@ -189,6 +206,25 @@ def default_services(*, readiness_mode: str = "online"):
         manifest = load_manifest(root, "full-build", config.sha256, config.collection.request_pacing_seconds) if readiness_mode == "offline" else collect_full_market_raw(config, client, root, "full-build", resume=True)
         if not manifest.ready:
             return {"quality_ready": False, "blocking_codes": manifest.blocking_codes}
+        output = artifact(root, "full-build")
+        dataset_path = output / "dataset.parquet"
+        if dataset_path.is_file():
+            quality_path = output / "quality_report.json"
+            quality_payload = json.loads(quality_path.read_text(encoding="utf-8")) if quality_path.is_file() else {}
+            if quality_payload.get("ready") is not True:
+                raise ValueError("interrupted dataset cannot be reused without a ready quality report")
+            # A process can be externally terminated after the immutable parquet
+            # write but before split planning.  Re-read its small split schema to
+            # validate the file and resume without recomputing 64 cross-sectional
+            # feature shards or replacing the completed dataset artifact.
+            split = build_split_plan(config, load_split_input_dataset(dataset_path))
+            (output / "split_plan.json").write_text(json.dumps(split.to_dict(), ensure_ascii=True, sort_keys=True) + "\n", encoding="utf-8")
+            return {
+                "quality_ready": True,
+                "dataset": str(dataset_path),
+                "split_sha256": split.split_sha256,
+                "reused_dataset_after_interruption": True,
+            }
         panel_root = root / "panel" / "stage=full-build"
         if not panel_root.exists():
             build_full_market_panel(config, root, "full-build")
@@ -202,11 +238,15 @@ def default_services(*, readiness_mode: str = "online"):
         labeled = aggregate_full_market_labels(config, {key: build_forward_labels(config, value) for key, value in panels.items()})
         features = build_cross_section_features(config, {key: build_time_series_features(config, value) for key, value in labeled.items()})
         complete = pd.concat(features.values(), ignore_index=True)
-        output = artifact(root, "full-build")
-        complete.to_parquet(output / "dataset.parquet", index=False)
-        split = build_split_plan(config, complete)
+        complete.to_parquet(dataset_path, index=False)
+        # Feature frames are large enough that retaining them while split planning
+        # can exceed the local 16 GB research-machine budget.  The split contract
+        # needs six columns only, all read back from the sealed parquet artifact.
+        del features, labeled, panels, dataset, complete
+        gc.collect()
+        split = build_split_plan(config, load_split_input_dataset(dataset_path))
         (output / "split_plan.json").write_text(json.dumps(split.to_dict(), ensure_ascii=True, sort_keys=True) + "\n", encoding="utf-8")
-        return {"quality_ready": True, "dataset": str(output / "dataset.parquet"), "split_sha256": split.split_sha256}
+        return {"quality_ready": True, "dataset": str(dataset_path), "split_sha256": split.split_sha256}
 
     def feature_audit(config, root, _artifacts):
         dataset = pd.read_parquet(artifact(root, "full-build") / "dataset.parquet")
@@ -513,7 +553,21 @@ def default_services(*, readiness_mode: str = "online"):
             **{f"prediction_{quadrant}": str(path) for quadrant, path in sorted(quadrant_paths.items())},
         }
 
-    return {"preflight": preflight, "probe": offline_reuse if readiness_mode == "offline" else collect("probe", bounded_probe=True), "pilot-build": offline_reuse if readiness_mode == "offline" else lambda config, root, artifacts: collect("pilot-build", with_panel=True)(pilot_config(config), root, artifacts), "full-build": full_build, "feature-audit": feature_audit, "dev-train": dev_train, "final-evaluate": final_evaluate, "final-fit": final_fit, "final-holdout-evaluate": final_holdout_evaluate}
+    services = {
+        "preflight": preflight,
+        "probe": offline_reuse if readiness_mode == "offline" else collect("probe", bounded_probe=True),
+        "pilot-build": offline_reuse if readiness_mode == "offline" else lambda config, root, artifacts: collect("pilot-build", with_panel=True)(pilot_config(config), root, artifacts),
+        "full-build": full_build,
+        "feature-audit": feature_audit,
+        "dev-train": dev_train,
+        "final-evaluate": final_evaluate,
+        "final-fit": final_fit,
+        "final-holdout-evaluate": final_holdout_evaluate,
+    }
+    if readiness_mode != "offline":
+        services["collection:pilot-build"] = lambda config, root, artifacts: collect("pilot-build")(pilot_config(config), root, artifacts)
+        services["collection:full-build"] = collect("full-build")
+    return services
 
 
 def main() -> int:
@@ -523,6 +577,9 @@ def main() -> int:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--frozen-model-sha")
     parser.add_argument("--run-id", default=RUN_ID)
+    parser.add_argument("--run-root", type=Path)
+    parser.add_argument("--collection-only", action="store_true")
+    parser.add_argument("--seed-raw-root", type=Path)
     parser.add_argument("--abort-stage", choices=STAGES)
     parser.add_argument("--abort-reason", default="operator_requested_abort")
     parser.add_argument("--register-assets", action="store_true")
@@ -531,7 +588,7 @@ def main() -> int:
     parser.add_argument("--recover-stale-seconds", type=int)
     parser.add_argument("--offline-readiness", action="store_true")
     arguments = parser.parse_args()
-    root = Path(__file__).resolve().parents[2] / "runtime" / "ml_full_market" / "runs" / arguments.run_id
+    root = resolve_runtime_root(arguments.run_id, arguments.run_root)
     if arguments.status:
         print(json.dumps(FullMarketMLPipeline.inspect_runtime(root), ensure_ascii=True, sort_keys=True))
         return 0
@@ -549,6 +606,25 @@ def main() -> int:
         root,
         default_services(readiness_mode="offline" if arguments.offline_readiness else "online"),
     )
+    if arguments.collection_only:
+        if arguments.stage not in {"probe", "pilot-build", "full-build"}:
+            parser.error("--collection-only requires --stage probe, pilot-build, or full-build")
+        if arguments.abort_stage or arguments.register_assets or arguments.status:
+            parser.error("--collection-only cannot be combined with control or registry options")
+        if arguments.seed_raw_root and arguments.stage != "full-build":
+            parser.error("--seed-raw-root requires --collection-only --stage full-build")
+        seed_evidence = (
+            seed_verified_raw_assets(arguments.seed_raw_root, root)
+            if arguments.seed_raw_root
+            else None
+        )
+        if arguments.stage == "probe":
+            result = pipeline.run("probe", resume=arguments.resume)
+        else:
+            pipeline.run("probe", resume=True)
+            result = pipeline.run_collection_stage(arguments.stage, resume=arguments.resume)
+        print(json.dumps({"stage": result.stage, "reused_stages": result.reused_stages, "raw_seed": seed_evidence}, ensure_ascii=True, sort_keys=True))
+        return 0
     if arguments.abort_stage:
         state = pipeline.abort_stage(arguments.abort_stage, reason=arguments.abort_reason)
         print(json.dumps({"stage": arguments.abort_stage, "status": state["status"]}, ensure_ascii=True, sort_keys=True))

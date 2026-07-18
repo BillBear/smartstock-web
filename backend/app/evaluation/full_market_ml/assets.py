@@ -27,6 +27,74 @@ _BACKUP_PATHS = (
     Path("manifests/full-build.json"),
     Path("frozen_model_manifest.json"),
 )
+_RAW_SEED_EXCLUDED_ENDPOINTS = frozenset({"stock_basic", "namechange", "index_classify", "index_member_all"})
+
+
+def seed_verified_raw_assets(
+    source_root: str | Path,
+    destination_root: str | Path,
+    *,
+    excluded_endpoints: frozenset[str] = _RAW_SEED_EXCLUDED_ENDPOINTS,
+) -> dict[str, Any]:
+    """Copy manifest-verified historical raw partitions into a new immutable run.
+
+    Static listing and industry partitions are intentionally excluded so the new
+    run refreshes them at its own end date.  Every copied partition is verified
+    against the source manifest before it is written; existing destination raw
+    files are refused to prevent mixing two untracked collection attempts.
+    """
+    source = Path(source_root).expanduser().resolve()
+    destination = Path(destination_root).expanduser().resolve()
+    if source == destination:
+        raise ValueError("raw seed destination must differ from source")
+    manifest_path = source / "manifests" / "full-build.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"verified raw source manifest is missing: {manifest_path}")
+    manifest = _load_json(manifest_path)
+    records = manifest.get("partitions")
+    if not isinstance(records, list):
+        raise ValueError("verified raw source manifest partitions must be a list")
+    raw_destination = destination / "raw"
+    if raw_destination.exists() and any(raw_destination.rglob("*.parquet")):
+        raise FileExistsError("raw seed destination already contains partitions")
+
+    copied = 0
+    bytes_copied = 0
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise ValueError("verified raw source manifest contains an invalid partition")
+        endpoint = str(record.get("endpoint") or "")
+        if endpoint in excluded_endpoints:
+            continue
+        if str(record.get("status") or "") == "failed":
+            raise ValueError(f"verified raw source contains failed partition: {endpoint}/{record.get('key')}")
+        relative = Path(str(record.get("path") or ""))
+        source_path = source / relative
+        expected_sha = str(record.get("sha256") or "")
+        if not relative.parts or not source_path.is_file() or not expected_sha:
+            raise ValueError(f"verified raw source partition is missing: {endpoint}/{record.get('key')}")
+        if _sha256_file(source_path) != expected_sha:
+            raise ValueError(f"verified raw source checksum mismatch: {endpoint}/{record.get('key')}")
+        destination_path = destination / relative
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, destination_path)
+        if _sha256_file(destination_path) != expected_sha:
+            raise ValueError(f"raw seed copy checksum mismatch: {endpoint}/{record.get('key')}")
+        copied += 1
+        bytes_copied += destination_path.stat().st_size
+
+    provenance = {
+        "schema_version": 1,
+        "source_root": str(source),
+        "source_manifest_sha256": _sha256_file(manifest_path),
+        "seeded_partition_count": copied,
+        "seeded_bytes": bytes_copied,
+        "excluded_endpoints": sorted(excluded_endpoints),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "verification_status": "verified",
+    }
+    _write_json_atomic(destination / "raw_seed_provenance.json", provenance)
+    return provenance
 
 
 def build_dataset_registry(
@@ -48,11 +116,12 @@ def build_dataset_registry(
         "code_revision": str(code_revision),
         "feature_schema_sha256": feature_schema_sha256,
         "label_schema_sha256": label_schema_sha256,
+        "split_sha256": str(split.get("split_sha256", "")),
     }
     registry = {
         "dataset_id": "fm_" + _sha256_json(payload)[:20],
         **payload,
-        "split_sha256": str(split.get("split_sha256", "")),
+        "split_sha256": payload["split_sha256"],
         "trade_dates": list(manifest.get("trade_cal_open_dates", ())),
         "assets": assets,
         "environment": {"python_version": sys.version.split()[0], **dict(environment or {})},
