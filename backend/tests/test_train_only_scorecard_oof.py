@@ -24,6 +24,15 @@ class TrainOnlyScorecardOofTests(unittest.TestCase):
         self.assertEqual(result["predictions"].groupby(["fold", "trade_date"]).size().loc[(1, "2025-01-06")], 4)
         self.assertEqual(result["predictions"].groupby(["fold", "trade_date"]).size().loc[(2, "2025-01-06")], 4)
 
+    def test_does_not_evaluate_an_inactive_scorecard_with_symbol_ties(self):
+        rows = _rows()
+        for feature in PRE_REGISTERED_FEATURE_GROUPS["h1_momentum_trend"]:
+            rows[feature] = 1.0
+        result = run_train_only_scorecard_oof_rows(rows, _split(), bootstrap_iterations=2)
+
+        self.assertNotIn("scorecard_h1_momentum_trend", result["fold_metrics"]["fold_1_A_development_seen"])
+        self.assertEqual(result["candidate_screen"]["scorecard_h1_momentum_trend"]["status"], "inactive_no_train_only_direction")
+
     def test_rejects_final_holdout_rows_before_training(self):
         rows = _rows()
         extra = rows.iloc[:4].copy()

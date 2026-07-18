@@ -167,13 +167,21 @@ def run_train_only_scorecard_oof_rows(
         trial["fold"] = int(fold.fold)
         trial["score__baseline_momentum_60d"] = pd.to_numeric(trial["adjusted_return_60d"], errors="coerce")
         trial["score__baseline_inverse_60d_diagnostic"] = -trial["score__baseline_momentum_60d"]
+        active_comparators = {"baseline_momentum_60d", "baseline_inverse_60d_diagnostic"}
         for group, features in PRE_REGISTERED_FEATURE_GROUPS.items():
             group_directions = {feature: fitted["directions"][feature] for feature in features if feature in fitted["directions"]}
-            trial[f"score__scorecard_{group}"] = score_with_directions(trial, directions=group_directions)["score"]
-        trial["score__scorecard_combined_h1_h2_h3"] = score_with_directions(
-            trial, directions=fitted["directions"]
-        )["score"]
-        _validate_comparator_rows(trial)
+            score_name = f"scorecard_{group}"
+            trial[f"score__{score_name}"] = np.nan
+            if group_directions:
+                trial[f"score__{score_name}"] = score_with_directions(trial, directions=group_directions)["score"]
+                active_comparators.add(score_name)
+        trial["score__scorecard_combined_h1_h2_h3"] = np.nan
+        if fitted["directions"]:
+            trial["score__scorecard_combined_h1_h2_h3"] = score_with_directions(
+                trial, directions=fitted["directions"]
+            )["score"]
+            active_comparators.add("scorecard_combined_h1_h2_h3")
+        _validate_comparator_rows(trial, active_comparators)
         predictions.append(trial)
         directions.append(
             {
@@ -184,6 +192,8 @@ def run_train_only_scorecard_oof_rows(
                 "validation_end": fold.validation_end,
                 "directions": fitted["directions"],
                 "direction_evidence": fitted["direction_evidence"],
+                "active_comparators": sorted(active_comparators),
+                "inactive_comparators": sorted(set(PRE_REGISTERED_COMPARATORS) - active_comparators),
             }
         )
         for quadrant, symbols in (("A_development_seen", set(fold.training_symbols)), ("C_development_unseen", set(split_plan.C_dev_unseen_symbols))):
@@ -191,9 +201,9 @@ def run_train_only_scorecard_oof_rows(
             if subset.empty:
                 continue
             fold_key = f"fold_{fold.fold}_{quadrant}"
-            fold_metrics[fold_key] = _evaluate_comparators(subset)
-            fold_bootstrap[fold_key] = _bootstrap_comparators(subset, iterations=bootstrap_iterations)
-            fold_portfolios[fold_key] = _portfolio_comparators(subset)
+            fold_metrics[fold_key] = _evaluate_comparators(subset, active_comparators)
+            fold_bootstrap[fold_key] = _bootstrap_comparators(subset, active_comparators, iterations=bootstrap_iterations)
+            fold_portfolios[fold_key] = _portfolio_comparators(subset, active_comparators)
         if on_progress is not None:
             on_progress({"completed_folds": int(fold.fold), "current_fold": int(fold.fold), "last_heartbeat": _now()})
 
@@ -251,24 +261,26 @@ def _load_development_rows(matrix_root: Path, split_plan: SplitPlan) -> pd.DataF
     return pd.concat(frames, ignore_index=True)
 
 
-def _validate_comparator_rows(rows: pd.DataFrame) -> None:
+def _validate_comparator_rows(rows: pd.DataFrame, comparators: set[str]) -> None:
+    if "baseline_momentum_60d" not in comparators:
+        raise ScorecardOofError("primary momentum baseline must remain active")
     comparators = {
         name: rows.assign(score=pd.to_numeric(rows[f"score__{name}"], errors="coerce"))
-        for name in PRE_REGISTERED_COMPARATORS
+        for name in sorted(comparators)
     }
     if any(frame["score"].isna().any() for frame in comparators.values()):
         raise ScorecardOofError("registered comparators have unequal score availability")
     validate_identical_comparison_rows(comparators)
 
 
-def _evaluate_comparators(rows: pd.DataFrame) -> dict[str, dict[str, Any]]:
+def _evaluate_comparators(rows: pd.DataFrame, comparators: set[str]) -> dict[str, dict[str, Any]]:
     return {
         name: evaluate_ranking(rows.assign(score=rows[f"score__{name}"]))
-        for name in PRE_REGISTERED_COMPARATORS
+        for name in sorted(comparators)
     }
 
 
-def _bootstrap_comparators(rows: pd.DataFrame, *, iterations: int) -> dict[str, dict[str, Any]]:
+def _bootstrap_comparators(rows: pd.DataFrame, comparators: set[str], *, iterations: int) -> dict[str, dict[str, Any]]:
     baseline = "score__baseline_momentum_60d"
     return {
         name: {
@@ -280,14 +292,14 @@ def _bootstrap_comparators(rows: pd.DataFrame, *, iterations: int) -> dict[str, 
                 seed=1000 + index,
             ),
         }
-        for index, name in enumerate(PRE_REGISTERED_COMPARATORS)
+        for index, name in enumerate(sorted(comparators))
         if name != "baseline_momentum_60d"
     }
 
 
-def _portfolio_comparators(rows: pd.DataFrame) -> dict[str, dict[str, Any]]:
+def _portfolio_comparators(rows: pd.DataFrame, comparators: set[str]) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
-    for name in PRE_REGISTERED_COMPARATORS:
+    for name in sorted(comparators):
         try:
             result[name] = {
                 "status": "diagnostic_only" if name == "baseline_inverse_60d_diagnostic" else "candidate_comparator",
@@ -308,9 +320,22 @@ def _candidate_screen(
     for name in candidate_names:
         a_keys = sorted(key for key in fold_metrics if key.endswith("_A_development_seen"))
         c_keys = sorted(key for key in fold_metrics if key.endswith("_C_development_unseen"))
+        a_available = [key for key in a_keys if name in fold_metrics[key]]
+        c_available = [key for key in c_keys if name in fold_metrics[key]]
+        if len(a_available) < 5:
+            result[name] = {
+                "status": "inactive_no_train_only_direction",
+                "a_fold_count": len(a_keys),
+                "a_active_fold_count": len(a_available),
+                "c_fold_count": len(c_keys),
+                "c_active_fold_count": len(c_available),
+                "production_integration_allowed": False,
+                "reason": "The registered feature group had no stable, fit-period direction in every outer fold.",
+            }
+            continue
         a_non_decreasing = [
             key
-            for key in a_keys
+            for key in a_available
             if fold_metrics[key][name]["ndcg_at_10"] >= fold_metrics[key]["baseline_momentum_60d"]["ndcg_at_10"]
             and fold_metrics[key][name]["precision_at_5"] >= fold_metrics[key]["baseline_momentum_60d"]["precision_at_5"]
             and fold_metrics[key][name]["top_5_mean_return"] >= fold_metrics[key]["baseline_momentum_60d"]["top_5_mean_return"]
@@ -319,15 +344,15 @@ def _candidate_screen(
         ]
         c_non_collapsed = [
             key
-            for key in c_keys
+            for key in c_available
             if fold_metrics[key][name]["ndcg_at_10"] >= fold_metrics[key]["baseline_momentum_60d"]["ndcg_at_10"] - 0.02
         ]
         passes = len(a_non_decreasing) >= 4 and len(c_non_collapsed) >= 4
         result[name] = {
             "status": "development_screen_passed" if passes else "development_screen_failed",
-            "a_fold_count": len(a_keys),
+            "a_fold_count": len(a_available),
             "a_folds_passing_all_registered_checks": len(a_non_decreasing),
-            "c_fold_count": len(c_keys),
+            "c_fold_count": len(c_available),
             "c_folds_without_ndcg_collapse": len(c_non_collapsed),
             "production_integration_allowed": False,
             "reason": "No formal future holdout exists; this development-only screen cannot authorize production integration.",
