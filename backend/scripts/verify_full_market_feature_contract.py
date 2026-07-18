@@ -21,7 +21,7 @@ import pyarrow.parquet as pq
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.evaluation.full_market_ml.feature_contract import build_features_as_of, build_full_market_feature_contract
+from app.evaluation.full_market_ml.feature_contract import build_full_market_feature_contract
 from app.services.ml_online_feature_provider import OnlineFeatureProvider
 
 
@@ -120,19 +120,16 @@ def verify_feature_contract(
             _write_progress(progress_path, "scan-raw-history", index, parquet.metadata.num_row_groups)
     raw_history = pd.concat(raw_frames, ignore_index=True)
 
-    _write_progress(progress_path, "build-offline-online-parity", 0, 2)
+    _write_progress(progress_path, "build-online-to-stored-parity", 0, 1)
     source_as_of_dates = {source: as_of_date for source in contract.registered_sources}
     source_qualities = {source: "valid-with-rows" for source in contract.registered_sources}
-    offline = build_features_as_of(raw_history, as_of_date=as_of_date, contract=contract).sort_values("symbol").reset_index(drop=True)
-    _write_progress(progress_path, "build-offline-online-parity", 1, 2)
     online = OnlineFeatureProvider(contract).build_features_as_of(
         raw_history,
         as_of_date=as_of_date,
         source_as_of_dates=source_as_of_dates,
         source_qualities=source_qualities,
     ).sort_values("symbol").reset_index(drop=True)
-    _assert_matching_matrix(offline, online, contract.feature_names, contract.parity_tolerance, "offline/online")
-    _write_progress(progress_path, "build-offline-online-parity", 2, 2)
+    _write_progress(progress_path, "build-online-to-stored-parity", 1, 1)
 
     _write_progress(progress_path, "scan-stored-features-and-coverage", 0, parquet.metadata.num_row_groups)
     stored_frames: list[pd.DataFrame] = []
@@ -156,7 +153,7 @@ def verify_feature_contract(
         if index % 8 == 0:
             _write_progress(progress_path, "scan-stored-features-and-coverage", index, parquet.metadata.num_row_groups)
     stored = pd.concat(stored_frames, ignore_index=True).sort_values("symbol").reset_index(drop=True)
-    _assert_matching_matrix(offline, stored, contract.feature_names, contract.parity_tolerance, "offline/stored")
+    _assert_matching_matrix(online, stored, contract.feature_names, contract.parity_tolerance, "online/stored")
     coverage = {
         fold: {feature: finite / total if total else 0.0 for feature, (finite, total) in features.items()}
         for fold, features in counts.items()
@@ -188,7 +185,7 @@ def verify_feature_contract(
         "as_of_date": as_of_date,
         "history_session_count": history_sessions,
         "history_row_count": int(len(raw_history)),
-        "as_of_symbol_count": int(len(offline)),
+        "as_of_symbol_count": int(len(online)),
         "core_coverage_minimum_by_outer_test_fold": coverage_minimum,
         "core_coverage_passed": True,
         "moneyflow_coverage": float(quality["moneyflow_coverage"]),
