@@ -21,7 +21,7 @@ class FullMarketFeatureMaterializationTests(unittest.TestCase):
             output = Path(temporary) / "feature-asset"
             data_path = source / "artifacts" / "full-build" / "dataset.parquet"
             data_path.parent.mkdir(parents=True)
-            rows = feature_contract_fixture(sessions=84)
+            rows = feature_contract_fixture(sessions=84).sample(frac=1.0, random_state=7).reset_index(drop=True)
             # This simulates the rejected V1 matrix. The V2 source reader must
             # ignore it and recompute the registered signal-time feature.
             rows["adjusted_return_60d"] = 12345.0

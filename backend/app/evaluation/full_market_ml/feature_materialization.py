@@ -283,22 +283,17 @@ def _partition_source_by_symbol(
     if temporary.exists():
         raise FeatureMaterializationError(f"incomplete input-shard temporary directory requires inspection: {temporary}")
     temporary.mkdir(parents=True, exist_ok=False)
-    pending = pd.DataFrame()
     try:
         for row_group in range(parquet.num_row_groups):
             frame = parquet.read_row_group(row_group, columns=list(columns)).to_pandas()
             frame["symbol"] = frame["symbol"].astype("string").str.split(".", regex=False).str[0].str.zfill(6)
             frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d")
-            if not pending.empty:
-                frame = pd.concat([pending, frame], ignore_index=True)
-            if not frame["symbol"].is_monotonic_increasing:
-                raise FeatureMaterializationError("source dataset is not symbol-sorted; safe symbol-sharded rebuild is impossible")
-            final_symbol = str(frame["symbol"].iloc[-1])
-            pending = frame.loc[frame["symbol"].eq(final_symbol)].copy()
-            completed = frame.loc[~frame["symbol"].eq(final_symbol)].copy()
-            _write_input_parts(completed, temporary, row_group, shard_count)
+            # The certified source can be emitted by upstream hash shards, so
+            # row-group order is not a symbol-order contract. Every occurrence
+            # of a symbol maps to the same deterministic output shard; that
+            # shard is sorted once before time-series features are calculated.
+            _write_input_parts(frame, temporary, row_group, shard_count)
             _write_progress(destination, "input-shards", status="running", completed_row_groups=row_group + 1, total_row_groups=parquet.num_row_groups)
-        _write_input_parts(pending, temporary, parquet.num_row_groups, shard_count)
         _write_json(temporary / "_SUCCESS.json", {"row_groups": parquet.num_row_groups, "completed_at": _now()})
         stage.parent.mkdir(parents=True, exist_ok=True)
         os.replace(temporary, stage)
