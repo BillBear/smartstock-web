@@ -9,6 +9,7 @@ import tempfile
 from typing import Any, Mapping
 
 from .sample_certification import CertificationConfig, certify_training_sample
+from .static_security_state import load_static_security_state_asset
 
 
 _REGISTRY_REQUIRED_PATHS = {
@@ -146,7 +147,7 @@ def _run_composite_certification(
     contract_source_hashes = contract.get("source_hashes")
     if not isinstance(contract_source_hashes, Mapping):
         raise ValueError("sample contract source_hashes are missing")
-    _verify_declared_raw_sources(asset_root, contract_source_hashes, security_provenance)
+    _verify_declared_security_sources(asset_root, contract_source_hashes, security_provenance)
     selected_features = _selected_available_features(feature_availability)
     evidence = {
         "certification_mode": "composite_contract",
@@ -324,41 +325,79 @@ def _verify_contract_source_hashes(contract: Mapping[str, Any], observed: Mappin
             raise ValueError(f"sample contract source hash mismatch: {name}")
 
 
-def _verify_declared_raw_sources(
+def _verify_declared_security_sources(
     asset_root: Path, source_hashes: Mapping[str, Any], provenance: Mapping[str, Any]
 ) -> None:
     sources = _as_list(provenance.get("sources"))
     if not sources:
         return
-    raw_manifest_sha = str(source_hashes.get("raw_manifest", "")).lower()
-    if len(raw_manifest_sha) != 64 or any(character not in "0123456789abcdef" for character in raw_manifest_sha):
-        raise ValueError("sample contract raw_manifest hash is required for security provenance")
-    raw_root = (asset_root / "raw" / f"raw_{raw_manifest_sha[:16]}").resolve()
-    manifest_path = raw_root / "manifests" / "full-build.json"
-    if not manifest_path.is_file():
-        raise FileNotFoundError(f"raw collection manifest is unavailable: {manifest_path}")
-    if _sha256_file(manifest_path) != raw_manifest_sha:
-        raise ValueError("raw collection manifest hash does not match sample contract")
-    manifest = _load_json(manifest_path)
-    registered = {
-        str(item.get("path", "")): str(item.get("sha256", "")).lower()
-        for item in _as_list(manifest.get("partitions"))
-        if isinstance(item, Mapping) and item.get("status") == "adopted"
-    }
+    contexts: dict[str, tuple[Path, str, dict[str, str], str]] = {}
     for record in sources:
         if not isinstance(record, Mapping):
             raise ValueError("security provenance source record is invalid")
+        asset_kind = str(record.get("asset_kind", "raw_collection"))
+        if asset_kind not in contexts:
+            contexts[asset_kind] = _security_source_context(asset_root, source_hashes, asset_kind)
+        root, manifest_sha, registered, label = contexts[asset_kind]
+        declared_manifest_sha = str(record.get("asset_manifest_sha256", "")).lower()
+        if declared_manifest_sha and declared_manifest_sha != manifest_sha:
+            raise ValueError(f"security provenance source manifest hash mismatch: {asset_kind}")
+        if asset_kind == "static_security_state" and declared_manifest_sha != manifest_sha:
+            raise ValueError("static security provenance source manifest hash is required")
         relative = Path(str(record.get("path", "")))
         expected = str(record.get("sha256", "")).lower()
         if not relative.name or relative.is_absolute() or ".." in relative.parts:
             raise ValueError("security provenance source path is invalid")
         if registered.get(str(relative)) != expected:
-            raise ValueError(f"security provenance source is not registered in raw collection manifest: {relative}")
-        path = (raw_root / relative).resolve()
-        if raw_root not in path.parents or not path.is_file():
+            raise ValueError(f"security provenance source is not registered in {label}: {relative}")
+        path = (root / relative).resolve()
+        if root not in path.parents or not path.is_file():
             raise FileNotFoundError(f"security provenance source is unavailable: {relative}")
         if _sha256_file(path) != expected:
             raise ValueError(f"security provenance source hash mismatch: {relative}")
+
+
+def _security_source_context(
+    asset_root: Path, source_hashes: Mapping[str, Any], asset_kind: str
+) -> tuple[Path, str, dict[str, str], str]:
+    if asset_kind == "raw_collection":
+        raw_manifest_sha = _required_sha256(source_hashes.get("raw_manifest"), "sample contract raw_manifest")
+        root = (asset_root / "raw" / f"raw_{raw_manifest_sha[:16]}").resolve()
+        manifest_path = root / "manifests" / "full-build.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError(f"raw collection manifest is unavailable: {manifest_path}")
+        if _sha256_file(manifest_path) != raw_manifest_sha:
+            raise ValueError("raw collection manifest hash does not match sample contract")
+        manifest = _load_json(manifest_path)
+        registered = {
+            str(item.get("path", "")): str(item.get("sha256", "")).lower()
+            for item in _as_list(manifest.get("partitions"))
+            if isinstance(item, Mapping) and item.get("status") == "adopted"
+        }
+        return root, raw_manifest_sha, registered, "raw collection manifest"
+    if asset_kind == "static_security_state":
+        manifest_sha = _required_sha256(
+            source_hashes.get("static_security_state_manifest"),
+            "sample contract static_security_state_manifest",
+        )
+        root = (asset_root / "security-state" / f"security_{manifest_sha[:16]}").resolve()
+        asset = load_static_security_state_asset(root)
+        if asset.manifest_sha256 != manifest_sha:
+            raise ValueError("static security manifest hash does not match sample contract")
+        registered = {
+            str(item.get("path", "")): str(item.get("sha256", "")).lower()
+            for item in _as_list(asset.manifest.get("partitions"))
+            if isinstance(item, Mapping) and str(item.get("status", "")).startswith("valid-")
+        }
+        return root, manifest_sha, registered, "static security manifest"
+    raise ValueError(f"unsupported security provenance asset_kind: {asset_kind}")
+
+
+def _required_sha256(value: object, label: str) -> str:
+    text = str(value or "").lower()
+    if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
+        raise ValueError(f"{label} hash is required for security provenance")
+    return text
 
 
 def _verify_payload_hash(payload: Mapping[str, Any], label: str) -> None:

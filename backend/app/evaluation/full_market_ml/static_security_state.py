@@ -219,6 +219,8 @@ def _verify_manifest(manifest: Mapping[str, Any], root: Path) -> None:
         relative = Path(str(record.get("path", "")))
         if record.get("endpoint") != "stock_basic" or status not in _STATUSES or relative.is_absolute() or ".." in relative.parts:
             raise ValueError("static security-state partition path is invalid")
+        if record.get("request") != {"exchange": "", "list_status": status, "fields": STOCK_BASIC_FIELDS}:
+            raise ValueError("static security-state partition request contract is invalid")
         path = (root / relative).resolve()
         if root not in path.parents or not path.is_file():
             raise FileNotFoundError(f"static security-state partition is unavailable: {relative}")

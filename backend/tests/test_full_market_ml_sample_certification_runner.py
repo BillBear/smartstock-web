@@ -10,9 +10,11 @@ import unittest
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pandas as pd
 
 from app.evaluation.full_market_ml.sample_certification_runner import run_certification
 from app.evaluation.full_market_ml.sample_contract_runner import derive_sample_contract
+from app.evaluation.full_market_ml.static_security_state import STOCK_BASIC_FIELDS, collect_static_security_state
 
 
 def _sha256(path: Path) -> str:
@@ -35,6 +37,52 @@ def _with_sha256(payload: dict) -> dict:
 def _write_parquet(path: Path, columns: dict[str, list[object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.table(columns), path)
+
+
+class _StaticStockBasicClient:
+    def __init__(self) -> None:
+        columns = STOCK_BASIC_FIELDS.split(",")
+        self.frames = {
+            "L": pd.DataFrame(
+                [
+                    {
+                        "ts_code": f"{index:06d}.SZ",
+                        "symbol": f"{index:06d}",
+                        "name": f"上市{index}",
+                        "market": "主板",
+                        "exchange": "SZSE",
+                        "list_status": "L",
+                        "list_date": "20000101",
+                        "delist_date": "",
+                        "is_hs": "N",
+                    }
+                    for index in [1, *range(3, 4502)]
+                ],
+                columns=columns,
+            ),
+            "D": pd.DataFrame(
+                [
+                    {
+                        "ts_code": "000002.SZ",
+                        "symbol": "000002",
+                        "name": "退市二号",
+                        "market": "主板",
+                        "exchange": "SZSE",
+                        "list_status": "D",
+                        "list_date": "19900101",
+                        "delist_date": "20200101",
+                        "is_hs": "N",
+                    }
+                ],
+                columns=columns,
+            ),
+            "P": pd.DataFrame([], columns=columns),
+        }
+
+    def stock_basic(self, *, exchange: str, list_status: str, fields: str) -> pd.DataFrame:
+        if exchange != "" or fields != STOCK_BASIC_FIELDS:
+            raise AssertionError("unexpected static stock-basic request")
+        return self.frames[list_status].copy()
 
 
 class SampleCertificationRunnerTests(unittest.TestCase):
@@ -264,6 +312,23 @@ class SampleCertificationRunnerTests(unittest.TestCase):
         )
         return artifact.parent.parent
 
+    def _panel_shard(self, root: Path, symbols: list[str]) -> None:
+        dataset = root / "datasets" / "fixture-dataset"
+        relative = "artifacts/full-build/dataset-v3/shard=00/data.parquet"
+        shard = dataset / relative
+        _write_parquet(shard, {"symbol": symbols})
+        registry_path = dataset / "artifacts" / "full-build" / "dataset_registry_v3.json"
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        registry["files"].append({"path": relative, "sha256": _sha256(shard)})
+        _write_json(registry_path, registry)
+
+    def _static_security_asset(self, root: Path):
+        return collect_static_security_state(
+            _StaticStockBasicClient(),
+            root / "security-state",
+            observed_at_utc="2026-07-18T12:00:00Z",
+        )
+
     def test_reads_verified_artifacts_and_writes_immutable_certificate(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -364,6 +429,80 @@ class SampleCertificationRunnerTests(unittest.TestCase):
                     label_run_root=label_run_root,
                     output_root=root / "derivations" / "fixture-contract",
                     raw_root=raw_root.parent.parent / "other-raw-source",
+                )
+
+    def test_derivation_binds_static_master_only_for_stock_basic_sources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._build_assets(root)
+            raw_root, raw_manifest_sha256 = self._raw_assets(root)
+            self._panel_shard(root, ["000001", "000002"])
+            registry_path = root / "datasets" / "fixture-dataset" / "artifacts" / "full-build" / "dataset_registry_v3.json"
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            registry["payload"] = {"raw_manifest_sha256": raw_manifest_sha256}
+            _write_json(registry_path, registry)
+            label_run_root = self._label_run(root, _sha256(registry_path))
+            static_asset = self._static_security_asset(root)
+
+            result = derive_sample_contract(
+                asset_root=root,
+                dataset_id="fixture-dataset",
+                label_run_root=label_run_root,
+                output_root=root / "derivations" / "fixture-contract",
+                security_state_asset_root=static_asset.root,
+            )
+
+            provenance = json.loads(Path(result["security_state_provenance_path"]).read_text(encoding="utf-8"))
+            by_role = {record["role"]: record for record in provenance["sources"]}
+            contract = json.loads(Path(result["sample_contract_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "verified")
+            self.assertEqual(by_role["delisting"]["asset_kind"], "static_security_state")
+            self.assertEqual(by_role["st"]["asset_kind"], "raw_collection")
+            self.assertEqual(
+                contract["source_hashes"]["static_security_state_manifest"], static_asset.manifest_sha256
+            )
+
+    def test_formal_mode_rejects_static_source_not_registered_in_static_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, _, _ = self._build_assets(root)
+            raw_root, raw_manifest_sha256 = self._raw_assets(root)
+            self._panel_shard(root, ["000001", "000002"])
+            registry_path = root / "datasets" / "fixture-dataset" / "artifacts" / "full-build" / "dataset_registry_v3.json"
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            registry["payload"] = {"raw_manifest_sha256": raw_manifest_sha256}
+            _write_json(registry_path, registry)
+            label_run_root = self._label_run(root, _sha256(registry_path))
+            static_asset = self._static_security_asset(root)
+            derived = derive_sample_contract(
+                asset_root=root,
+                dataset_id="fixture-dataset",
+                label_run_root=label_run_root,
+                output_root=root / "derivations" / "fixture-contract",
+                security_state_asset_root=static_asset.root,
+            )
+            contract_path = Path(derived["sample_contract_path"])
+            unregistered = static_asset.root / "raw" / "endpoint=stock_basic" / "unregistered.parquet"
+            _write_parquet(unregistered, {"symbol": ["000001"]})
+            security_path = contract_path.parent / "security_state_provenance.json"
+            security = json.loads(security_path.read_text(encoding="utf-8"))
+            source = next(record for record in security["sources"] if record["role"] == "listing")
+            source["path"] = "raw/endpoint=stock_basic/unregistered.parquet"
+            source["sha256"] = _sha256(unregistered)
+            security.pop("sha256", None)
+            security = _with_sha256(security)
+            _write_json(security_path, security)
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            contract["components"]["security_state_provenance"]["sha256"] = security["sha256"]
+            contract.pop("sha256", None)
+            _write_json(contract_path, _with_sha256(contract))
+
+            with self.assertRaisesRegex(ValueError, "not registered in static security manifest"):
+                run_certification(
+                    config_path=config,
+                    asset_root=root,
+                    sample_contract_path=contract_path,
+                    output_root=root / "certifications",
                 )
 
     def test_formal_mode_rejects_security_source_not_registered_in_raw_manifest(self):

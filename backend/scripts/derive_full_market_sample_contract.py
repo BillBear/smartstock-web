@@ -24,6 +24,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--label-run-root", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--raw-root", type=Path, default=None)
+    parser.add_argument("--security-state-asset", type=Path, default=None)
     parser.add_argument("--config", type=Path, default=Path("config/ml-training-sample-certification-v1.json"))
     return parser.parse_args(argv)
 
@@ -56,6 +57,7 @@ def main(argv: list[str] | None = None) -> int:
             label_run_root=args.label_run_root,
             output_root=args.output_root,
             raw_root=args.raw_root,
+            security_state_asset_root=args.security_state_asset,
             minimum_feature_coverage=minimum_coverage,
             derivation_policy_sha256=config_sha256,
         )

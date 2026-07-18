@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -26,6 +28,14 @@ class _FakeProClient:
 
 def _frame(rows: list[dict[str, str]]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=STOCK_BASIC_FIELDS.split(","))
+
+
+def _payload_hash(payload: dict) -> str:
+    value = dict(payload)
+    value.pop("sha256", None)
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _valid_frames() -> dict[str, pd.DataFrame]:
@@ -129,6 +139,24 @@ class StaticSecurityStateTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "partition hash mismatch"):
                 load_static_security_state_asset(asset.root)
+
+    def test_load_rejects_a_manifest_with_a_different_request_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            asset = collect_static_security_state(
+                _FakeProClient(_valid_frames()),
+                Path(temporary) / "security-state",
+                observed_at_utc="2026-07-18T12:00:00Z",
+            )
+            manifest_path = asset.root / "manifests" / "static-security-state.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["partitions"][0]["request"]["fields"] = "ts_code,symbol"
+            manifest["sha256"] = _payload_hash(manifest)
+            replacement_root = asset.root.parent / f"security_{manifest['sha256'][:16]}"
+            manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+            asset.root.rename(replacement_root)
+
+            with self.assertRaisesRegex(ValueError, "request contract"):
+                load_static_security_state_asset(replacement_root)
 
 
 if __name__ == "__main__":

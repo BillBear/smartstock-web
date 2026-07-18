@@ -15,6 +15,11 @@ from .sample_contracts import (
     build_label_contract,
     build_sample_contract,
 )
+from .static_security_state import (
+    StaticSecurityStateAsset,
+    load_static_security_state_asset,
+    validate_static_security_state_for_panel,
+)
 
 
 _SHA256_HEX_LENGTH = 64
@@ -33,7 +38,13 @@ _INDUSTRY_SOURCE_SPECS = (
 
 
 def build_security_state_provenance(
-    raw_manifest: Mapping[str, Any], raw_root: str | Path
+    raw_manifest: Mapping[str, Any],
+    raw_root: str | Path,
+    *,
+    raw_manifest_sha256: str = "",
+    static_stock_basic_asset: StaticSecurityStateAsset | None = None,
+    panel_symbols: Iterable[str] = (),
+    panel_latest_trade_date: str = "",
 ) -> dict[str, Any]:
     """Hash and schema-check all source partitions used for PIT state fields."""
     root = Path(raw_root).expanduser().resolve()
@@ -42,13 +53,31 @@ def build_security_state_provenance(
     specs = _SOURCE_SPECS + (_INDUSTRY_SOURCE_SPECS if industry_enabled else ())
     sources: list[dict[str, Any]] = []
     blocking: set[str] = set()
+    static_coverage: dict[str, Any] | None = None
+    if static_stock_basic_asset is not None:
+        static_coverage = validate_static_security_state_for_panel(
+            static_stock_basic_asset,
+            panel_symbols,
+            panel_latest_trade_date,
+        )
+        blocking.update(str(code) for code in static_coverage["blocking_codes"])
     for role, endpoint, key, alternatives in specs:
-        selected = _select_partitions(partitions, endpoint, key)
+        use_static_asset = static_stock_basic_asset is not None and endpoint == "stock_basic"
+        selected = (
+            _static_partitions(static_stock_basic_asset.manifest, endpoint, key)
+            if use_static_asset
+            else _select_partitions(partitions, endpoint, key)
+        )
         if not selected:
             expected = endpoint if key is None else f"{endpoint}:{key}"
             raise ValueError(f"security-state provenance is missing required source: {expected}")
+        source_root = static_stock_basic_asset.root if use_static_asset else root
+        asset_kind = "static_security_state" if use_static_asset else "raw_collection"
+        asset_manifest_sha256 = (
+            static_stock_basic_asset.manifest_sha256 if use_static_asset else raw_manifest_sha256.lower()
+        )
         for record in selected:
-            path = _verified_partition_path(root, record)
+            path = _verified_partition_path(source_root, record)
             columns = tuple(pq.ParquetFile(path).schema.names)
             required = _first_matching_columns(columns, alternatives)
             if required is None:
@@ -65,19 +94,23 @@ def build_security_state_provenance(
                     "row_count": int(record.get("row_count", 0) or 0),
                     "columns": list(columns),
                     "required_columns": list(required if required is not None else alternatives[0]),
+                    "asset_kind": asset_kind,
+                    "asset_manifest_sha256": asset_manifest_sha256,
                 }
             )
     covers = {"listing", "delisting", "st", "suspension"}
     if industry_enabled:
         covers.add("industry")
     payload: dict[str, Any] = {
-        "security_state_provenance_version": "pit_sources_v1",
+        "security_state_provenance_version": "pit_sources_v2",
         "covers": sorted(covers),
         "industry_relative_enabled": industry_enabled,
         "sources": sorted(sources, key=lambda item: (item["role"], item["path"])),
         "blocking_codes": sorted(blocking),
         "validation_status": "verified" if not blocking else "blocked",
     }
+    if static_coverage is not None:
+        payload["static_security_state_coverage"] = static_coverage
     return _with_sha256(payload)
 
 
@@ -88,6 +121,7 @@ def derive_sample_contract(
     label_run_root: str | Path,
     output_root: str | Path,
     raw_root: str | Path | None = None,
+    security_state_asset_root: str | Path | None = None,
     minimum_feature_coverage: float = 0.95,
     derivation_policy_sha256: str = "",
 ) -> dict[str, Any]:
@@ -139,6 +173,13 @@ def derive_sample_contract(
         raise ValueError("raw collection manifest hash does not match dataset registry")
     raw_manifest = _load_json(raw_manifest_path)
     source_hashes["raw_manifest"] = raw_manifest_sha
+    static_stock_basic_asset: StaticSecurityStateAsset | None = None
+    if security_state_asset_root is not None:
+        static_stock_basic_asset = load_static_security_state_asset(security_state_asset_root)
+        expected_static_root = (root / "security-state" / f"security_{static_stock_basic_asset.manifest_sha256[:16]}").resolve()
+        if static_stock_basic_asset.root != expected_static_root:
+            raise ValueError("security_state_asset_root must use the canonical asset root for formal certification")
+        source_hashes["static_security_state_manifest"] = static_stock_basic_asset.manifest_sha256
 
     label_root = Path(label_run_root).expanduser().resolve() / "artifacts" / "label-audit"
     label_manifest_path = label_root / "label_manifest.json"
@@ -157,7 +198,14 @@ def derive_sample_contract(
         str(label_manifest["contract_sha256"]),
         registry_sha,
     )
-    security_provenance = build_security_state_provenance(raw_manifest, resolved_raw_root)
+    security_provenance = build_security_state_provenance(
+        raw_manifest,
+        resolved_raw_root,
+        raw_manifest_sha256=raw_manifest_sha,
+        static_stock_basic_asset=static_stock_basic_asset,
+        panel_symbols=_panel_symbols(dataset_root, registry) if static_stock_basic_asset is not None else (),
+        panel_latest_trade_date=_latest_panel_trade_date(loaded["quality_report"]) if static_stock_basic_asset is not None else "",
+    )
     feature_availability = build_feature_availability_contract(
         loaded["quality_report"], _load_json(feature_audit_path), minimum_feature_coverage
     )
@@ -220,6 +268,25 @@ def _partitions(raw_manifest: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return adopted
 
 
+def _static_partitions(
+    static_manifest: Mapping[str, Any], endpoint: str, key: str | None
+) -> list[Mapping[str, Any]]:
+    partitions = static_manifest.get("partitions")
+    if not isinstance(partitions, list):
+        raise ValueError("static security-state manifest has no partitions array")
+    selected = [
+        item
+        for item in partitions
+        if isinstance(item, Mapping)
+        and item.get("endpoint") == endpoint
+        and str(item.get("status", "")).startswith("valid-")
+        and (key is None or str(item.get("key", "")) == key)
+    ]
+    for item in selected:
+        _require_sha256("static security-state partition", item.get("sha256"))
+    return sorted(selected, key=lambda item: (str(item.get("key", "")), str(item.get("path", ""))))
+
+
 def _select_partitions(
     partitions: Iterable[Mapping[str, Any]], endpoint: str, key: str | None
 ) -> list[Mapping[str, Any]]:
@@ -227,6 +294,51 @@ def _select_partitions(
     if key is not None:
         selected = [item for item in selected if str(item.get("key", "")) == key]
     return sorted(selected, key=lambda item: (str(item.get("key", "")), str(item.get("path", ""))))
+
+
+def _panel_symbols(dataset_root: Path, registry: Mapping[str, Any]) -> list[str]:
+    records = registry.get("files")
+    if not isinstance(records, list):
+        raise ValueError("dataset registry files are missing")
+    symbols: set[str] = set()
+    shard_records = [
+        item
+        for item in records
+        if isinstance(item, Mapping)
+        and str(item.get("path", "")).startswith("artifacts/full-build/dataset-v3/")
+        and str(item.get("path", "")).endswith("/data.parquet")
+    ]
+    if not shard_records:
+        raise ValueError("dataset registry has no full-build dataset shards")
+    for record in sorted(shard_records, key=lambda item: str(item["path"])):
+        relative = Path(str(record["path"]))
+        expected = str(record.get("sha256", "")).lower()
+        _require_sha256(f"dataset shard {relative}", expected)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"dataset shard path is invalid: {relative}")
+        path = (dataset_root / relative).resolve()
+        if dataset_root not in path.parents or not path.is_file() or _sha256_file(path) != expected:
+            raise ValueError(f"dataset shard hash mismatch: {relative}")
+        table = pq.read_table(path, columns=["symbol"])
+        if "symbol" not in table.column_names:
+            raise ValueError(f"dataset shard has no symbol column: {relative}")
+        symbols.update(str(value).strip() for value in table.column("symbol").to_pylist() if str(value).strip())
+    if not symbols:
+        raise ValueError("full-build dataset shards contain no symbols")
+    return sorted(symbols)
+
+
+def _latest_panel_trade_date(quality_report: Mapping[str, Any]) -> str:
+    per_date = quality_report.get("per_date_universe_count")
+    if not isinstance(per_date, Mapping) or not per_date:
+        raise ValueError("quality report has no per-date universe counts")
+    dates = []
+    for value in per_date:
+        digits = "".join(character for character in str(value) if character.isdigit())
+        if len(digits) != 8:
+            raise ValueError("quality report has an invalid trade date")
+        dates.append(f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}")
+    return max(dates)
 
 
 def _verified_partition_path(root: Path, record: Mapping[str, Any]) -> Path:
