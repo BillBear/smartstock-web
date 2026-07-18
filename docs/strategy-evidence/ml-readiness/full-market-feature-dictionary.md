@@ -2,9 +2,9 @@
 
 This read-only research contract contains only signal-day and historical inputs.
 
-## Online Parity Contract V1
+## Online Parity Contract V2
 
-`full_market_online_parity_v1` is the only allowed core input contract for a
+`full_market_online_parity_v2` is the only allowed core input contract for a
 future full-market model artifact.  Both offline research and an eventual online
 provider call the same point-in-time feature builder and must match within
 `1e-8` for the same normalized full-market panel and signal date.
@@ -12,6 +12,11 @@ provider call the same point-in-time feature builder and must match within
 - Every online request must provide an explicit `valid-with-rows` provenance
   value and an as-of date for every required source. Daily, adjusted daily, and
   daily-basic inputs may be at most one trading session stale.
+- Every lag, rolling window, EMA and volatility input is defined over continuous
+  full-market trading sessions. A suspended or missing session breaks the
+  window; the feature stays null until its required consecutive history exists.
+  It must never count a stock's sparse observation rows as if they were market
+  trading days.
 - Required core features must have at least 95% finite coverage in every
   registered development fold. Valuation features remain optional until a
   separate feature hypothesis proves value and coverage.
@@ -25,7 +30,7 @@ provider call the same point-in-time feature builder and must match within
   180-calendar-day freshness limit.
 
 The table below is the complete offline feature catalogue. Rows in money-flow
-groups are intentionally catalogue-only for V1, not registered model inputs.
+groups are intentionally catalogue-only for V2, not registered model inputs.
 
 | Name | Group | Formula | Source | Adjusted/raw | Lookback | Missing policy | Stage |
 | --- | --- | --- | --- | --- | ---: | --- | --- |

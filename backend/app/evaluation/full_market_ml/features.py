@@ -185,7 +185,13 @@ def _model_schema(feature_schema: Iterable[str] | None) -> list[str]:
     return schema
 
 
-def build_time_series_features(config: FullMarketMLConfig, panel_shard: pd.DataFrame) -> pd.DataFrame:
+def build_time_series_features(
+    config: FullMarketMLConfig,
+    panel_shard: pd.DataFrame,
+    *,
+    include_moneyflow: bool = True,
+    market_sessions: Iterable[object] | None = None,
+) -> pd.DataFrame:
     """Compute symbol-local historical features only; no same-date peer information is used."""
     del config
     panel = _normalize_panel(panel_shard)
@@ -193,64 +199,86 @@ def build_time_series_features(config: FullMarketMLConfig, panel_shard: pd.DataF
         return panel
     assert_leak_free_schema(ALL_FEATURE_NAMES)
     result = panel.copy()
+    session_dates = _market_session_dates(result, market_sessions)
+    session_lookup = {trade_date: index for index, trade_date in enumerate(session_dates)}
+    result["_session_index"] = result["trade_date"].map(session_lookup).astype("int32")
     grouped = result.groupby("symbol", sort=False, group_keys=False)
     close, opening, high, low = (result[name] for name in ("adjusted_close", "adjusted_open", "adjusted_high", "adjusted_low"))
-    prior_close = grouped["adjusted_close"].shift(1)
+    prior_close = _session_lag(result, grouped, "adjusted_close", 1)
     returns = close / prior_close - 1.0
+    result["_one_session_return"] = returns
     for window in (1, 2, 3, 5, 10, 20, 60):
-        result[f"adjusted_return_{window}d"] = close / grouped["adjusted_close"].shift(window) - 1.0
+        result[f"adjusted_return_{window}d"] = close / _session_lag(result, grouped, "adjusted_close", window) - 1.0
     result["adjusted_open_gap_return"] = opening / prior_close - 1.0
     result["adjusted_intraday_return"] = close / opening - 1.0
     result["adjusted_high_low_range"] = high / low - 1.0
     result["adjusted_close_to_high"] = close / high - 1.0
     result["adjusted_close_to_low"] = close / low - 1.0
     for window in (5, 10, 20, 60):
-        result[f"price_to_sma_{window}d"] = close / grouped["adjusted_close"].transform(lambda s: s.rolling(window, min_periods=window).mean()) - 1.0
-    sma5 = grouped["adjusted_close"].transform(lambda s: s.rolling(5, min_periods=5).mean())
-    sma20 = grouped["adjusted_close"].transform(lambda s: s.rolling(20, min_periods=20).mean())
-    sma60 = grouped["adjusted_close"].transform(lambda s: s.rolling(60, min_periods=60).mean())
+        result[f"price_to_sma_{window}d"] = close / _session_rolling(result, grouped, "adjusted_close", window, "mean") - 1.0
+    sma5 = _session_rolling(result, grouped, "adjusted_close", 5, "mean")
+    sma20 = _session_rolling(result, grouped, "adjusted_close", 20, "mean")
+    sma60 = _session_rolling(result, grouped, "adjusted_close", 60, "mean")
     result["sma_5d_to_sma_20d"] = sma5 / sma20 - 1.0
     result["sma_20d_to_sma_60d"] = sma20 / sma60 - 1.0
-    ema12 = grouped["adjusted_close"].transform(lambda s: s.ewm(span=12, adjust=False, min_periods=12).mean())
-    ema26 = grouped["adjusted_close"].transform(lambda s: s.ewm(span=26, adjust=False, min_periods=26).mean())
+    result["_continuous_segment"] = _continuous_segments(result, grouped)
+    contiguous = result.groupby(["symbol", "_continuous_segment"], sort=False, group_keys=False)
+    ema12 = contiguous["adjusted_close"].transform(lambda s: s.ewm(span=12, adjust=False, min_periods=12).mean())
+    ema26 = contiguous["adjusted_close"].transform(lambda s: s.ewm(span=26, adjust=False, min_periods=26).mean())
     macd = ema12 - ema26
     result["price_to_ema_12d"] = close / ema12 - 1.0
     result["price_to_ema_26d"] = close / ema26 - 1.0
     result["macd_line"] = macd
-    result["macd_signal_gap"] = macd - result.groupby("symbol", sort=False)["macd_line"].transform(lambda s: s.ewm(span=9, adjust=False, min_periods=9).mean())
+    result["macd_signal_gap"] = macd - result.groupby(["symbol", "_continuous_segment"], sort=False)["macd_line"].transform(lambda s: s.ewm(span=9, adjust=False, min_periods=9).mean())
     for window in (5, 10, 20):
-        result[f"realized_volatility_{window}d"] = returns.groupby(result["symbol"], sort=False).transform(lambda s: s.rolling(window, min_periods=window).std())
-    result["downside_volatility_20d"] = returns.clip(upper=0).groupby(result["symbol"], sort=False).transform(lambda s: s.rolling(20, min_periods=20).std())
+        result[f"realized_volatility_{window}d"] = _session_rolling(result, grouped, "_one_session_return", window, "std", required_price_sessions=window + 1)
+    result["_downside_one_session_return"] = returns.clip(upper=0)
+    result["downside_volatility_20d"] = _session_rolling(result, grouped, "_downside_one_session_return", 20, "std", required_price_sessions=21)
     true_range = pd.concat([(high - low), (high - prior_close).abs(), (low - prior_close).abs()], axis=1).max(axis=1)
+    result["_true_range"] = true_range.where(_session_window_complete(result, grouped, 2))
     for window in (5, 14):
-        result[f"atr_pct_{window}d"] = true_range.groupby(result["symbol"], sort=False).transform(lambda s: s.rolling(window, min_periods=window).mean()) / close
+        result[f"atr_pct_{window}d"] = _session_rolling(result, grouped, "_true_range", window, "mean", required_price_sessions=window + 1) / close
     for window in (5, 20):
-        result[f"range_mean_{window}d"] = result["adjusted_high_low_range"].groupby(result["symbol"], sort=False).transform(lambda s: s.rolling(window, min_periods=window).mean())
-    result["range_std_20d"] = result["adjusted_high_low_range"].groupby(result["symbol"], sort=False).transform(lambda s: s.rolling(20, min_periods=20).std())
+        result[f"range_mean_{window}d"] = _session_rolling(result, grouped, "adjusted_high_low_range", window, "mean")
+    result["range_std_20d"] = _session_rolling(result, grouped, "adjusted_high_low_range", 20, "std")
     result["volume_log"] = np.log1p(result["volume_shares"])
     result["amount_log"] = np.log1p(result["amount_cny"])
     for source, output in (("volume_shares", "volume"), ("amount_cny", "amount")):
         for window in (5, 20):
-            mean = grouped[source].transform(lambda s: s.rolling(window, min_periods=window).mean())
+            mean = _session_rolling(result, grouped, source, window, "mean")
             result[f"{output}_ratio_{window}d"] = result[source] / mean
-        result[f"{output}_change_1d"] = result[source] / grouped[source].shift(1) - 1.0
-    result["volume_cv_20d"] = grouped["volume_shares"].transform(lambda s: s.rolling(20, min_periods=20).std() / s.rolling(20, min_periods=20).mean())
-    _add_optional_time_series(result, grouped)
+        result[f"{output}_change_1d"] = result[source] / _session_lag(result, grouped, source, 1) - 1.0
+    result["volume_cv_20d"] = _session_rolling(result, grouped, "volume_shares", 20, "std") / _session_rolling(result, grouped, "volume_shares", 20, "mean")
+    _add_optional_time_series(result, grouped, include_moneyflow=include_moneyflow)
     detailed_flow_columns = {
         f"{side}_{size}_amount"
         for side in ("buy", "sell")
         for size in ("sm", "md", "lg", "elg")
     }
-    if detailed_flow_columns.issubset(result.columns):
+    if include_moneyflow and detailed_flow_columns.issubset(result.columns):
         result = build_moneyflow_features(result)
-    else:
-        for name in MONEYFLOW_FEATURE_NAMES:
-            result[name] = 1 if name.endswith("_missing") else np.nan
-    return result
+    elif include_moneyflow:
+        result = pd.concat(
+            [
+                result,
+                pd.DataFrame(
+                    {
+                        name: 1 if name.endswith("_missing") else np.nan
+                        for name in MONEYFLOW_FEATURE_NAMES
+                    },
+                    index=result.index,
+                ),
+            ],
+            axis=1,
+        )
+    return result.drop(columns=["_session_index", "_continuous_segment", "_one_session_return", "_downside_one_session_return", "_true_range", "_net_mf_amount_abs"], errors="ignore")
 
 
 def build_cross_section_features(
-    config: FullMarketMLConfig, time_series_shards: Mapping[str, pd.DataFrame]
+    config: FullMarketMLConfig,
+    time_series_shards: Mapping[str, pd.DataFrame],
+    *,
+    include_moneyflow: bool = True,
 ) -> dict[str, pd.DataFrame]:
     """Aggregate each date across all supplied symbol shards before assigning peer features."""
     del config
@@ -268,7 +296,10 @@ def build_cross_section_features(
                 daily_rows.append(rows)
         if not daily_rows:
             continue
-        market = _cross_section_for_date(pd.concat(daily_rows, ignore_index=True))
+        market = _cross_section_for_date(
+            pd.concat(daily_rows, ignore_index=True),
+            include_moneyflow=include_moneyflow,
+        )
         output_columns = [name for name in ALL_FEATURE_NAMES if name in market]
         for shard_key, shard in result.items():
             rows = market.loc[market["_shard_key"].eq(shard_key)]
@@ -290,15 +321,23 @@ def build_features_for_date(
     available_rows = panel_shard.loc[
         pd.to_datetime(panel_shard["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d").le(as_of_date)
     ].copy()
-    time_series = build_time_series_features(config, available_rows)
+    include_moneyflow = _schema_requires_moneyflow(requested_schema)
+    time_series = build_time_series_features(config, available_rows, include_moneyflow=include_moneyflow)
     # Symbol-local features need historical rows; peer ranks and breadth only
     # need the signal-date cross section.  Restricting this step avoids
     # recomputing every historical cross section for a one-date online request.
     signal_rows = time_series.loc[time_series["trade_date"].eq(as_of_date)].copy()
-    result = build_cross_section_features(config, {"full_market": signal_rows})["full_market"]
-    for name in requested_schema:
-        if name not in result:
-            result[name] = np.nan
+    result = build_cross_section_features(
+        config,
+        {"full_market": signal_rows},
+        include_moneyflow=include_moneyflow,
+    )["full_market"]
+    missing_names = [name for name in requested_schema if name not in result]
+    if missing_names:
+        result = pd.concat(
+            [result, pd.DataFrame({name: np.nan for name in missing_names}, index=result.index)],
+            axis=1,
+        )
     return result[["trade_date", "symbol", *requested_schema]].reset_index(drop=True)
 
 
@@ -313,7 +352,7 @@ def write_feature_dictionary(path: str | Path) -> Path:
     return destination
 
 
-def _add_optional_time_series(result: pd.DataFrame, grouped) -> None:
+def _add_optional_time_series(result: pd.DataFrame, grouped, *, include_moneyflow: bool) -> None:
     index_close = pd.to_numeric(result.get("market_index_close", pd.Series(np.nan, index=result.index)), errors="coerce")
     index_amount = pd.to_numeric(result.get("market_index_amount", pd.Series(np.nan, index=result.index)), errors="coerce")
     # Market context is one observation per date.  Computing it after grouping
@@ -339,10 +378,12 @@ def _add_optional_time_series(result: pd.DataFrame, grouped) -> None:
     context_by_date = context.set_index("trade_date")
     for name in ("market_index_return_5d", "market_index_volatility_20d", "index_turnover_ratio_20d"):
         result[name] = result["trade_date"].map(context_by_date[name])
-    for source in ("turnover_rate", "total_mv", "circ_mv", "pe", "pb", "ps", "net_mf_amount", "listing_age_trade_days"):
+    sources = ["turnover_rate", "total_mv", "circ_mv", "pe", "pb", "ps", "listing_age_trade_days"]
+    if include_moneyflow:
+        sources.append("net_mf_amount")
+    for source in sources:
         values = pd.to_numeric(result[source], errors="coerce") if source in result else pd.Series(np.nan, index=result.index)
         result[source] = values
-    result["main_net_inflow_ratio"] = result["net_mf_amount"] / result["amount_cny"].where(result["amount_cny"].gt(0))
     missing_flags = (
         ("turnover_rate", "turnover_rate_missing"),
         ("total_mv", "total_mv_missing"),
@@ -350,32 +391,58 @@ def _add_optional_time_series(result: pd.DataFrame, grouped) -> None:
         ("pe", "pe_missing"),
         ("pb", "pb_missing"),
         ("ps", "ps_missing"),
-        ("main_net_inflow_ratio", "main_net_inflow_ratio_missing"),
-        ("net_mf_amount", "net_mf_amount_missing"),
         ("listing_age_trade_days", "listing_age_missing"),
     )
+    if include_moneyflow:
+        result["main_net_inflow_ratio"] = result["net_mf_amount"] / result["amount_cny"].where(result["amount_cny"].gt(0))
+        missing_flags += (
+            ("main_net_inflow_ratio", "main_net_inflow_ratio_missing"),
+            ("net_mf_amount", "net_mf_amount_missing"),
+        )
     for source, flag in missing_flags:
         if flag in FEATURE_NAMES:
             result[flag] = result[source].isna().astype("int8")
-    result["turnover_ratio_20d"] = result["turnover_rate"] / grouped["turnover_rate"].transform(lambda s: s.rolling(20, min_periods=20).mean())
+    result["turnover_ratio_20d"] = result["turnover_rate"] / _session_rolling(
+        result,
+        grouped,
+        "turnover_rate",
+        20,
+        "mean",
+    )
     result["total_mv_log"] = np.log1p(result["total_mv"].where(result["total_mv"] >= 0))
     result["circ_mv_log"] = np.log1p(result["circ_mv"].where(result["circ_mv"] >= 0))
     result["float_market_value_ratio"] = result["circ_mv"] / result["total_mv"]
-    result["net_mf_amount_log"] = np.sign(result["net_mf_amount"]) * np.log1p(result["net_mf_amount"].abs())
-    result["net_mf_amount_ratio_20d"] = result["net_mf_amount"] / result.groupby("symbol", sort=False)["net_mf_amount"].transform(lambda s: s.abs().rolling(20, min_periods=20).mean())
-    for window in (5, 20):
-        result[f"moneyflow_{window}d_mean"] = result.groupby("symbol", sort=False)["main_net_inflow_ratio"].transform(lambda s: s.rolling(window, min_periods=window).mean())
+    if include_moneyflow:
+        result["net_mf_amount_log"] = np.sign(result["net_mf_amount"]) * np.log1p(result["net_mf_amount"].abs())
+        result["_net_mf_amount_abs"] = result["net_mf_amount"].abs()
+        result["net_mf_amount_ratio_20d"] = result["net_mf_amount"] / _session_rolling(
+            result,
+            grouped,
+            "_net_mf_amount_abs",
+            20,
+            "mean",
+        )
+        for window in (5, 20):
+            result[f"moneyflow_{window}d_mean"] = _session_rolling(
+                result,
+                grouped,
+                "main_net_inflow_ratio",
+                window,
+                "mean",
+            )
     result["listing_age_log"] = np.log1p(result["listing_age_trade_days"].where(result["listing_age_trade_days"] >= 0))
     result["valid_ohlc_flag"] = result.get("valid_ohlc", pd.Series(False, index=result.index)).eq(True).astype("int8")
     result["industry_available_flag"] = result.get("industry_l1", pd.Series(pd.NA, index=result.index)).notna().astype("int8")
 
 
-def _cross_section_for_date(market: pd.DataFrame) -> pd.DataFrame:
+def _cross_section_for_date(market: pd.DataFrame, *, include_moneyflow: bool) -> pd.DataFrame:
     result = market.copy()
-    ranked_sources = (
+    ranked_sources = [
         "adjusted_return_5d", "adjusted_return_10d", "adjusted_return_20d", "volume_log",
-        "amount_log", "turnover_rate", "total_mv_log", "main_net_inflow_ratio", "net_mf_amount_log",
-    )
+        "amount_log", "turnover_rate", "total_mv_log",
+    ]
+    if include_moneyflow:
+        ranked_sources.extend(("main_net_inflow_ratio", "net_mf_amount_log"))
     for source in ranked_sources:
         values = result[source] if source in result else pd.Series(np.nan, index=result.index)
         result[f"{source}_rank"] = values.rank(pct=True)
@@ -426,6 +493,56 @@ def _cross_section_for_date(market: pd.DataFrame) -> pd.DataFrame:
         for name in INTERACTION_FEATURE_NAMES:
             result[name] = np.nan
     return result
+
+
+def _schema_requires_moneyflow(feature_schema: Iterable[str]) -> bool:
+    return any("moneyflow" in name or name.startswith(("main_net_", "net_mf_")) for name in feature_schema)
+
+
+def _market_session_dates(result: pd.DataFrame, market_sessions: Iterable[object] | None) -> tuple[str, ...]:
+    """Return the full market calendar used to evaluate a symbol-local window."""
+    values = result["trade_date"].tolist() if market_sessions is None else list(market_sessions)
+    normalized = tuple(sorted({text for value in values if (text := _date_text(value))}))
+    if not normalized:
+        raise ValueError("market session calendar cannot be empty")
+    missing = sorted(set(result["trade_date"]) - set(normalized))
+    if missing:
+        raise ValueError("market session calendar omits panel dates: " + ", ".join(missing[:5]))
+    return normalized
+
+
+def _session_lag(result: pd.DataFrame, grouped, column: str, sessions: int) -> pd.Series:
+    lagged = grouped[column].shift(sessions)
+    return lagged.where(_session_window_complete(result, grouped, sessions + 1))
+
+
+def _session_rolling(
+    result: pd.DataFrame,
+    grouped,
+    column: str,
+    window: int,
+    aggregation: str,
+    *,
+    required_price_sessions: int | None = None,
+) -> pd.Series:
+    values = grouped[column].transform(
+        lambda series: getattr(series.rolling(window, min_periods=window), aggregation)()
+    )
+    required_sessions = required_price_sessions or window
+    return values.where(_session_window_complete(result, grouped, required_sessions))
+
+
+def _session_window_complete(result: pd.DataFrame, grouped, required_sessions: int) -> pd.Series:
+    if required_sessions < 1:
+        raise ValueError("required_sessions must be positive")
+    start = grouped["_session_index"].shift(required_sessions - 1)
+    return (result["_session_index"] - start).eq(required_sessions - 1)
+
+
+def _continuous_segments(result: pd.DataFrame, grouped) -> pd.Series:
+    previous = grouped["_session_index"].shift(1)
+    starts_new_segment = (result["_session_index"] - previous).ne(1)
+    return starts_new_segment.groupby(result["symbol"], sort=False).cumsum().astype("int32")
 
 
 def _normalize_panel(panel_shard: pd.DataFrame) -> pd.DataFrame:

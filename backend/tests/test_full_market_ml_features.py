@@ -124,6 +124,48 @@ class FullMarketMLFeatureTests(FullMarketMLTestCase):
 
         pd.testing.assert_frame_equal(actual, reference)
 
+    def test_session_gap_does_not_count_as_a_trading_day_lookback(self):
+        panel = feature_fixture(sessions=8, symbols=2)
+        missing_date = sorted(panel["trade_date"].unique())[4]
+        panel = panel.loc[~(panel["symbol"].eq("000001") & panel["trade_date"].eq(missing_date))].copy()
+
+        features = build_time_series_features(self.config, panel)
+        resumed_date = sorted(features["trade_date"].unique())[5]
+        resumed = features.loc[features["symbol"].eq("000001") & features["trade_date"].eq(resumed_date)].iloc[0]
+
+        self.assertTrue(pd.isna(resumed["adjusted_return_1d"]))
+        self.assertTrue(pd.isna(resumed["adjusted_open_gap_return"]))
+        self.assertTrue(pd.isna(resumed["volume_change_1d"]))
+
+    def test_global_market_calendar_detects_a_gap_inside_a_symbol_shard(self):
+        panel = feature_fixture(sessions=8, symbols=2)
+        dates = sorted(panel["trade_date"].unique())
+        # Materialization processes symbol shards. This shard cannot derive the
+        # market calendar from its own rows after a suspension-like gap.
+        shard = panel.loc[panel["symbol"].eq("000001") & ~panel["trade_date"].eq(dates[4])].copy()
+
+        features = build_time_series_features(
+            self.config,
+            shard,
+            market_sessions=dates,
+        )
+        resumed = features.loc[features["trade_date"].eq(dates[5])].iloc[0]
+
+        self.assertTrue(pd.isna(resumed["adjusted_return_1d"]))
+        self.assertTrue(pd.isna(resumed["volume_change_1d"]))
+
+    def test_ema_features_restart_after_a_trading_session_gap(self):
+        panel = feature_fixture(sessions=40, symbols=2)
+        missing_date = sorted(panel["trade_date"].unique())[30]
+        panel = panel.loc[~(panel["symbol"].eq("000001") & panel["trade_date"].eq(missing_date))].copy()
+
+        features = build_time_series_features(self.config, panel)
+        resumed_date = sorted(features["trade_date"].unique())[31]
+        resumed = features.loc[features["symbol"].eq("000001") & features["trade_date"].eq(resumed_date)].iloc[0]
+
+        self.assertTrue(pd.isna(resumed["price_to_ema_12d"]))
+        self.assertTrue(pd.isna(resumed["macd_line"]))
+
     def test_default_model_schema_stays_below_local_feature_cap(self):
         matrix = build_features_for_date(self.config, feature_fixture(), "2025-01-10")
 

@@ -236,7 +236,16 @@ def default_services(*, readiness_mode: str = "online"):
         if not quality.ready:
             return {"quality_ready": False, "blocking_codes": list(quality.blocking_codes), "quality_report": str(report_path)}
         labeled = aggregate_full_market_labels(config, {key: build_forward_labels(config, value) for key, value in panels.items()})
-        features = build_cross_section_features(config, {key: build_time_series_features(config, value) for key, value in labeled.items()})
+        market_sessions = tuple(
+            sorted({str(date) for shard in labeled.values() for date in shard["trade_date"].dropna().unique()})
+        )
+        features = build_cross_section_features(
+            config,
+            {
+                key: build_time_series_features(config, value, market_sessions=market_sessions)
+                for key, value in labeled.items()
+            },
+        )
         complete = pd.concat(features.values(), ignore_index=True)
         complete.to_parquet(dataset_path, index=False)
         # Feature frames are large enough that retaining them while split planning

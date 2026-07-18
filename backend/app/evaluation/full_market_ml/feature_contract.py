@@ -19,7 +19,7 @@ import pandas as pd
 from .features import CORE_FEATURE_SPECS, FeatureSpec, build_features_for_date
 
 
-FEATURE_CONTRACT_VERSION = "full_market_online_parity_v1"
+FEATURE_CONTRACT_VERSION = "full_market_online_parity_v2"
 MINIMUM_CORE_FOLD_COVERAGE = 0.95
 PARITY_TOLERANCE = 1e-8
 MONEYFLOW_MINIMUM_COVERAGE = 0.95
@@ -247,7 +247,7 @@ def _registered_feature(spec: FeatureSpec) -> RegisteredFeature:
         name=spec.name,
         group=spec.feature_group,
         source=spec.source_endpoint,
-        formula=spec.formula,
+        formula=_session_semantic_formula(spec),
         lookback_sessions=spec.earliest_lookback,
         availability=availability,
         allowed_quality=("valid-with-rows",),
@@ -266,6 +266,12 @@ def _assert_feature_schema(contract: FeatureContract) -> None:
         raise FeatureContractError("news features are prohibited from the core contract")
     if "moneyflow" in contract.disabled_groups and any("moneyflow" in feature.group for feature in contract.features):
         raise FeatureContractError("disabled moneyflow features cannot be registered")
+
+
+def _session_semantic_formula(spec: FeatureSpec) -> str:
+    if spec.earliest_lookback <= 0:
+        return spec.formula
+    return f"{spec.formula}; requires consecutive market-session history"
 
 
 def _parse_date(value: str, label: str) -> date:
