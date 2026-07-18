@@ -1,0 +1,2 @@
+# Canonical SmartStock ML runtime. This file intentionally excludes XGBoost.
+-r requirements-ml-lock.txt
