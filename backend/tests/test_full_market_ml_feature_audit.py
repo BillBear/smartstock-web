@@ -136,6 +136,22 @@ class FullMarketMLFeatureAuditTests(FullMarketMLTestCase):
         self.assertGreaterEqual(moneyflow["coverage"], 0.8)
         self.assertEqual(moneyflow["eligibility"], "pending_oof_group_comparison")
 
+    def test_feature_audit_reports_fold_and_feature_heartbeats(self):
+        events = []
+
+        audit_features(
+            monotonic_fixture(),
+            three_fold_split_fixture(),
+            feature_schema=["signal"],
+            on_progress=events.append,
+        )
+
+        self.assertEqual(events[0]["status"], "running")
+        self.assertEqual(events[0]["completed_units"], 0)
+        self.assertTrue(any(event.get("feature") == "signal" for event in events))
+        self.assertEqual(events[-1]["status"], "complete")
+        self.assertEqual(events[-1]["completed_units"], events[-1]["total_units"])
+
 
 if __name__ == "__main__":
     import unittest

@@ -72,7 +72,25 @@ def run_v3_feature_evidence(
     )
     try:
         rows = _load_walk_forward_rows(matrix_root, split_plan, selected_features)
-        audit = audit_features(rows, split_plan, feature_schema=selected_features)
+        _write_json(
+            destination / "progress.json",
+            {"status": "running", "stage": "feature-audit", "updated_at": _now(), "row_count": len(rows)},
+        )
+        audit = audit_features(
+            rows,
+            split_plan,
+            feature_schema=selected_features,
+            on_progress=lambda payload: _write_json(
+                destination / "progress.json",
+                {
+                    "status": "running" if payload.get("status") != "complete" else "complete",
+                    "stage": "feature-audit",
+                    "updated_at": _now(),
+                    "row_count": len(rows),
+                    **payload,
+                },
+            ),
+        )
         _write_artifacts(destination, audit)
         report = _report(
             manifest=manifest,

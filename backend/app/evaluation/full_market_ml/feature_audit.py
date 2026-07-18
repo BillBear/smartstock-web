@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 from itertools import combinations
 
 import numpy as np
@@ -67,6 +67,7 @@ def audit_features(
     split_plan: SplitPlan,
     *,
     feature_schema: Iterable[str] | None = None,
+    on_progress: Callable[[Mapping[str, object]], None] | None = None,
 ) -> FeatureAuditResult:
     """Audit signal-day features exclusively inside the sealed plan's development period.
 
@@ -93,6 +94,10 @@ def audit_features(
     if risk_target is not None:
         target_columns.append(risk_target)
 
+    total_units = len(split_plan.walk_forward) * (len(feature_names) + 1)
+    completed_units = 0
+    _report_progress(on_progress, status="running", completed_units=completed_units, total_units=total_units)
+
     for fold in split_plan.walk_forward:
         fold_data = dataset.loc[
             dataset["trade_date"].isin(fold.validation_dates) & dataset["symbol"].isin(fold.training_symbols)
@@ -116,16 +121,34 @@ def audit_features(
                     for row in daily_buckets
                 )
                 ic_rows.append(_aggregate_ic(fold.fold, feature, _feature_group(feature), target, daily_ic))
+            completed_units += 1
+            _report_progress(
+                on_progress,
+                status="running",
+                completed_units=completed_units,
+                total_units=total_units,
+                fold=fold.fold,
+                feature=feature,
+            )
 
         correlation_rows.extend(_fold_correlations(fold.fold, fold_data, feature_names))
         current_values = {feature: pd.to_numeric(fold_data[feature], errors="coerce").dropna() for feature in feature_names}
         drift_rows.extend(_fold_psi(fold.fold, current_values, prior_fold_values))
         prior_fold_values = current_values
+        completed_units += 1
+        _report_progress(
+            on_progress,
+            status="running",
+            completed_units=completed_units,
+            total_units=total_units,
+            fold=fold.fold,
+            stage="fold-summary",
+        )
 
     coverage = pd.DataFrame(coverage_rows, columns=["fold", "feature", "feature_group", "sample_count", "non_null_count", "coverage"])
     correlation = pd.DataFrame(correlation_rows, columns=["fold", "feature_left", "feature_right", "correlation", "abs_correlation", "sample_count"])
     ic = _add_feature_decisions(pd.DataFrame(ic_rows), coverage, correlation)
-    return FeatureAuditResult(
+    result = FeatureAuditResult(
         coverage=coverage,
         ic=ic,
         bucket_returns=pd.DataFrame(bucket_rows, columns=["fold", "feature", "feature_group", "target", "trade_date", "bucket", "sample_count", "mean_forward_return", "top_bottom_spread"]),
@@ -133,6 +156,16 @@ def audit_features(
         drift=pd.DataFrame(drift_rows, columns=["fold", "reference_fold", "feature", "feature_group", "psi", "sample_count", "reference_sample_count"]),
         group_eligibility=_group_eligibility(coverage, ic, return_target),
     )
+    _report_progress(on_progress, status="complete", completed_units=total_units, total_units=total_units)
+    return result
+
+
+def _report_progress(
+    callback: Callable[[Mapping[str, object]], None] | None,
+    **payload: object,
+) -> None:
+    if callback is not None:
+        callback(payload)
 
 
 def _normalize_development_dataset(development_dataset: pd.DataFrame, split_plan: SplitPlan) -> pd.DataFrame:
