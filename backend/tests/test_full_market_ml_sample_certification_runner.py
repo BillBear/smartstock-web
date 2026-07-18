@@ -366,6 +366,48 @@ class SampleCertificationRunnerTests(unittest.TestCase):
                     raw_root=raw_root.parent.parent / "other-raw-source",
                 )
 
+    def test_formal_mode_rejects_security_source_not_registered_in_raw_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, _, _ = self._build_assets(root)
+            raw_root, raw_manifest_sha256 = self._raw_assets(root)
+            registry_path = root / "datasets" / "fixture-dataset" / "artifacts" / "full-build" / "dataset_registry_v3.json"
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            registry["payload"] = {"raw_manifest_sha256": raw_manifest_sha256}
+            _write_json(registry_path, registry)
+            label_run_root = self._label_run(root, _sha256(registry_path))
+            derived = derive_sample_contract(
+                asset_root=root,
+                dataset_id="fixture-dataset",
+                label_run_root=label_run_root,
+                output_root=root / "derivations" / "fixture-contract",
+            )
+            contract_path = Path(derived["sample_contract_path"])
+
+            unregistered = raw_root / "raw" / "endpoint=stock_basic" / "unregistered.parquet"
+            _write_parquet(unregistered, {"ts_code": ["000004.SZ"], "list_date": ["20200101"]})
+            security_path = contract_path.parent / "security_state_provenance.json"
+            security = json.loads(security_path.read_text(encoding="utf-8"))
+            security["sources"].append(
+                {"path": "raw/endpoint=stock_basic/unregistered.parquet", "sha256": _sha256(unregistered)}
+            )
+            security.pop("sha256", None)
+            security = _with_sha256(security)
+            _write_json(security_path, security)
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            contract["components"]["security_state_provenance"]["sha256"] = security["sha256"]
+            contract.pop("sha256", None)
+            contract = _with_sha256(contract)
+            _write_json(contract_path, contract)
+
+            with self.assertRaisesRegex(ValueError, "not registered in raw collection manifest"):
+                run_certification(
+                    config_path=config,
+                    asset_root=root,
+                    sample_contract_path=contract_path,
+                    output_root=root / "certifications",
+                )
+
     def test_preserves_blocked_result_when_selected_schema_uses_disabled_group(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

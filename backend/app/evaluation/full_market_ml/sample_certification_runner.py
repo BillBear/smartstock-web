@@ -333,12 +333,18 @@ def _verify_declared_raw_sources(
     raw_manifest_sha = str(source_hashes.get("raw_manifest", "")).lower()
     if len(raw_manifest_sha) != 64 or any(character not in "0123456789abcdef" for character in raw_manifest_sha):
         raise ValueError("sample contract raw_manifest hash is required for security provenance")
-    raw_root = asset_root / "raw" / f"raw_{raw_manifest_sha[:16]}"
+    raw_root = (asset_root / "raw" / f"raw_{raw_manifest_sha[:16]}").resolve()
     manifest_path = raw_root / "manifests" / "full-build.json"
     if not manifest_path.is_file():
         raise FileNotFoundError(f"raw collection manifest is unavailable: {manifest_path}")
     if _sha256_file(manifest_path) != raw_manifest_sha:
         raise ValueError("raw collection manifest hash does not match sample contract")
+    manifest = _load_json(manifest_path)
+    registered = {
+        str(item.get("path", "")): str(item.get("sha256", "")).lower()
+        for item in _as_list(manifest.get("partitions"))
+        if isinstance(item, Mapping) and item.get("status") == "adopted"
+    }
     for record in sources:
         if not isinstance(record, Mapping):
             raise ValueError("security provenance source record is invalid")
@@ -346,6 +352,8 @@ def _verify_declared_raw_sources(
         expected = str(record.get("sha256", "")).lower()
         if not relative.name or relative.is_absolute() or ".." in relative.parts:
             raise ValueError("security provenance source path is invalid")
+        if registered.get(str(relative)) != expected:
+            raise ValueError(f"security provenance source is not registered in raw collection manifest: {relative}")
         path = (raw_root / relative).resolve()
         if raw_root not in path.parents or not path.is_file():
             raise FileNotFoundError(f"security provenance source is unavailable: {relative}")
