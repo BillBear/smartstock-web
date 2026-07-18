@@ -27,6 +27,11 @@ _SOURCE_MANIFEST_REQUIRED_PATHS = {
     "feature_audit": Path("artifacts/feature-audit/report_v3.json"),
     "candidate_manifest": Path("artifacts/dev-train-v3/candidate_manifest.json"),
 }
+_STATIC_SECURITY_STATE_ROLES = {
+    "listing": ("stock_basic", "L"),
+    "delisting": ("stock_basic", "D"),
+    "pending_listing": ("stock_basic", "P"),
+}
 
 
 def run_certification(
@@ -344,6 +349,11 @@ def _verify_declared_security_sources(
             raise ValueError(f"security provenance source manifest hash mismatch: {asset_kind}")
         if asset_kind == "static_security_state" and declared_manifest_sha != manifest_sha:
             raise ValueError("static security provenance source manifest hash is required")
+        if asset_kind == "static_security_state":
+            expected_source = _STATIC_SECURITY_STATE_ROLES.get(str(record.get("role", "")))
+            actual_source = (str(record.get("endpoint", "")), str(record.get("key", "")))
+            if expected_source != actual_source:
+                raise ValueError("static security state only supports stock_basic listing-state roles")
         relative = Path(str(record.get("path", "")))
         expected = str(record.get("sha256", "")).lower()
         if not relative.name or relative.is_absolute() or ".." in relative.parts:

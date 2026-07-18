@@ -505,6 +505,46 @@ class SampleCertificationRunnerTests(unittest.TestCase):
                     output_root=root / "certifications",
                 )
 
+    def test_formal_mode_rejects_static_source_bound_to_non_listing_role(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, _, _ = self._build_assets(root)
+            raw_root, raw_manifest_sha256 = self._raw_assets(root)
+            self._panel_shard(root, ["000001", "000002"])
+            registry_path = root / "datasets" / "fixture-dataset" / "artifacts" / "full-build" / "dataset_registry_v3.json"
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            registry["payload"] = {"raw_manifest_sha256": raw_manifest_sha256}
+            _write_json(registry_path, registry)
+            label_run_root = self._label_run(root, _sha256(registry_path))
+            static_asset = self._static_security_asset(root)
+            derived = derive_sample_contract(
+                asset_root=root,
+                dataset_id="fixture-dataset",
+                label_run_root=label_run_root,
+                output_root=root / "derivations" / "fixture-contract",
+                security_state_asset_root=static_asset.root,
+            )
+            contract_path = Path(derived["sample_contract_path"])
+            security_path = contract_path.parent / "security_state_provenance.json"
+            security = json.loads(security_path.read_text(encoding="utf-8"))
+            source = next(record for record in security["sources"] if record["role"] == "listing")
+            source["role"] = "st"
+            security.pop("sha256", None)
+            security = _with_sha256(security)
+            _write_json(security_path, security)
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            contract["components"]["security_state_provenance"]["sha256"] = security["sha256"]
+            contract.pop("sha256", None)
+            _write_json(contract_path, _with_sha256(contract))
+
+            with self.assertRaisesRegex(ValueError, "only supports stock_basic listing-state roles"):
+                run_certification(
+                    config_path=config,
+                    asset_root=root,
+                    sample_contract_path=contract_path,
+                    output_root=root / "certifications",
+                )
+
     def test_formal_mode_rejects_security_source_not_registered_in_raw_manifest(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
