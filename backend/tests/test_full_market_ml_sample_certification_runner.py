@@ -215,7 +215,7 @@ class SampleCertificationRunnerTests(unittest.TestCase):
         return path
 
     def _raw_assets(self, root: Path) -> tuple[Path, str]:
-        raw_root = root / "raw-source"
+        raw_root = root / ".raw-source"
         definitions = {
             "stock_l": ("stock_basic", "L", "raw/endpoint=stock_basic/list_status=L/data.parquet", {"ts_code": ["000001.SZ"], "list_date": ["19910403"]}),
             "stock_d": ("stock_basic", "D", "raw/endpoint=stock_basic/list_status=D/data.parquet", {"ts_code": ["000002.SZ"], "list_date": ["19910101"], "delist_date": ["20250101"]}),
@@ -233,7 +233,11 @@ class SampleCertificationRunnerTests(unittest.TestCase):
             partitions.append({"endpoint": endpoint, "key": key, "path": relative, "sha256": _sha256(path), "status": "adopted"})
         manifest_path = raw_root / "manifests" / "full-build.json"
         _write_json(manifest_path, {"industry_relative_enabled": True, "partitions": partitions})
-        return raw_root, _sha256(manifest_path)
+        raw_manifest_sha256 = _sha256(manifest_path)
+        canonical_root = root / "raw" / f"raw_{raw_manifest_sha256[:16]}"
+        canonical_root.parent.mkdir(parents=True, exist_ok=True)
+        raw_root.rename(canonical_root)
+        return canonical_root, raw_manifest_sha256
 
     def _label_run(self, root: Path, dataset_registry_sha256: str) -> Path:
         artifact = root / "runs" / "label-run" / "artifacts" / "label-audit"
@@ -292,6 +296,32 @@ class SampleCertificationRunnerTests(unittest.TestCase):
             self.assertEqual(result["certificate"]["status"], "certified_research_sample")
             self.assertEqual(result["certificate"]["certification_mode"], "composite_contract")
 
+    def test_formal_mode_rejects_contract_that_cannot_reverify_declared_raw_sources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, _, _ = self._build_assets(root)
+            contract_path = self._composite_contract(root)
+            security_path = contract_path.parent / "security_state_provenance.json"
+            security = json.loads(security_path.read_text(encoding="utf-8"))
+            security["sources"] = [{"path": "raw/endpoint=stock_basic/list_status=D/data.parquet", "sha256": "a" * 64}]
+            security.pop("sha256", None)
+            security = _with_sha256(security)
+            _write_json(security_path, security)
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            contract["source_hashes"]["raw_manifest"] = "a" * 64
+            contract["components"]["security_state_provenance"]["sha256"] = security["sha256"]
+            contract.pop("sha256", None)
+            contract = _with_sha256(contract)
+            _write_json(contract_path, contract)
+
+            with self.assertRaisesRegex(FileNotFoundError, "raw collection manifest"):
+                run_certification(
+                    config_path=config,
+                    asset_root=root,
+                    sample_contract_path=contract_path,
+                    output_root=root / "certifications",
+                )
+
     def test_derivation_writes_hash_bound_contract_from_verified_assets(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -315,6 +345,26 @@ class SampleCertificationRunnerTests(unittest.TestCase):
             self.assertEqual(contract["sample_contract_version"], "full_market_sample_v1")
             self.assertEqual(contract["dataset_id"], "fixture-dataset")
             self.assertTrue(Path(result["security_state_provenance_path"]).is_file())
+
+    def test_derivation_rejects_noncanonical_raw_asset_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._build_assets(root)
+            raw_root, raw_manifest_sha256 = self._raw_assets(root)
+            registry_path = root / "datasets" / "fixture-dataset" / "artifacts" / "full-build" / "dataset_registry_v3.json"
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            registry["payload"] = {"raw_manifest_sha256": raw_manifest_sha256}
+            _write_json(registry_path, registry)
+            label_run_root = self._label_run(root, _sha256(registry_path))
+
+            with self.assertRaisesRegex(ValueError, "canonical asset root"):
+                derive_sample_contract(
+                    asset_root=root,
+                    dataset_id="fixture-dataset",
+                    label_run_root=label_run_root,
+                    output_root=root / "derivations" / "fixture-contract",
+                    raw_root=raw_root.parent.parent / "other-raw-source",
+                )
 
     def test_preserves_blocked_result_when_selected_schema_uses_disabled_group(self):
         with tempfile.TemporaryDirectory() as temporary:

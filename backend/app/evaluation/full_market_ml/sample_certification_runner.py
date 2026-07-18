@@ -121,6 +121,8 @@ def _run_composite_certification(
         raise ValueError("unsupported sample contract version")
     if contract.get("dataset_id") != config.dataset_id:
         raise ValueError("sample contract does not match certification config")
+    if bool(contract.get("production_integration_allowed", False)):
+        raise ValueError("sample contract must forbid production integration")
 
     dataset_root = asset_root / "datasets" / config.dataset_id
     registry_path = dataset_root / "artifacts" / "full-build" / "dataset_registry_v3.json"
@@ -141,6 +143,10 @@ def _run_composite_certification(
     label_contract = components["label_contract"]
     security_provenance = components["security_state_provenance"]
     feature_availability = components["feature_availability_contract"]
+    contract_source_hashes = contract.get("source_hashes")
+    if not isinstance(contract_source_hashes, Mapping):
+        raise ValueError("sample contract source_hashes are missing")
+    _verify_declared_raw_sources(asset_root, contract_source_hashes, security_provenance)
     selected_features = _selected_available_features(feature_availability)
     evidence = {
         "certification_mode": "composite_contract",
@@ -316,6 +322,35 @@ def _verify_contract_source_hashes(contract: Mapping[str, Any], observed: Mappin
     for name, actual in observed.items():
         if str(source_hashes.get(name, "")).lower() != actual.lower():
             raise ValueError(f"sample contract source hash mismatch: {name}")
+
+
+def _verify_declared_raw_sources(
+    asset_root: Path, source_hashes: Mapping[str, Any], provenance: Mapping[str, Any]
+) -> None:
+    sources = _as_list(provenance.get("sources"))
+    if not sources:
+        return
+    raw_manifest_sha = str(source_hashes.get("raw_manifest", "")).lower()
+    if len(raw_manifest_sha) != 64 or any(character not in "0123456789abcdef" for character in raw_manifest_sha):
+        raise ValueError("sample contract raw_manifest hash is required for security provenance")
+    raw_root = asset_root / "raw" / f"raw_{raw_manifest_sha[:16]}"
+    manifest_path = raw_root / "manifests" / "full-build.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"raw collection manifest is unavailable: {manifest_path}")
+    if _sha256_file(manifest_path) != raw_manifest_sha:
+        raise ValueError("raw collection manifest hash does not match sample contract")
+    for record in sources:
+        if not isinstance(record, Mapping):
+            raise ValueError("security provenance source record is invalid")
+        relative = Path(str(record.get("path", "")))
+        expected = str(record.get("sha256", "")).lower()
+        if not relative.name or relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("security provenance source path is invalid")
+        path = (raw_root / relative).resolve()
+        if raw_root not in path.parents or not path.is_file():
+            raise FileNotFoundError(f"security provenance source is unavailable: {relative}")
+        if _sha256_file(path) != expected:
+            raise ValueError(f"security provenance source hash mismatch: {relative}")
 
 
 def _verify_payload_hash(payload: Mapping[str, Any], label: str) -> None:

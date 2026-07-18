@@ -130,11 +130,10 @@ def derive_sample_contract(
 
     raw_manifest_sha = str(_mapping(registry.get("payload")).get("raw_manifest_sha256", "")).lower()
     _require_sha256("dataset raw manifest", raw_manifest_sha)
-    resolved_raw_root = (
-        Path(raw_root).expanduser().resolve()
-        if raw_root is not None
-        else root / "raw" / f"raw_{raw_manifest_sha[:16]}"
-    )
+    canonical_raw_root = (root / "raw" / f"raw_{raw_manifest_sha[:16]}").resolve()
+    if raw_root is not None and Path(raw_root).expanduser().resolve() != canonical_raw_root:
+        raise ValueError("raw_root must use the canonical asset root for formal certification")
+    resolved_raw_root = canonical_raw_root
     raw_manifest_path = resolved_raw_root / "manifests" / "full-build.json"
     if _sha256_file(raw_manifest_path) != raw_manifest_sha:
         raise ValueError("raw collection manifest hash does not match dataset registry")
