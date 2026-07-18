@@ -189,13 +189,13 @@ Run: `git add backend/app/evaluation/full_market_ml/sample_certification.py back
 
 - [ ] **Step 1: Derive from the existing assets**
 
-Run: `cd backend && "$PY" scripts/derive_full_market_sample_contract.py --asset-root /Users/xiong/Documents/SmartStock/ml-assets --dataset-id fmv3_ea0797d57ed62a916b3a --label-run-root /Users/xiong/Documents/SmartStock/ml-assets/runs/ml_ranking_reset_20260714_v4 --output-root /Users/xiong/Documents/SmartStock/ml-assets/derivations/fmv3_ea0797d57ed62a916b3a/current-contract`
+Run: `cd backend && "$PY" scripts/derive_full_market_sample_contract.py --asset-root "$ML_ASSET_ROOT" --dataset-id fmv3_ea0797d57ed62a916b3a --label-run-root "$ML_ASSET_ROOT/runs/ml_ranking_reset_20260714_v4" --output-root "$ML_ASSET_ROOT/derivations/fmv3_ea0797d57ed62a916b3a/current-contract"`
 
 Expected: immutable contract files with verified source hashes. A source coverage failure is a blocked result, not a request to modify history.
 
 - [ ] **Step 2: Run formal research-only certification**
 
-Run: `cd backend && "$PY" scripts/certify_full_market_training_sample.py --config config/ml-training-sample-certification-v1.json --asset-root /Users/xiong/Documents/SmartStock/ml-assets --sample-contract /Users/xiong/Documents/SmartStock/ml-assets/derivations/fmv3_ea0797d57ed62a916b3a/current-contract/sample_contract.json --output-root /Users/xiong/Documents/SmartStock/ml-assets/certifications/fmv3_ea0797d57ed62a916b3a-current-contract`
+Run: `cd backend && "$PY" scripts/certify_full_market_training_sample.py --config config/ml-training-sample-certification-v1.json --asset-root "$ML_ASSET_ROOT" --sample-contract "$ML_ASSET_ROOT/derivations/fmv3_ea0797d57ed62a916b3a/current-contract/sample_contract.json" --output-root "$ML_ASSET_ROOT/certifications/fmv3_ea0797d57ed62a916b3a-current-contract"`
 
 Expected: exit `0` only for `certified_research_sample`; exit `2` for a quality block. Neither exit starts training.
 
