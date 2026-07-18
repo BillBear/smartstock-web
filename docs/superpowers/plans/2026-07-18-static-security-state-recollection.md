@@ -57,7 +57,7 @@ def validate_static_security_state_for_panel(
 ) -> dict[str, Any]: ...
 ```
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```python
 def test_collects_l_d_and_empty_p_as_one_hashed_immutable_asset(self):
@@ -72,13 +72,13 @@ def test_rejects_delisted_rows_without_delist_date_and_publishes_no_asset(self):
     self.assertFalse(any(self.root.iterdir()))
 ```
 
-- [ ] **Step 2: Run the red test**
+- [x] **Step 2: Run the red test**
 
 Run: `cd backend && "$PY" -m unittest tests.test_full_market_ml_static_security_state`
 
 Expected: import failure because the module does not exist.
 
-- [ ] **Step 3: Implement collection**
+- [x] **Step 3: Implement collection**
 
 Use exact request fields:
 
@@ -92,7 +92,7 @@ for list_status in ("L", "D", "P"):
 
 Write each response to `raw/endpoint=stock_basic/list_status=<status>/data.parquet` inside a temporary sibling. Validate the exact requested schema, matching `list_status`, unique symbols across all statuses, valid `list_date`, all nonempty `D.delist_date >= list_date`, blank `L.delist_date`, `L >= 4500`, and nonempty `D`. Generate `manifests/static-security-state.json` with a SHA-256 of its canonical content excluding the `sha256` field, then atomically rename to `security_<manifest-sha-prefix>`. The manifest records endpoint, request fields, response status, partition hash, schema, row count, and observed UTC time; it contains no token.
 
-- [ ] **Step 4: Add panel-coverage tests**
+- [x] **Step 4: Add panel-coverage tests**
 
 ```python
 def test_blocks_asset_older_than_panel_or_missing_panel_symbol(self):
@@ -102,7 +102,7 @@ def test_blocks_asset_older_than_panel_or_missing_panel_symbol(self):
 
 Require the static as-of date to be no earlier than the full panel's latest trade date and require exactly one static-master row per panel symbol.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
 Run: `cd backend && "$PY" -m unittest tests.test_full_market_ml_static_security_state`
 
@@ -136,7 +136,7 @@ def derive_sample_contract(
 
 Each source row in `security_state_provenance.json` must include `asset_kind` equal to `raw_collection` or `static_security_state` and the owning `asset_manifest_sha256`. A supplemental contract must contain `static_security_state_manifest` in `source_hashes`.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```python
 def test_derivation_binds_static_master_only_for_stock_basic(self):
@@ -152,13 +152,13 @@ def test_certification_rejects_static_source_not_registered_in_static_manifest(s
         run_certification(..., sample_contract_path=tampered_contract)
 ```
 
-- [ ] **Step 2: Run the red tests**
+- [x] **Step 2: Run the red tests**
 
 Run: `cd backend && "$PY" -m unittest tests.test_full_market_ml_sample_contract_runner tests.test_full_market_ml_sample_certification_runner`
 
 Expected: failure because current derivation accepts only original raw sources.
 
-- [ ] **Step 3: Implement binding and two-manifest verification**
+- [x] **Step 3: Implement binding and two-manifest verification**
 
 Derivation loads the original raw collection exactly as before, loads a canonical supplemental asset only when supplied, and calls:
 
@@ -173,7 +173,7 @@ security = build_security_state_provenance(
 
 Only `stock_basic:L/D/P` may come from the supplement. `namechange`, `trade_cal`, `suspend_d`, `index_classify`, and `index_member_all` must remain bound to the original raw manifest. Formal certification must select the root and manifest by `asset_kind`, self-verify that manifest, require each declared path/hash to appear in its manifest as an adopted or verified partition, and reject path traversal, unknown asset kinds, stale assets, missing panel symbols, or hash mismatch.
 
-- [ ] **Step 4: Run targeted tests and commit**
+- [x] **Step 4: Run targeted tests and commit**
 
 Run: `cd backend && "$PY" -m unittest tests.test_full_market_ml_static_security_state tests.test_full_market_ml_sample_contract_runner tests.test_full_market_ml_sample_certification_runner`
 
@@ -194,7 +194,7 @@ git commit -m "research: bind static security state to sample contracts"
 - Create: `backend/scripts/collect_static_security_state.py`
 - Test: `backend/tests/test_collect_static_security_state_cli.py`
 
-- [ ] **Step 1: Write failing CLI tests**
+- [x] **Step 1: Write failing CLI tests**
 
 ```python
 def test_cli_rejects_missing_token_without_creating_asset(self):
@@ -209,13 +209,13 @@ def test_cli_reports_manifest_without_token_text(self):
     self.assertNotIn("fake-token", completed.stdout)
 ```
 
-- [ ] **Step 2: Run the red tests**
+- [x] **Step 2: Run the red tests**
 
 Run: `cd backend && "$PY" -m unittest tests.test_collect_static_security_state_cli`
 
 Expected: import or CLI-path failure before implementation.
 
-- [ ] **Step 3: Implement CLI**
+- [x] **Step 3: Implement CLI**
 
 ```python
 token = os.environ.get("TUSHARE_TOKEN", "").strip()
@@ -227,7 +227,7 @@ print(json.dumps(asset.public_summary(), sort_keys=True))
 
 The CLI output includes only root expressed from the supplied asset root, manifest hash, observed time, row counts, schemas and status.
 
-- [ ] **Step 4: Run CLI tests and collect**
+- [x] **Step 4: Run CLI tests and collect**
 
 Run: `cd backend && "$PY" -m unittest tests.test_collect_static_security_state_cli`
 
@@ -236,14 +236,14 @@ Then run:
 ```bash
 cd backend
 set -a
-source "/Users/xiong/Documents/SmartStock/.local-secrets/smartstock.env"
+source "$SMARTSTOCK_SECRETS"
 set +a
 "$PY" scripts/collect_static_security_state.py --asset-root "$ML_ASSET_ROOT"
 ```
 
 Expected: verified L/D/P asset; no token in terminal output; the returned root is canonical and immutable.
 
-- [ ] **Step 5: Commit code and tests**
+- [x] **Step 5: Commit code and tests**
 
 ```bash
 git add backend/scripts/collect_static_security_state.py \
@@ -256,7 +256,7 @@ git commit -m "research: add static security-state collection CLI"
 **Files:**
 - Create: `docs/strategy-evidence/ml-readiness/2026-07-18-static-security-state-recollection-result.md`
 
-- [ ] **Step 1: Create a new composite contract**
+- [x] **Step 1: Create a new composite contract**
 
 ```bash
 cd backend
@@ -268,7 +268,7 @@ cd backend
   --output-root "$ML_ASSET_ROOT/derivations/fmv3_ea0797d57ed62a916b3a/static-security-contract-<timestamp>"
 ```
 
-- [ ] **Step 2: Run formal certification**
+- [x] **Step 2: Run formal certification**
 
 ```bash
 cd backend
@@ -281,11 +281,11 @@ cd backend
 
 Exit `0` is valid only for `certified_research_sample`; exit `2` must preserve all remaining blocking codes. Neither command runs model fitting.
 
-- [ ] **Step 3: Record evidence**
+- [x] **Step 3: Record evidence**
 
 The report records the token probe classification, schemas, and L/D/P row counts without a token; supplemental manifest hash and observed time; coverage against the 2026-07-10 panel end date; derived contract and certificate status; all blocking codes; selected-feature count; commands, exit codes, and an explicit no-model/no-strategy-change statement.
 
-- [ ] **Step 4: Full verification and commit**
+- [x] **Step 4: Full verification and commit**
 
 Run:
 
