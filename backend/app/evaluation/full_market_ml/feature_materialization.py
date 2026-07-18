@@ -30,6 +30,7 @@ from .features import ALL_FEATURE_NAMES, build_time_series_features, build_cross
 
 FEATURE_ASSET_VERSION = "full_market_feature_asset_v2"
 MINIMUM_ONLINE_PARITY_HISTORY_SESSIONS = 84
+ONLINE_PARITY_SYMBOL_LIMIT = 256
 _RAW_REQUIRED = {
     "trade_date",
     "symbol",
@@ -468,10 +469,24 @@ def _verify_last_date_parity(
 ) -> dict[str, Any]:
     as_of_date = sessions[-1]
     history = set(sessions[-MINIMUM_ONLINE_PARITY_HISTORY_SESSIONS:])
+    latest = pq.read_table(
+        matrix_root / f"trade_date={as_of_date}" / "data.parquet",
+        columns=["symbol"],
+    ).to_pandas()
+    parity_symbols = tuple(
+        sorted(latest["symbol"].astype(str).unique(), key=lambda value: hashlib.sha256(value.encode()).hexdigest())[
+            :ONLINE_PARITY_SYMBOL_LIMIT
+        ]
+    )
+    parity_symbol_set = set(parity_symbols)
     rows = []
     for batch in parquet.iter_batches(batch_size=65_536, columns=list(source_columns)):
         frame = batch.to_pandas()
-        selected = frame.loc[frame["trade_date"].astype(str).isin(history)]
+        dates = frame["trade_date"].astype(str)
+        symbols = frame["symbol"].astype(str).str.split(".", regex=False).str[0].str.zfill(6)
+        # The latest cross section needs all symbols, while recursive EMA/MACD
+        # parity needs every available historical row for sampled symbols.
+        selected = frame.loc[dates.isin(history) | symbols.isin(parity_symbol_set)]
         if not selected.empty:
             rows.append(selected)
     online_input = pd.concat(rows, ignore_index=True)
@@ -484,6 +499,7 @@ def _verify_last_date_parity(
         source_qualities=source_qualities,
     ).sort_values("symbol").reset_index(drop=True)
     offline = pq.read_table(matrix_root / f"trade_date={as_of_date}" / "data.parquet", columns=["trade_date", "symbol", *contract.feature_names]).to_pandas()
+    offline = offline.loc[offline["symbol"].astype(str).isin(parity_symbol_set)].copy()
     offline = offline.sort_values("symbol").reset_index(drop=True)
     if online[["trade_date", "symbol"]].to_dict("records") != offline[["trade_date", "symbol"]].to_dict("records"):
         raise FeatureMaterializationError("latest V2 online/offline parity identity rows differ")
@@ -498,7 +514,8 @@ def _verify_last_date_parity(
         "passed": True,
         "as_of_date": as_of_date,
         "history_sessions": MINIMUM_ONLINE_PARITY_HISTORY_SESSIONS,
-        "symbol_count": int(len(online)),
+        "sampled_symbol_count": int(len(online)),
+        "sample_selection": "stable_sha256_first_256_of_latest_full_market_cross_section",
         "tolerance": contract.parity_tolerance,
     }
 
