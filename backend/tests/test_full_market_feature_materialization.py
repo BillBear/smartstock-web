@@ -5,16 +5,26 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from app.evaluation.full_market_ml.feature_materialization import materialize_feature_asset
+from app.evaluation.full_market_ml.feature_materialization import _peak_rss_bytes, materialize_feature_asset
 from tests.test_full_market_ml_feature_contract import feature_contract_fixture
 
 
 class FullMarketFeatureMaterializationTests(unittest.TestCase):
+    def test_peak_rss_uses_platform_correct_units(self):
+        usage = SimpleNamespace(ru_maxrss=123)
+        with patch("app.evaluation.full_market_ml.feature_materialization.resource.getrusage", return_value=usage):
+            with patch("app.evaluation.full_market_ml.feature_materialization.sys.platform", "darwin"):
+                self.assertEqual(_peak_rss_bytes(), 123)
+            with patch("app.evaluation.full_market_ml.feature_materialization.sys.platform", "linux"):
+                self.assertEqual(_peak_rss_bytes(), 123 * 1024)
+
     def test_rebuilds_v2_matrix_without_reusing_stale_feature_columns(self):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "source"

@@ -11,6 +11,7 @@ import json
 import os
 import resource
 import shutil
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -588,7 +589,10 @@ def _payload_sha256(payload: Mapping[str, Any]) -> str:
 
 
 def _peak_rss_bytes() -> int:
-    return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024)
+    peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    # Darwin already reports bytes; Linux reports KiB. Normalise the evidence
+    # field rather than publishing an impossible macOS memory value.
+    return peak if sys.platform == "darwin" else peak * 1024
 
 
 def _now() -> str:
