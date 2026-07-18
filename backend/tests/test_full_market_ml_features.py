@@ -106,6 +106,24 @@ class FullMarketMLFeatureTests(FullMarketMLTestCase):
         self.assertIn("adjusted_return_20d_robust_z", matrix.columns)
         self.assertTrue(matrix["adjusted_return_20d_rank"].between(0, 1).all())
 
+    def test_as_of_helper_matches_full_history_cross_section_reference(self):
+        panel = feature_fixture(sessions=30)
+        as_of_date = "2025-01-10"
+        reference_all_dates = build_cross_section_features(
+            self.config,
+            {"full_market": build_time_series_features(self.config, panel)},
+        )["full_market"]
+        reference = reference_all_dates.loc[reference_all_dates["trade_date"].eq(as_of_date)].copy()
+        expected_columns = ["trade_date", "symbol", *DEFAULT_FEATURE_NAMES]
+        for name in DEFAULT_FEATURE_NAMES:
+            if name not in reference:
+                reference[name] = float("nan")
+        reference = reference.loc[:, expected_columns].sort_values("symbol").reset_index(drop=True)
+
+        actual = build_features_for_date(self.config, panel, as_of_date).sort_values("symbol").reset_index(drop=True)
+
+        pd.testing.assert_frame_equal(actual, reference)
+
     def test_default_model_schema_stays_below_local_feature_cap(self):
         matrix = build_features_for_date(self.config, feature_fixture(), "2025-01-10")
 

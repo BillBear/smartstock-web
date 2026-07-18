@@ -291,8 +291,11 @@ def build_features_for_date(
         pd.to_datetime(panel_shard["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d").le(as_of_date)
     ].copy()
     time_series = build_time_series_features(config, available_rows)
-    result = build_cross_section_features(config, {"full_market": time_series})["full_market"]
-    result = result.loc[result["trade_date"].eq(as_of_date)].copy()
+    # Symbol-local features need historical rows; peer ranks and breadth only
+    # need the signal-date cross section.  Restricting this step avoids
+    # recomputing every historical cross section for a one-date online request.
+    signal_rows = time_series.loc[time_series["trade_date"].eq(as_of_date)].copy()
+    result = build_cross_section_features(config, {"full_market": signal_rows})["full_market"]
     for name in requested_schema:
         if name not in result:
             result[name] = np.nan
