@@ -559,6 +559,197 @@ class CoachServiceObservabilityTests(unittest.TestCase):
         self.assertEqual(trade_plan["probability_model"]["label"], "弱模型参考")
         self.assertFalse(trade_plan["probability_model"]["calibrated"])
 
+    def test_unready_ml_prediction_cannot_change_pick_scores_or_probabilities(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = CoachService(
+                data_source_manager=None,
+                store=CoachStore(str(Path(tmpdir) / "coach.db")),
+                news_service=None,
+            )
+            result = service._apply_ml_prediction_to_pick_values(
+                up_prob=0.61,
+                dd_prob=0.27,
+                total_score=73.0,
+                model_prediction={
+                    "model_version_id": "ml_weak_reference",
+                    "model_readiness": {"production_ml_ready": False, "role": "weak_reference_only"},
+                    "model_probability": {
+                        "model_up_prob": 0.99,
+                        "model_dd_prob": 0.01,
+                        "final_score": 100.0,
+                    },
+                },
+            )
+
+        self.assertEqual(result["up_prob"], 0.61)
+        self.assertEqual(result["dd_prob"], 0.27)
+        self.assertEqual(result["total_score"], 73.0)
+        self.assertFalse(result["decision_influence_applied"])
+        self.assertEqual(result["decision_influence_reason"], "model_not_production_ready")
+        self.assertEqual(result["enrichment"]["model_version_id"], "ml_weak_reference")
+
+    def test_ready_ml_prediction_can_change_pick_scores_or_probabilities(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = CoachService(
+                data_source_manager=None,
+                store=CoachStore(str(Path(tmpdir) / "coach.db")),
+                news_service=None,
+            )
+            result = service._apply_ml_prediction_to_pick_values(
+                up_prob=0.61,
+                dd_prob=0.27,
+                total_score=73.0,
+                model_prediction={
+                    "model_version_id": "ml_production_candidate",
+                    "model_readiness": {"production_ml_ready": True, "role": "production_candidate"},
+                    "model_probability": {
+                        "model_up_prob": 0.81,
+                        "model_dd_prob": 0.11,
+                        "final_score": 93.0,
+                    },
+                },
+            )
+
+        self.assertAlmostEqual(result["up_prob"], 0.72)
+        self.assertAlmostEqual(result["dd_prob"], 0.182)
+        self.assertAlmostEqual(result["total_score"], 80.0)
+        self.assertTrue(result["decision_influence_applied"])
+        self.assertEqual(result["decision_influence_reason"], "production_ml_ready")
+
+    def test_ml_prediction_without_readiness_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = CoachService(
+                data_source_manager=None,
+                store=CoachStore(str(Path(tmpdir) / "coach.db")),
+                news_service=None,
+            )
+            result = service._apply_ml_prediction_to_pick_values(
+                up_prob=0.55,
+                dd_prob=0.30,
+                total_score=70.0,
+                model_prediction={
+                    "model_version_id": "legacy_ml_without_readiness",
+                    "model_probability": {
+                        "model_up_prob": 0.99,
+                        "model_dd_prob": 0.01,
+                        "final_score": 100.0,
+                    },
+                },
+            )
+
+        self.assertAlmostEqual(result["up_prob"], 0.55)
+        self.assertAlmostEqual(result["dd_prob"], 0.30)
+        self.assertAlmostEqual(result["total_score"], 70.0)
+        self.assertFalse(result["decision_influence_applied"])
+        self.assertEqual(result["decision_influence_reason"], "model_not_production_ready")
+
+    def test_ready_ml_prediction_without_probability_payload_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = CoachService(
+                data_source_manager=None,
+                store=CoachStore(str(Path(tmpdir) / "coach.db")),
+                news_service=None,
+            )
+            result = service._apply_ml_prediction_to_pick_values(
+                up_prob=0.55,
+                dd_prob=0.30,
+                total_score=70.0,
+                model_prediction={
+                    "model_version_id": "ml_incomplete_payload",
+                    "model_readiness": {"production_ml_ready": True, "role": "production_candidate"},
+                },
+            )
+
+        self.assertAlmostEqual(result["up_prob"], 0.55)
+        self.assertAlmostEqual(result["dd_prob"], 0.30)
+        self.assertAlmostEqual(result["total_score"], 70.0)
+        self.assertFalse(result["decision_influence_applied"])
+        self.assertEqual(result["decision_influence_reason"], "model_probability_unavailable")
+
+    def test_build_pick_keeps_rule_outputs_when_ml_model_is_unready(self):
+        class DataSourceStub:
+            def get_history_data(self, symbol, days=120):
+                closes = [10 + 0.05 * index for index in range(120)]
+                return pd.DataFrame(
+                    {
+                        "date": pd.date_range("2026-01-01", periods=120).strftime("%Y-%m-%d"),
+                        "open": closes,
+                        "high": [price * 1.01 for price in closes],
+                        "low": [price * 0.99 for price in closes],
+                        "close": closes,
+                        "volume": [1_000_000] * 120,
+                    }
+                )
+
+        class FeatureBuilderStub:
+            def build_live_features(self, *args, **kwargs):
+                return {"features": {}}
+
+        class UnreadyMLStub:
+            feature_builder = FeatureBuilderStub()
+
+            def predict_live(self, *args, **kwargs):
+                return {
+                    "model_version_id": "ml_weak_reference",
+                    "model_readiness": {"production_ml_ready": False},
+                    "model_probability": {
+                        "model_up_prob": 0.99,
+                        "model_dd_prob": 0.01,
+                        "final_score": 100.0,
+                    },
+                }
+
+        indicators = {
+            "close": 15.95,
+            "rsi": 55,
+            "macd_hist": 0.1,
+            "boll_lower": 14,
+            "boll_middle": 15,
+            "ma5": 15.8,
+            "ma10": 15.6,
+            "ma20": 15.3,
+            "ma60": 14.5,
+        }
+        quote = {
+            "code": "000001",
+            "name": "测试股票",
+            "price": 15.95,
+            "amount": 1_000_000_000,
+            "pct_change": 1.0,
+            "turnover_rate": 5.0,
+            "industry": "银行",
+        }
+        risk_profile = {"risk_level": "medium", "max_position_pct": 10}
+        market_state = {"state_tag": "neutral"}
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            TechnicalAnalyzer, "analyze_all_indicators", side_effect=lambda frame: frame
+        ), patch.object(TechnicalAnalyzer, "get_latest_indicators", return_value=indicators), patch.object(
+            TechnicalAnalyzer, "generate_signals", return_value={"score": 40, "signals": ["测试信号"]}
+        ):
+            data_source = DataSourceStub()
+            rules_only = CoachService(
+                data_source_manager=data_source,
+                store=CoachStore(str(Path(tmpdir) / "rules-only.db")),
+                news_service=None,
+            )._build_pick("000001", risk_profile, market_state, quote_override=quote)
+            unready_model = CoachService(
+                data_source_manager=data_source,
+                store=CoachStore(str(Path(tmpdir) / "unready-model.db")),
+                news_service=None,
+                ml_model_service=UnreadyMLStub(),
+            )._build_pick("000001", risk_profile, market_state, quote_override=quote)
+
+        self.assertIsNotNone(rules_only)
+        self.assertIsNotNone(unready_model)
+        for key in ("action", "up_prob", "dd_prob", "expected_return_pct"):
+            self.assertEqual(unready_model[key], rules_only[key])
+        self.assertEqual(unready_model["score_breakdown"]["total"], rules_only["score_breakdown"]["total"])
+        self.assertEqual(unready_model["evidence_summary"]["strategy_version"], "v1.2-breakout-gated")
+        self.assertTrue(unready_model["evidence_summary"]["proxy_only"])
+        self.assertFalse(unready_model["decision_influence_applied"])
+        self.assertEqual(unready_model["model_version_id"], "ml_weak_reference")
+
     def test_watch_only_decision_summary_does_not_suggest_paper_buy(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             service = CoachService(

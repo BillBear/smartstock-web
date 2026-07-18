@@ -1432,6 +1432,68 @@ class CoachService:
             "news_context": news_context,
         }
 
+    def _apply_ml_prediction_to_pick_values(
+        self,
+        *,
+        up_prob: float,
+        dd_prob: float,
+        total_score: float,
+        model_prediction: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Apply model output only when its persisted readiness explicitly permits it."""
+        if not isinstance(model_prediction, dict) or not model_prediction:
+            return {
+                "up_prob": up_prob,
+                "dd_prob": dd_prob,
+                "total_score": total_score,
+                "enrichment": {},
+                "decision_influence_applied": False,
+                "decision_influence_reason": "model_prediction_unavailable",
+            }
+
+        readiness = model_prediction.get("model_readiness")
+        production_ml_ready = isinstance(readiness, dict) and readiness.get("production_ml_ready") is True
+        enrichment = {
+            **model_prediction,
+            "model_version_id": model_prediction.get("model_version_id"),
+            "decision_influence_applied": production_ml_ready,
+            "decision_influence_reason": "production_ml_ready" if production_ml_ready else "model_not_production_ready",
+        }
+        if not production_ml_ready:
+            return {
+                "up_prob": up_prob,
+                "dd_prob": dd_prob,
+                "total_score": total_score,
+                "enrichment": enrichment,
+                "decision_influence_applied": False,
+                "decision_influence_reason": "model_not_production_ready",
+            }
+
+        model_probability = model_prediction.get("model_probability")
+        required_probability_fields = ("model_up_prob", "model_dd_prob", "final_score")
+        if not isinstance(model_probability, dict) or any(field not in model_probability for field in required_probability_fields):
+            enrichment["decision_influence_applied"] = False
+            enrichment["decision_influence_reason"] = "model_probability_unavailable"
+            return {
+                "up_prob": up_prob,
+                "dd_prob": dd_prob,
+                "total_score": total_score,
+                "enrichment": enrichment,
+                "decision_influence_applied": False,
+                "decision_influence_reason": "model_probability_unavailable",
+            }
+        model_up_prob = self._safe_float(model_probability.get("model_up_prob"), up_prob)
+        model_dd_prob = self._safe_float(model_probability.get("model_dd_prob"), dd_prob)
+        model_final_score = self._safe_float(model_probability.get("final_score"), total_score)
+        return {
+            "up_prob": self._clamp(up_prob * 0.45 + model_up_prob * 0.55, 0.05, 0.90),
+            "dd_prob": self._clamp(dd_prob * 0.45 + model_dd_prob * 0.55, 0.05, 0.85),
+            "total_score": self._clamp(total_score * 0.65 + model_final_score * 0.35, 0, 100),
+            "enrichment": enrichment,
+            "decision_influence_applied": True,
+            "decision_influence_reason": "production_ml_ready",
+        }
+
     def _build_pick(
         self,
         symbol: str,
@@ -1899,6 +1961,7 @@ class CoachService:
                 )
 
         ml_enrichment: Dict[str, Any] = {}
+        ml_decision_influence_applied = False
         if self.ml_model_service:
             try:
                 feature_payload = self.ml_model_service.feature_builder.build_live_features(
@@ -1916,18 +1979,17 @@ class CoachService:
                         "stop_loss_ratio": stop_loss_ratio,
                     },
                 )
-                if model_prediction:
-                    model_probability = model_prediction.get("model_probability") or {}
-                    model_up_prob = self._safe_float(model_probability.get("model_up_prob"), up_prob)
-                    model_dd_prob = self._safe_float(model_probability.get("model_dd_prob"), dd_prob)
-                    model_final_score = self._safe_float(model_probability.get("final_score"), total_score)
-                    up_prob = self._clamp(up_prob * 0.45 + model_up_prob * 0.55, 0.05, 0.90)
-                    dd_prob = self._clamp(dd_prob * 0.45 + model_dd_prob * 0.55, 0.05, 0.85)
-                    total_score = self._clamp(total_score * 0.65 + model_final_score * 0.35, 0, 100)
-                    ml_enrichment = {
-                        **model_prediction,
-                        "model_version_id": model_prediction.get("model_version_id"),
-                    }
+                ml_result = self._apply_ml_prediction_to_pick_values(
+                    up_prob=up_prob,
+                    dd_prob=dd_prob,
+                    total_score=total_score,
+                    model_prediction=model_prediction,
+                )
+                up_prob = ml_result["up_prob"]
+                dd_prob = ml_result["dd_prob"]
+                total_score = ml_result["total_score"]
+                ml_enrichment = ml_result["enrichment"]
+                ml_decision_influence_applied = ml_result["decision_influence_applied"]
             except Exception:
                 ml_enrichment = {}
 
@@ -1966,10 +2028,10 @@ class CoachService:
             "news_factor": news_factor,
             "evidence_summary": {
                 "strategy_code": strategy,
-                "strategy_version": ("v1.3-rebound-ml-calibrated" if strategy == "pullback_rebound" else "v1.3-breakout-ml-calibrated") if ml_enrichment else ("v1.2-rebound-gated" if strategy == "pullback_rebound" else "v1.2-breakout-gated"),
+                "strategy_version": ("v1.3-rebound-ml-calibrated" if strategy == "pullback_rebound" else "v1.3-breakout-ml-calibrated") if ml_decision_influence_applied else ("v1.2-rebound-gated" if strategy == "pullback_rebound" else "v1.2-breakout-gated"),
                 "model_win_rate_proxy": round(self._clamp(up_prob, 0.30, 0.82), 4),
                 "model_drawdown_proxy": round(self._clamp(dd_prob, 0.08, 0.45), 4),
-                "proxy_only": not bool(ml_enrichment),
+                "proxy_only": not ml_decision_influence_applied,
                 "state_tag": state_tag,
                 "quality_gate_passed": not disqualify_buy,
                 "quality_notes": quality_notes[:4],
