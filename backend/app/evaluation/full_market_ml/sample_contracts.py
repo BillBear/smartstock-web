@@ -7,6 +7,7 @@ from typing import Any, Mapping, Sequence
 
 
 _SHA256_HEX_LENGTH = 64
+_GROUP_ALIASES = {"cross_section_moneyflow": "moneyflow"}
 
 
 def build_label_contract(
@@ -55,6 +56,68 @@ def build_label_contract(
     return _with_sha256(payload)
 
 
+def build_feature_availability_contract(
+    quality_report: Mapping[str, Any],
+    feature_audit: Mapping[str, Any],
+    minimum_coverage: float = 0.95,
+) -> dict[str, Any]:
+    """Fail closed for features lacking stable OOF-fold coverage."""
+    if not 0.0 < float(minimum_coverage) <= 1.0:
+        raise ValueError("minimum feature coverage must be in (0, 1]")
+    disabled_groups = sorted(
+        {_normalise_group(value) for value in _sequence(quality_report.get("disabled_feature_groups"))}
+    )
+    observed: dict[str, dict[str, Any]] = {}
+    for raw in _sequence(feature_audit.get("coverage")):
+        if not isinstance(raw, Mapping):
+            raise ValueError("feature audit coverage row must be an object")
+        feature = str(raw.get("feature", "")).strip()
+        group = _normalise_group(raw.get("feature_group", ""))
+        if not feature or not group:
+            raise ValueError("feature audit coverage row requires feature and feature_group")
+        coverage = _probability(raw.get("coverage"), f"coverage:{feature}")
+        record = observed.setdefault(
+            feature,
+            {"feature_group": group, "fold_coverage": [], "minimum_coverage": coverage},
+        )
+        if record["feature_group"] != group:
+            raise ValueError(f"feature audit assigns multiple groups to {feature}")
+        record["fold_coverage"].append(coverage)
+        record["minimum_coverage"] = min(float(record["minimum_coverage"]), coverage)
+
+    allowed: list[str] = []
+    rejected: dict[str, dict[str, Any]] = {}
+    feature_coverage: dict[str, dict[str, Any]] = {}
+    for feature, record in sorted(observed.items()):
+        group = str(record["feature_group"])
+        observed_minimum = float(record["minimum_coverage"])
+        feature_coverage[feature] = {
+            "feature_group": group,
+            "minimum_fold_coverage": observed_minimum,
+            "fold_count": len(record["fold_coverage"]),
+        }
+        if group in disabled_groups:
+            rejected[feature] = {"reason": f"feature_group_disabled:{group}", **feature_coverage[feature]}
+        elif observed_minimum < float(minimum_coverage):
+            rejected[feature] = {
+                "reason": f"coverage_below_{_threshold_token(float(minimum_coverage))}",
+                **feature_coverage[feature],
+            }
+        else:
+            allowed.append(feature)
+
+    payload: dict[str, Any] = {
+        "feature_availability_contract_version": "oof_coverage_v1",
+        "minimum_feature_coverage": float(minimum_coverage),
+        "disabled_feature_groups": disabled_groups,
+        "allowed_features": allowed,
+        "rejected_features": rejected,
+        "feature_coverage": feature_coverage,
+        "validation_status": "verified",
+    }
+    return _with_sha256(payload)
+
+
 def _normalise_primary_daily(value: object) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         raise ValueError("primary label audit daily must be an array")
@@ -83,6 +146,12 @@ def _normalise_primary_daily(value: object) -> list[dict[str, Any]]:
             }
         )
     return result
+
+
+def _sequence(value: object) -> list[object]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    return list(value)
 
 
 def _with_sha256(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -116,3 +185,12 @@ def _probability(value: object, label: str) -> float:
     if not 0.0 <= result <= 1.0:
         raise ValueError(f"{label} must be between 0 and 1")
     return result
+
+
+def _normalise_group(value: object) -> str:
+    group = str(value).strip()
+    return _GROUP_ALIASES.get(group, group)
+
+
+def _threshold_token(value: float) -> str:
+    return f"{value:.12g}".replace(".", "_")
