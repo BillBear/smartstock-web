@@ -1,8 +1,8 @@
 {
-  "schema_version": 1,
-  "dataset_id": "fmv3_ea0797d57ed62a916b3a",
-  "minimum_coverage": 0.95,
-  "minimum_feature_coverage": 0.95,
-  "minimum_listing_sessions": 120,
+  "certification_version": "full_market_sample_v2",
+  "outer_folds": 5,
+  "embargo_sessions": 20,
+  "stock_holdout_ratio": 0.2,
+  "sealed_temporal_audit_dates": 60,
   "production_integration_allowed": false
 }
