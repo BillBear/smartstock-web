@@ -27,6 +27,14 @@ SmartStock AI 是本地运行的 A 股投资决策辅助系统。本仓库中的
   分层提交。
 - 文档、工程稳定性和评估系统搭建任务不得顺手调整策略参数，也不得改变当前 stock-picking 结果。
 
+## ML 研究台账与产物
+
+- 正式 ML 数据采集、训练、评估、模型卡或候选冻结只能从
+  `docs/governance/ml-research-ledger.md` 明确登记的研究分支启动；未登记分支只允许检查或一次性诊断。
+- 正式运行必须引用不可变 `dataset_id`、原始/派生清单哈希、特征/标签/切分哈希、代码提交和研究假设；缺任一项即为 `preflight_failed`，不得继续训练。
+- 原始数据、Parquet 面板、模型二进制、OOF 预测和运行产物属于 `ML_ASSET_ROOT` 管理的本地研究资产，不得提交 Git，也不得在 worktree 的 `runtime/` 目录中作为唯一权威副本。
+- `research_only`、`research_only_failed_gate` 和 `shadow_candidate` 模型不得改变 CoachService 的分数、排序、动作、仓位或风险闸门。只有满足完整准入证据并经人工批准的 `production_candidate` 才能进入独立接入任务。
+
 ## 分层修改
 
 - 前端、后端、数据服务、策略引擎、回测引擎、监控告警、数据库迁移、文档和策略证据应分层规划、

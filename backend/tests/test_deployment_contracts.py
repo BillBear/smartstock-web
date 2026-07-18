@@ -33,6 +33,34 @@ class LocalDeploymentContractTests(unittest.TestCase):
         self.assertIn("process cwd", text)
         self.assertIn("candidate pool", text)
 
+    def test_status_and_doctor_report_ml_research_identity(self):
+        status_script = REPO_ROOT / "status.sh"
+        status_text = status_script.read_text(encoding="utf-8")
+        doctor = REPO_ROOT / "doctor.sh"
+
+        result = subprocess.run(
+            ["bash", str(doctor), "--offline"],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for field in (
+            "deploy_branch",
+            "deploy_commit",
+            "origin_main_relation",
+            "research_contract_commit",
+            "active_model_id",
+            "active_model_status",
+            "active_model_decision_mode",
+            "latest_certified_dataset_id",
+            "latest_research_run_id",
+        ):
+            self.assertIn(field, status_text)
+            self.assertIn(field, result.stdout)
+
     def test_launchd_templates_are_local_adapters(self):
         launchd_dir = REPO_ROOT / "deployment" / "local" / "launchd"
         templates = {
