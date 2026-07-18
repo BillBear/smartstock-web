@@ -67,16 +67,20 @@ def certify_training_sample(
     """Evaluate the research-data contract without mutating any artifact."""
     blocking: set[str] = set()
     feature_names = [str(name) for name in selected_features]
+    certification_mode = str(evidence.get("certification_mode", "legacy_diagnostic"))
+    if certification_mode not in {"legacy_diagnostic", "composite_contract"}:
+        blocking.add("certification:unknown_mode")
 
-    _check_input_hashes(evidence.get("input_hashes"), blocking)
+    _check_input_hashes(evidence.get("input_hashes"), blocking, certification_mode)
     _check_panel(config, _mapping(evidence.get("panel")), blocking)
-    _check_labels(_mapping(evidence.get("labels")), blocking)
+    _check_labels(_mapping(evidence.get("labels")), blocking, certification_mode)
     _check_security_state(_mapping(evidence.get("security_state")), blocking)
     _check_features(config, _mapping(evidence.get("quality")), _mapping(evidence.get("features")), feature_names, blocking)
     _check_splits(_mapping(evidence.get("splits")), blocking)
 
     return {
         "dataset_id": config.dataset_id,
+        "certification_mode": certification_mode,
         "status": "certified_research_sample" if not blocking else "blocked",
         "blocking_codes": sorted(blocking),
         "production_integration_allowed": False,
@@ -96,9 +100,14 @@ def _mapping(value: object) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _check_input_hashes(raw_hashes: object, blocking: set[str]) -> None:
+def _check_input_hashes(raw_hashes: object, blocking: set[str], certification_mode: str) -> None:
     hashes = _mapping(raw_hashes)
-    for name in ("dataset_registry", "full_build_manifest", "label_report", "split_plan"):
+    required = (
+        ("dataset_registry", "full_build_manifest", "quality_report", "split_plan", "sample_contract")
+        if certification_mode == "composite_contract"
+        else ("dataset_registry", "full_build_manifest", "label_report", "split_plan")
+    )
+    for name in required:
         value = str(hashes.get(name, "")).lower()
         if not _SHA256_RE.fullmatch(value):
             blocking.add(f"inputs:hash_missing_or_invalid:{name}")
@@ -120,11 +129,14 @@ def _check_panel(config: CertificationConfig, panel: Mapping[str, Any], blocking
         blocking.add("panel:required_date_coverage_below_threshold")
 
 
-def _check_labels(labels: Mapping[str, Any], blocking: set[str]) -> None:
+def _check_labels(labels: Mapping[str, Any], blocking: set[str], certification_mode: str) -> None:
     if labels.get("signal_time") != "after_close":
         blocking.add("labels:signal_time_not_after_close")
     if labels.get("entry_time") != "next_session_open":
         blocking.add("labels:entry_time_not_next_session_open")
+    if certification_mode == "composite_contract":
+        _check_composite_labels(labels, blocking)
+        return
     ambiguous_count = labels.get("eligible_ambiguous_path_count")
     if ambiguous_count is None:
         blocking.add("labels:ambiguous_path_eligibility_unproven")
@@ -152,6 +164,32 @@ def _check_labels(labels: Mapping[str, Any], blocking: set[str]) -> None:
             blocking.add(f"labels:secondary_daily_reconciliation_failed:{date}")
 
 
+def _check_composite_labels(labels: Mapping[str, Any], blocking: set[str]) -> None:
+    if labels.get("label_contract_version") != "alpha_risk_10d_v1":
+        blocking.add("labels:unsupported_primary_label_contract")
+    primary = _mapping(labels.get("primary_label"))
+    if primary.get("column") != "alpha_relevance_grade_10d" or primary.get("objective") != "cross_sectional_alpha":
+        blocking.add("labels:primary_alpha_objective_invalid")
+    if int(labels.get("horizon_sessions", 0) or 0) != 10:
+        blocking.add("labels:horizon_not_10_sessions")
+    ambiguous_count = labels.get("path_label_eligible_ambiguous_count")
+    if ambiguous_count is None:
+        blocking.add("labels:path_ambiguity_eligibility_unproven")
+    elif int(ambiguous_count or 0) != 0:
+        blocking.add("labels:path_ambiguous_path_dependent_rows")
+    dates: set[str] = set()
+    for item in _sequence_of_mappings(labels.get("primary_daily")):
+        date = str(item.get("trade_date", ""))
+        eligible = _number(item.get("eligible_count"))
+        prevalence = _number(item.get("alpha_top10_prevalence"))
+        if not date or date in dates or eligible is None or eligible <= 0 or prevalence is None or not 0.0 <= prevalence <= 1.0:
+            blocking.add("labels:primary_daily_invalid")
+            continue
+        dates.add(date)
+    if not dates:
+        blocking.add("labels:primary_daily_missing")
+
+
 def _check_security_state(security: Mapping[str, Any], blocking: set[str]) -> None:
     provenance = security.get("provenance")
     if not isinstance(provenance, Mapping):
@@ -161,6 +199,10 @@ def _check_security_state(security: Mapping[str, Any], blocking: set[str]) -> No
         covered = {str(item) for item in provenance.get("covers", [])}
         if not _SHA256_RE.fullmatch(sha) or not _SECURITY_COVERAGE.issubset(covered):
             blocking.add("security_state:point_in_time_provenance_missing")
+        if "validation_status" in provenance and provenance.get("validation_status") != "verified":
+            blocking.add("security_state:provenance_not_verified")
+            for code in _sequence_of_strings(provenance.get("blocking_codes")):
+                blocking.add(code)
     if int(security.get("eligible_status_violation_count", 0) or 0) != 0:
         blocking.add("security_state:ineligible_rows_present")
     if int(security.get("listing_age_nonmonotonic_count", 0) or 0) != 0:
@@ -217,6 +259,12 @@ def _sequence_of_mappings(value: object) -> list[Mapping[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         return []
     return [item for item in value if isinstance(item, Mapping)]
+
+
+def _sequence_of_strings(value: object) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    return [str(item) for item in value if str(item)]
 
 
 def _number(value: object) -> float | None:

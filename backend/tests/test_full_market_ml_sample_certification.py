@@ -61,6 +61,57 @@ def valid_evidence() -> dict:
     }
 
 
+def composite_evidence(*, selected: list[str] | None = None) -> dict:
+    selected = selected or ["adjusted_return_20d"]
+    coverage = {"adjusted_return_20d": 0.98}
+    groups = {"adjusted_return_20d": "price_return"}
+    if "moneyflow_20d_mean" in selected:
+        coverage["moneyflow_20d_mean"] = 0.96
+        groups["moneyflow_20d_mean"] = "moneyflow"
+    return {
+        "certification_mode": "composite_contract",
+        "input_hashes": {
+            "dataset_registry": "a" * 64,
+            "full_build_manifest": "b" * 64,
+            "quality_report": "c" * 64,
+            "split_plan": "d" * 64,
+            "sample_contract": "e" * 64,
+        },
+        "panel": {
+            "ready": True,
+            "row_count": 12_000,
+            "date_count": 60,
+            "symbol_count": 200,
+            "duplicate_key_count": 0,
+            "required_date_coverage": 1.0,
+        },
+        "quality": {"disabled_feature_groups": ["moneyflow"]},
+        "labels": {
+            "label_contract_version": "alpha_risk_10d_v1",
+            "primary_label": {"column": "alpha_relevance_grade_10d", "objective": "cross_sectional_alpha"},
+            "signal_time": "after_close",
+            "entry_time": "next_session_open",
+            "horizon_sessions": 10,
+            "path_label_eligible_ambiguous_count": 0,
+            "primary_daily": [
+                {"trade_date": "2025-01-02", "eligible_count": 100, "alpha_top10_prevalence": 0.10},
+                {"trade_date": "2025-01-03", "eligible_count": 100, "alpha_top10_prevalence": 0.10},
+            ],
+        },
+        "security_state": {
+            "provenance": {
+                "sha256": "f" * 64,
+                "covers": ["listing", "delisting", "st", "suspension", "industry"],
+                "validation_status": "verified",
+            },
+            "eligible_status_violation_count": 0,
+            "listing_age_nonmonotonic_count": 0,
+        },
+        "features": {"coverage": coverage, "groups": groups},
+        "splits": valid_evidence()["splits"],
+    }
+
+
 class SampleCertificationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = CertificationConfig.from_mapping(
@@ -91,6 +142,21 @@ class SampleCertificationTests(unittest.TestCase):
         self.assertEqual(result["status"], "certified_research_sample")
         self.assertEqual(result["blocking_codes"], [])
         self.assertFalse(result["production_integration_allowed"])
+
+    def test_formal_certification_accepts_one_composite_contract_without_legacy_label_comparison(self):
+        result = certify_training_sample(self.config, composite_evidence(), ["adjusted_return_20d"])
+
+        self.assertEqual(result["status"], "certified_research_sample")
+        self.assertEqual(result["certification_mode"], "composite_contract")
+
+    def test_formal_certification_blocks_contract_with_disabled_selected_feature(self):
+        result = certify_training_sample(
+            self.config,
+            composite_evidence(selected=["moneyflow_20d_mean"]),
+            ["moneyflow_20d_mean"],
+        )
+
+        self.assertIn("feature_group_disabled:moneyflow", result["blocking_codes"])
 
     def test_blocks_selected_feature_from_disabled_moneyflow_group(self):
         evidence = valid_evidence()

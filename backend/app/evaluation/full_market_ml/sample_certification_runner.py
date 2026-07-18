@@ -17,6 +17,11 @@ _REGISTRY_REQUIRED_PATHS = {
     "label_report": Path("artifacts/full-build/label_report_v3.json"),
     "split_plan": Path("artifacts/full-build/split_plan_v3.json"),
 }
+_COMPOSITE_REGISTRY_REQUIRED_PATHS = {
+    "full_build_manifest": Path("manifests/full-build.json"),
+    "quality_report": Path("artifacts/full-build/quality_report_v3.json"),
+    "split_plan": Path("artifacts/full-build/split_plan_v3.json"),
+}
 _SOURCE_MANIFEST_REQUIRED_PATHS = {
     "feature_audit": Path("artifacts/feature-audit/report_v3.json"),
     "candidate_manifest": Path("artifacts/dev-train-v3/candidate_manifest.json"),
@@ -30,8 +35,18 @@ def run_certification(
     output_root: str | Path,
     secondary_label_audit_path: str | Path | None = None,
     security_provenance_path: str | Path | None = None,
+    sample_contract_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Certify one immutable research dataset and atomically preserve the result."""
+    if sample_contract_path is not None:
+        if secondary_label_audit_path is not None or security_provenance_path is not None:
+            raise ValueError("composite certification does not accept legacy evidence paths")
+        return _run_composite_certification(
+            config_path=Path(config_path),
+            asset_root=Path(asset_root),
+            output_root=Path(output_root),
+            sample_contract_path=Path(sample_contract_path),
+        )
     config = CertificationConfig.from_mapping(_load_json(Path(config_path)))
     root = Path(asset_root)
     dataset_root = root / "datasets" / config.dataset_id
@@ -89,6 +104,68 @@ def run_certification(
         "disabled_feature_groups": quality.get("disabled_feature_groups", []),
     }
     certificate_path = _write_certificate(Path(output_root), config.dataset_id, certificate)
+    return {"certificate": certificate, "certificate_path": str(certificate_path)}
+
+
+def _run_composite_certification(
+    *,
+    config_path: Path,
+    asset_root: Path,
+    output_root: Path,
+    sample_contract_path: Path,
+) -> dict[str, Any]:
+    config = CertificationConfig.from_mapping(_load_json(config_path))
+    contract = _load_json(sample_contract_path)
+    _verify_payload_hash(contract, "sample contract")
+    if contract.get("sample_contract_version") != "full_market_sample_v1":
+        raise ValueError("unsupported sample contract version")
+    if contract.get("dataset_id") != config.dataset_id:
+        raise ValueError("sample contract does not match certification config")
+
+    dataset_root = asset_root / "datasets" / config.dataset_id
+    registry_path = dataset_root / "artifacts" / "full-build" / "dataset_registry_v3.json"
+    registry = _load_json(registry_path)
+    if registry.get("dataset_id") != config.dataset_id:
+        raise ValueError("dataset registry does not match certification config")
+    input_hashes = {"dataset_registry": _sha256_file(registry_path)}
+    loaded: dict[str, dict[str, Any]] = {}
+    for name, relative in _COMPOSITE_REGISTRY_REQUIRED_PATHS.items():
+        path = dataset_root / relative
+        _verify_registry_file(registry, path, relative)
+        input_hashes[name] = _sha256_file(path)
+        loaded[name] = _load_json(path)
+    _verify_contract_source_hashes(contract, input_hashes)
+
+    components = _load_contract_components(sample_contract_path.parent, contract)
+    input_hashes["sample_contract"] = str(contract["sha256"])
+    label_contract = components["label_contract"]
+    security_provenance = components["security_state_provenance"]
+    feature_availability = components["feature_availability_contract"]
+    selected_features = _selected_available_features(feature_availability)
+    evidence = {
+        "certification_mode": "composite_contract",
+        "input_hashes": input_hashes,
+        "panel": _panel_evidence(loaded["quality_report"]),
+        "quality": {"disabled_feature_groups": feature_availability.get("disabled_feature_groups", [])},
+        "labels": label_contract,
+        "security_state": _security_evidence(security_provenance),
+        "features": _feature_availability_evidence(feature_availability),
+        "splits": _split_evidence(loaded["split_plan"]),
+    }
+    certificate = certify_training_sample(config, evidence, selected_features)
+    certificate["schema_version"] = 2
+    certificate["source_artifacts"] = {
+        "dataset_root": f"datasets/{config.dataset_id}",
+        "sample_contract": str(sample_contract_path),
+        "legacy_candidate_manifest_used": False,
+    }
+    certificate["evidence_summary"] = {
+        "labelable_dates": len(_as_list(label_contract.get("primary_daily"))),
+        "disabled_feature_groups": feature_availability.get("disabled_feature_groups", []),
+        "available_feature_count": len(selected_features),
+        "security_state_validation": security_provenance.get("validation_status"),
+    }
+    certificate_path = _write_certificate(output_root, config.dataset_id, certificate)
     return {"certificate": certificate, "certificate_path": str(certificate_path)}
 
 
@@ -157,6 +234,24 @@ def _feature_evidence(feature_audit: Mapping[str, Any]) -> dict[str, Any]:
     return {"coverage": coverage_by_feature, "groups": groups}
 
 
+def _feature_availability_evidence(contract: Mapping[str, Any]) -> dict[str, Any]:
+    coverage: dict[str, float] = {}
+    groups: dict[str, str] = {}
+    raw_coverage = contract.get("feature_coverage")
+    if isinstance(raw_coverage, Mapping):
+        for feature, row in raw_coverage.items():
+            if not isinstance(row, Mapping):
+                continue
+            try:
+                coverage[str(feature)] = float(row.get("minimum_fold_coverage"))
+            except (TypeError, ValueError):
+                continue
+            group = row.get("feature_group")
+            if isinstance(group, str):
+                groups[str(feature)] = group
+    return {"coverage": coverage, "groups": groups, "validation_status": contract.get("validation_status")}
+
+
 def _security_evidence(provenance: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "provenance": dict(provenance) if provenance else None,
@@ -183,6 +278,55 @@ def _selected_features(candidate: Mapping[str, Any]) -> list[str]:
     if not isinstance(selected, list) or not selected or not all(isinstance(value, str) for value in selected):
         raise ValueError("candidate manifest must contain a non-empty selected_features list")
     return list(selected)
+
+
+def _selected_available_features(contract: Mapping[str, Any]) -> list[str]:
+    selected = contract.get("allowed_features")
+    if not isinstance(selected, list) or not selected or not all(isinstance(value, str) for value in selected):
+        raise ValueError("feature availability contract must contain non-empty allowed_features")
+    if contract.get("validation_status") != "verified":
+        raise ValueError("feature availability contract is not verified")
+    return list(selected)
+
+
+def _load_contract_components(root: Path, contract: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    records = contract.get("components")
+    if not isinstance(records, Mapping):
+        raise ValueError("sample contract components are missing")
+    result: dict[str, dict[str, Any]] = {}
+    for name in ("label_contract", "security_state_provenance", "feature_availability_contract"):
+        record = records.get(name)
+        if not isinstance(record, Mapping):
+            raise ValueError(f"sample contract component is missing: {name}")
+        relative = Path(str(record.get("path", "")))
+        if not relative.name or relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"sample contract component path is invalid: {name}")
+        payload = _load_json(root / relative)
+        _verify_payload_hash(payload, name)
+        if payload.get("sha256") != record.get("sha256"):
+            raise ValueError(f"sample contract component hash mismatch: {name}")
+        result[name] = payload
+    return result
+
+
+def _verify_contract_source_hashes(contract: Mapping[str, Any], observed: Mapping[str, str]) -> None:
+    source_hashes = contract.get("source_hashes")
+    if not isinstance(source_hashes, Mapping):
+        raise ValueError("sample contract source_hashes are missing")
+    for name, actual in observed.items():
+        if str(source_hashes.get(name, "")).lower() != actual.lower():
+            raise ValueError(f"sample contract source hash mismatch: {name}")
+
+
+def _verify_payload_hash(payload: Mapping[str, Any], label: str) -> None:
+    expected = str(payload.get("sha256", "")).lower()
+    value = dict(payload)
+    value.pop("sha256", None)
+    observed = hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    ).hexdigest()
+    if expected != observed:
+        raise ValueError(f"{label} hash is invalid")
 
 
 def _verify_registry_file(registry: Mapping[str, Any], path: Path, relative: Path) -> None:

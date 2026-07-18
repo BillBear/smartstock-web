@@ -8,7 +8,11 @@ import sys
 import tempfile
 import unittest
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 from app.evaluation.full_market_ml.sample_certification_runner import run_certification
+from app.evaluation.full_market_ml.sample_contract_runner import derive_sample_contract
 
 
 def _sha256(path: Path) -> str:
@@ -18,6 +22,19 @@ def _sha256(path: Path) -> str:
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+
+def _with_sha256(payload: dict) -> dict:
+    result = dict(payload)
+    result["sha256"] = hashlib.sha256(
+        json.dumps(result, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return result
+
+
+def _write_parquet(path: Path, columns: dict[str, list[object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.table(columns), path)
 
 
 class SampleCertificationRunnerTests(unittest.TestCase):
@@ -137,6 +154,112 @@ class SampleCertificationRunnerTests(unittest.TestCase):
         )
         return config, secondary, security
 
+    def _composite_contract(self, root: Path) -> Path:
+        dataset = root / "datasets" / "fixture-dataset"
+        full_build = dataset / "artifacts" / "full-build"
+        components = root / "contracts"
+        label = _with_sha256(
+            {
+                "label_contract_version": "alpha_risk_10d_v1",
+                "primary_label": {"column": "alpha_relevance_grade_10d", "objective": "cross_sectional_alpha"},
+                "signal_time": "after_close",
+                "entry_time": "next_session_open",
+                "horizon_sessions": 10,
+                "path_label_eligible_ambiguous_count": 0,
+                "primary_daily": [{"trade_date": "2025-01-02", "eligible_count": 100, "alpha_top10_prevalence": 0.10}],
+            }
+        )
+        security = _with_sha256(
+            {
+                "covers": ["listing", "delisting", "st", "suspension", "industry"],
+                "validation_status": "verified",
+                "blocking_codes": [],
+            }
+        )
+        availability = _with_sha256(
+            {
+                "validation_status": "verified",
+                "disabled_feature_groups": ["moneyflow"],
+                "allowed_features": ["adjusted_return_20d"],
+                "feature_coverage": {
+                    "adjusted_return_20d": {"feature_group": "price_return", "minimum_fold_coverage": 1.0}
+                },
+            }
+        )
+        component_payloads = {
+            "label_contract": label,
+            "security_state_provenance": security,
+            "feature_availability_contract": availability,
+        }
+        for name, payload in component_payloads.items():
+            _write_json(components / f"{name}.json", payload)
+        source_hashes = {
+            "dataset_registry": _sha256(full_build / "dataset_registry_v3.json"),
+            "full_build_manifest": _sha256(dataset / "manifests" / "full-build.json"),
+            "quality_report": _sha256(full_build / "quality_report_v3.json"),
+            "split_plan": _sha256(full_build / "split_plan_v3.json"),
+        }
+        contract = _with_sha256(
+            {
+                "sample_contract_version": "full_market_sample_v1",
+                "dataset_id": "fixture-dataset",
+                "source_hashes": source_hashes,
+                "components": {
+                    name: {"path": f"{name}.json", "sha256": payload["sha256"]}
+                    for name, payload in component_payloads.items()
+                },
+            }
+        )
+        path = components / "sample_contract.json"
+        _write_json(path, contract)
+        return path
+
+    def _raw_assets(self, root: Path) -> tuple[Path, str]:
+        raw_root = root / "raw-source"
+        definitions = {
+            "stock_l": ("stock_basic", "L", "raw/endpoint=stock_basic/list_status=L/data.parquet", {"ts_code": ["000001.SZ"], "list_date": ["19910403"]}),
+            "stock_d": ("stock_basic", "D", "raw/endpoint=stock_basic/list_status=D/data.parquet", {"ts_code": ["000002.SZ"], "list_date": ["19910101"], "delist_date": ["20250101"]}),
+            "stock_p": ("stock_basic", "P", "raw/endpoint=stock_basic/list_status=P/data.parquet", {"ts_code": [], "list_date": []}),
+            "namechange": ("namechange", "static", "raw/endpoint=namechange/data.parquet", {"ts_code": ["000001.SZ"], "name": ["平安银行"], "start_date": ["20200101"], "end_date": [None]}),
+            "trade_cal": ("trade_cal", "20250102", "raw/endpoint=trade_cal/trade_date=20250102/data.parquet", {"cal_date": ["20250102"], "is_open": [1]}),
+            "suspend": ("suspend_d", "20250102", "raw/endpoint=suspend_d/trade_date=20250102/data.parquet", {"ts_code": ["000003.SZ"], "trade_date": ["20250102"]}),
+            "classify": ("index_classify", "SW2021-L1", "raw/endpoint=index_classify/data.parquet", {"index_code": ["801010.SI"], "industry_name": ["农林牧渔"]}),
+            "members": ("index_member_all", "SW2021-L1", "raw/endpoint=index_member_all/data.parquet", {"l1_code": ["801010.SI"], "ts_code": ["000001.SZ"], "in_date": ["20200101"], "out_date": [None]}),
+        }
+        partitions = []
+        for endpoint, key, relative, columns in definitions.values():
+            path = raw_root / relative
+            _write_parquet(path, columns)
+            partitions.append({"endpoint": endpoint, "key": key, "path": relative, "sha256": _sha256(path), "status": "adopted"})
+        manifest_path = raw_root / "manifests" / "full-build.json"
+        _write_json(manifest_path, {"industry_relative_enabled": True, "partitions": partitions})
+        return raw_root, _sha256(manifest_path)
+
+    def _label_run(self, root: Path, dataset_registry_sha256: str) -> Path:
+        artifact = root / "runs" / "label-run" / "artifacts" / "label-audit"
+        label_path = artifact / "labels" / "shard=00" / "data.parquet"
+        _write_parquet(label_path, {"trade_date": ["2025-01-02"], "symbol": ["000001"]})
+        _write_json(
+            artifact / "label_manifest.json",
+            {
+                "contract_sha256": "a" * 64,
+                "dataset_id": "fixture-dataset",
+                "dataset_registry_sha256": dataset_registry_sha256,
+                "files": [{"path": "shard=00/data.parquet", "sha256": _sha256(label_path), "row_count": 1}],
+            },
+        )
+        _write_json(
+            artifact / "label_objective_report.json",
+            {
+                "passed": True,
+                "dataset_id": "fixture-dataset",
+                "dataset_registry_sha256": dataset_registry_sha256,
+                "contract_sha256": "a" * 64,
+                "daily": [{"trade_date": "2025-01-02", "eligible_count": 100, "alpha_top10_prevalence": 0.10, "grade_3_or_higher_rate": 0.10}],
+            },
+        )
+        return artifact.parent.parent
+
     def test_reads_verified_artifacts_and_writes_immutable_certificate(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -154,6 +277,44 @@ class SampleCertificationRunnerTests(unittest.TestCase):
             certificate_path = Path(result["certificate_path"])
             self.assertTrue(certificate_path.is_file())
             self.assertEqual(json.loads(certificate_path.read_text(encoding="utf-8"))["dataset_id"], "fixture-dataset")
+
+    def test_formal_mode_certifies_composite_contract_without_legacy_candidate_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, _, _ = self._build_assets(root)
+            result = run_certification(
+                config_path=config,
+                asset_root=root,
+                sample_contract_path=self._composite_contract(root),
+                output_root=root / "certifications",
+            )
+
+            self.assertEqual(result["certificate"]["status"], "certified_research_sample")
+            self.assertEqual(result["certificate"]["certification_mode"], "composite_contract")
+
+    def test_derivation_writes_hash_bound_contract_from_verified_assets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._build_assets(root)
+            raw_root, raw_manifest_sha256 = self._raw_assets(root)
+            registry_path = root / "datasets" / "fixture-dataset" / "artifacts" / "full-build" / "dataset_registry_v3.json"
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            registry["payload"] = {"raw_manifest_sha256": raw_manifest_sha256}
+            _write_json(registry_path, registry)
+            label_run_root = self._label_run(root, _sha256(registry_path))
+
+            result = derive_sample_contract(
+                asset_root=root,
+                dataset_id="fixture-dataset",
+                label_run_root=label_run_root,
+                output_root=root / "derivations" / "fixture-contract",
+                raw_root=raw_root,
+            )
+
+            contract = json.loads(Path(result["sample_contract_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(contract["sample_contract_version"], "full_market_sample_v1")
+            self.assertEqual(contract["dataset_id"], "fixture-dataset")
+            self.assertTrue(Path(result["security_state_provenance_path"]).is_file())
 
     def test_preserves_blocked_result_when_selected_schema_uses_disabled_group(self):
         with tempfile.TemporaryDirectory() as temporary:

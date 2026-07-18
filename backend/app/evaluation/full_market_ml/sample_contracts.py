@@ -29,6 +29,10 @@ def build_label_contract(
         label_audit.get("path_label_eligible_ambiguous_count", 0),
         "path_label_eligible_ambiguous_count",
     )
+    observed_path_ambiguity_count = _nonnegative_int(
+        label_audit.get("observed_path_ambiguity_count", path_ambiguity_count),
+        "observed_path_ambiguity_count",
+    )
     payload: dict[str, Any] = {
         "label_contract_version": "alpha_risk_10d_v1",
         "primary_label": {
@@ -47,6 +51,7 @@ def build_label_contract(
         "horizon_sessions": 10,
         "primary_daily": primary_daily,
         "primary_path_ambiguity_count": path_ambiguity_count,
+        "observed_path_ambiguity_count": observed_path_ambiguity_count,
         "path_label_eligible_ambiguous_count": path_eligible_ambiguity_count,
         "source_hashes": {
             "research_contract": contract_sha256.lower(),
@@ -116,6 +121,47 @@ def build_feature_availability_contract(
         "validation_status": "verified",
     }
     return _with_sha256(payload)
+
+
+def build_sample_contract(
+    dataset_id: str,
+    source_hashes: Mapping[str, Any],
+    label_contract: Mapping[str, Any],
+    security_state_provenance: Mapping[str, Any],
+    feature_availability_contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind immutable components into one research-only sample admission input."""
+    normalized_dataset_id = str(dataset_id).strip()
+    if not normalized_dataset_id:
+        raise ValueError("sample contract dataset_id is required")
+    normalized_hashes: dict[str, str] = {}
+    for name in ("dataset_registry", "full_build_manifest", "quality_report", "split_plan"):
+        value = source_hashes.get(name)
+        _require_sha256(f"sample contract source {name}", value)
+        normalized_hashes[name] = str(value).lower()
+    for name, value in source_hashes.items():
+        if name not in normalized_hashes:
+            _require_sha256(f"sample contract source {name}", value)
+            normalized_hashes[str(name)] = str(value).lower()
+    component_payloads = {
+        "label_contract": label_contract,
+        "security_state_provenance": security_state_provenance,
+        "feature_availability_contract": feature_availability_contract,
+    }
+    components: dict[str, dict[str, str]] = {}
+    for name, payload in component_payloads.items():
+        component_hash = payload.get("sha256") if isinstance(payload, Mapping) else None
+        _require_sha256(f"sample contract component {name}", component_hash)
+        components[name] = {"path": f"{name}.json", "sha256": str(component_hash).lower()}
+    return _with_sha256(
+        {
+            "sample_contract_version": "full_market_sample_v1",
+            "dataset_id": normalized_dataset_id,
+            "source_hashes": dict(sorted(normalized_hashes.items())),
+            "components": components,
+            "production_integration_allowed": False,
+        }
+    )
 
 
 def _normalise_primary_daily(value: object) -> list[dict[str, Any]]:

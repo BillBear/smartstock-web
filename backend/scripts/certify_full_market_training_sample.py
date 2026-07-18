@@ -21,6 +21,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-root", type=Path, default=None)
     parser.add_argument("--secondary-label-audit", type=Path, default=None)
     parser.add_argument("--security-provenance", type=Path, default=None)
+    parser.add_argument("--sample-contract", type=Path, default=None)
     return parser.parse_args(argv)
 
 
@@ -34,6 +35,7 @@ def main(argv: list[str] | None = None) -> int:
             output_root=output_root,
             secondary_label_audit_path=args.secondary_label_audit,
             security_provenance_path=args.security_provenance,
+            sample_contract_path=args.sample_contract,
         )
     except (FileNotFoundError, ValueError, json.JSONDecodeError) as error:
         print(f"certification_error: {error}", file=sys.stderr)
