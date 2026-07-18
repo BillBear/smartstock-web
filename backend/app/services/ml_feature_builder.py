@@ -25,7 +25,15 @@ class FeatureSpec:
 
 
 class MLFeatureBuilder:
-    """Builds auditable model features and labels from daily OHLCV data."""
+    """Builds the legacy 22-feature model input from daily OHLCV data.
+
+    This remains available only for historical model artifacts.  It includes
+    news and a synthetic money-flow proxy, so it is explicitly incompatible
+    with the full-market research feature contract.  New full-market models
+    must use ``OnlineFeatureProvider`` after parity certification instead.
+    """
+
+    FULL_MARKET_CONTRACT_STATUS = "legacy_unregistered_not_eligible_for_full_market_model"
 
     FEATURE_SPECS: List[FeatureSpec] = [
         FeatureSpec("return_5d_pct", "5日涨跌幅", "trend_momentum", "higher_better", "短期动量强度。"),
@@ -53,6 +61,11 @@ class MLFeatureBuilder:
     ]
     FEATURE_NAMES = [spec.name for spec in FEATURE_SPECS]
     FEATURE_MAP = {spec.name: spec for spec in FEATURE_SPECS}
+
+    @classmethod
+    def full_market_contract_status(cls) -> str:
+        """Expose the safety boundary without changing legacy model behavior."""
+        return cls.FULL_MARKET_CONTRACT_STATUS
 
     @staticmethod
     def _safe_div(num: pd.Series, den: pd.Series, default: float = 0.0) -> pd.Series:

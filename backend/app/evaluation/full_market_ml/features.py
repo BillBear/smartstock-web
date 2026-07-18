@@ -282,9 +282,17 @@ def build_features_for_date(
 ) -> pd.DataFrame:
     """Convenience test and batch helper returning the leak-free model matrix for one date."""
     requested_schema = _model_schema(feature_schema)
-    time_series = build_time_series_features(config, panel_shard)
+    as_of_date = _date_text(trade_date)
+    if not as_of_date:
+        raise ValueError("trade_date must be a valid ISO-8601 date")
+    # Do not merely ignore future columns: discard future rows before any
+    # rolling, cross-sectional, or context calculation is allowed to run.
+    available_rows = panel_shard.loc[
+        pd.to_datetime(panel_shard["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d").le(as_of_date)
+    ].copy()
+    time_series = build_time_series_features(config, available_rows)
     result = build_cross_section_features(config, {"full_market": time_series})["full_market"]
-    result = result.loc[result["trade_date"].eq(_date_text(trade_date))].copy()
+    result = result.loc[result["trade_date"].eq(as_of_date)].copy()
     for name in requested_schema:
         if name not in result:
             result[name] = np.nan

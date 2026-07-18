@@ -16,6 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .feature_evidence import evaluate_feature_evidence
+from .feature_contract import FeatureContract, FeatureContractError
 from .interaction_features import build_interaction_features
 from .market_industry_features import build_industry_state_features, build_market_state_features
 from .research_contract import RankingResearchContract
@@ -212,8 +213,19 @@ def run_feature_evidence_stage(
     }
 
 
-def build_registered_feature_matrix(rows: pd.DataFrame, feature_names: tuple[str, ...]) -> pd.DataFrame:
+def build_registered_feature_matrix(
+    rows: pd.DataFrame,
+    feature_names: tuple[str, ...],
+    *,
+    contract: FeatureContract | None = None,
+) -> pd.DataFrame:
     """Derive only signal-time registered features; unavailable sources stay null."""
+    if contract is not None:
+        unregistered = sorted(set(feature_names) - set(contract.feature_names))
+        if unregistered:
+            raise FeatureContractError(
+                "feature stage requested unregistered contract features: " + ", ".join(unregistered)
+            )
     result = build_market_state_features(rows)
     result = build_industry_state_features(result)
     result = build_interaction_features(result)
