@@ -497,7 +497,8 @@ def _verify_last_date_parity(
         as_of_date=as_of_date,
         source_as_of_dates=source_as_of_dates,
         source_qualities=source_qualities,
-    ).sort_values("symbol").reset_index(drop=True)
+    )
+    online = online.loc[online["symbol"].astype(str).isin(parity_symbol_set)].sort_values("symbol").reset_index(drop=True)
     offline = pq.read_table(matrix_root / f"trade_date={as_of_date}" / "data.parquet", columns=["trade_date", "symbol", *contract.feature_names]).to_pandas()
     offline = offline.loc[offline["symbol"].astype(str).isin(parity_symbol_set)].copy()
     offline = offline.sort_values("symbol").reset_index(drop=True)
