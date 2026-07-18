@@ -47,7 +47,7 @@ No downstream task may bypass a failed gate. A failed gate is a valid terminal r
 | Milestone | Tasks | Expected duration | Exit decision |
 | --- | --- | ---: | --- |
 | M1 Safety and convergence | 1-4 | 3-5 working days | Production is isolated from weak ML; one research line and provenance contract exist |
-| M2 Data foundation | 5-7 | 5-10 working days plus TuShare collection time | A new four-year-or-longer certified dataset and offline/online feature contract exist |
+| M2 Data foundation | 5-7 | 3-6 working days plus TuShare collection time | A new two-year-or-longer certified dataset and offline/online feature contract exist |
 | M3 Signal discovery | 8 | 3-6 working days | At least one block passes nested OOF, or the feature program closes negatively |
 | M4 Candidate training | 9-10 | 1-3 working days, with one overnight full run | One frozen development candidate or one immutable failed-gate closure |
 | M5 Product shadow mode | 11 | 2-4 working days | Versioned model is observable with zero decision influence |
@@ -368,7 +368,7 @@ git diff --check
 - Modify: `backend/scripts/run_full_market_ml_pipeline.py`
 - Modify: `backend/tests/test_full_market_ml_tushare_history_probe.py`
 - Modify: `backend/tests/test_full_market_ml_collector.py`
-- Create: `backend/config/ml_full_market_2020_2026.toml`
+- Create: `backend/config/ml_full_market_2024_2026.toml`
 - Create: `docs/strategy-evidence/data-source/tushare-capability-matrix-2026-07-18.md`
 
 **Required endpoints:** `stock_basic`, `namechange`, `trade_cal`, `daily`, `daily_basic`, `adj_factor`, `stk_limit`, `suspend_d`, `index_daily`, `index_dailybasic`, `index_classify`, `index_member_all`.
@@ -381,7 +381,7 @@ git diff --check
 
 - [ ] Probe every endpoint with the current token and classify it as `valid_with_rows`, `valid_but_empty`, `permission_denied`, `invalid_endpoint`, or `request_failed`.
 - [ ] Record permission state, row count, earliest returned date, latest returned date, required publication timestamp, and daily/symbol coverage separately.
-- [ ] Collect required endpoint history from `20200102` through `20260710` into immutable date partitions with SHA256 and resume support.
+- [ ] Collect required endpoint history from `20240603` through `20260717` into immutable date partitions with SHA256 and resume support. This is the minimum two-year research window; the future shadow holdout must still cover at least two market-state terciles before any promotion review.
 - [ ] Collect experimental endpoints only after the probe proves access and point-in-time fields. A failed experimental endpoint must not block the required core panel.
 - [ ] Build a new dataset ID from raw manifest hash, code commit, schema hash, label hash, and split hash; do not overwrite `fmv3_ea0797d57ed62a916b3a`.
 - [ ] Report historical expected-universe coverage rather than requiring 5,000 stocks in years when fewer were listed.
@@ -391,17 +391,17 @@ git diff --check
 cd backend
 source /Users/xiong/Documents/SmartStock/.venvs/ml-py313/bin/activate
 python scripts/probe_full_market_tushare_history.py \
-  --start-date 20200102 \
-  --end-date 20260710 \
+  --start-date 20240603 \
+  --end-date 20260717 \
   --output /Users/xiong/Documents/SmartStock/ml-assets/probes/tushare-capability-20260718.json
 python scripts/run_full_market_ml_pipeline.py \
-  --config config/ml_full_market_2020_2026.toml \
+  --config config/ml_full_market_2024_2026.toml \
   --stage full-build \
   --run-id full-market-history-20260718-v1 \
   --run-root /Users/xiong/Documents/SmartStock/ml-assets/runs/full-market-history-20260718-v1 \
   --resume
 python scripts/run_full_market_ml_pipeline.py \
-  --config config/ml_full_market_2020_2026.toml \
+  --config config/ml_full_market_2024_2026.toml \
   --run-id full-market-history-20260718-v1 \
   --run-root /Users/xiong/Documents/SmartStock/ml-assets/runs/full-market-history-20260718-v1 \
   --register-assets
@@ -415,7 +415,7 @@ git diff --check
 **Acceptance:**
 - Required endpoints have complete manifests and no unreported missing partitions.
 - Each accepted training date has at least 95% of the historically active universe.
-- At least four years of labelable sessions are available; otherwise the program stops with a data-coverage closure report.
+- At least two years of labelable sessions are available; otherwise the program stops with a data-coverage closure report.
 - Experimental data is not promoted merely because the API returned rows.
 
 **Do not:** design features from TuShare documentation before live permission/coverage proof, or substitute candidate snapshots for missing history.
