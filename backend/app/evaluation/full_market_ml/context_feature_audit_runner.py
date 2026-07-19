@@ -22,6 +22,9 @@ from .splits import SplitPlan, WalkForwardFold
 from .v3_feature_evidence import FeatureEvidenceError, _development_only_split, _load_eligible_feature_asset, _read_json
 
 
+MAXIMUM_PSI_FOR_LATER_OOF = 0.25
+
+
 def run_context_feature_audit(
     *,
     source_dataset_root: str | Path,
@@ -189,6 +192,8 @@ def _feature_statuses(audit: FeatureAuditResult) -> list[dict[str, Any]]:
         evidence = audit.ic.loc[
             audit.ic["feature"].eq(feature) & audit.ic["target"].eq("net_return_after_cost_10d")
         ].copy()
+        median_bucket_spread = _median_bucket_spread(audit, feature)
+        maximum_psi = _maximum_psi(audit, feature)
         if evidence.empty:
             status = "insufficient_evidence"
             selection = "not_audited_constant_or_missing"
@@ -204,6 +209,12 @@ def _feature_statuses(audit: FeatureAuditResult) -> list[dict[str, Any]]:
             if date_count == 0:
                 status = "insufficient_evidence"
                 reason = "constant_within_daily_cross_section"
+            elif maximum_psi is not None and maximum_psi > MAXIMUM_PSI_FOR_LATER_OOF:
+                status = "insufficient_evidence"
+                reason = "material_distribution_drift"
+            elif not _bucket_spread_agrees_with_direction(median_bucket_spread, str(evidence["direction"].iloc[0])):
+                status = "insufficient_evidence"
+                reason = "bucket_spread_conflicts_with_ic_direction"
             elif selection == "core_candidate" and minimum_coverage >= 0.95 and direction_consistency is not None and direction_consistency >= 0.8:
                 status = "ready_for_later_oof"
                 reason = "stable_development_univariate_evidence"
@@ -222,6 +233,8 @@ def _feature_statuses(audit: FeatureAuditResult) -> list[dict[str, Any]]:
                 "minimum_fold_coverage": float(coverage.min()) if not coverage.empty else 0.0,
                 "median_ic": median_ic,
                 "direction_consistency": direction_consistency,
+                "median_top_bottom_spread": median_bucket_spread,
+                "maximum_psi": maximum_psi,
             }
         )
     return rows
@@ -230,6 +243,32 @@ def _feature_statuses(audit: FeatureAuditResult) -> list[dict[str, Any]]:
 def _finite_median(values: pd.Series) -> float | None:
     numeric = pd.to_numeric(values, errors="coerce").dropna()
     return float(numeric.median()) if not numeric.empty else None
+
+
+def _median_bucket_spread(audit: FeatureAuditResult, feature: str) -> float | None:
+    required = {"feature", "target", "top_bottom_spread"}
+    if not required.issubset(audit.bucket_returns.columns):
+        return None
+    values = audit.bucket_returns.loc[
+        audit.bucket_returns["feature"].eq(feature)
+        & audit.bucket_returns["target"].eq("net_return_after_cost_10d"),
+        "top_bottom_spread",
+    ]
+    return _finite_median(values)
+
+
+def _maximum_psi(audit: FeatureAuditResult, feature: str) -> float | None:
+    required = {"feature", "psi"}
+    if not required.issubset(audit.drift.columns):
+        return None
+    values = pd.to_numeric(audit.drift.loc[audit.drift["feature"].eq(feature), "psi"], errors="coerce").dropna()
+    return float(values.max()) if not values.empty else None
+
+
+def _bucket_spread_agrees_with_direction(spread: float | None, direction: str) -> bool:
+    if spread is None:
+        return False
+    return (direction == "positive" and spread > 0.0) or (direction == "negative" and spread < 0.0)
 
 
 def _prepare_output(destination: Path) -> None:

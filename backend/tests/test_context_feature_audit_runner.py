@@ -157,6 +157,54 @@ class ContextFeatureAuditRunnerTests(unittest.TestCase):
         self.assertEqual(statuses["market_positive_breadth_1d"]["status"], "insufficient_evidence")
         self.assertEqual(statuses["market_positive_breadth_1d"]["reason"], "constant_within_daily_cross_section")
 
+    def test_requires_drift_and_bucket_direction_agreement_for_later_oof(self):
+        from app.evaluation.full_market_ml.context_feature_audit_runner import _feature_statuses
+
+        audit = FeatureAuditResult(
+            coverage=pd.DataFrame(
+                [
+                    {"fold": 1, "feature": "industry_above_sma20_rate", "coverage": 0.99},
+                    {"fold": 1, "feature": "stock_excess_vs_industry_20d", "coverage": 0.99},
+                ]
+            ),
+            ic=pd.DataFrame(
+                [
+                    {
+                        "fold": 1,
+                        "feature": feature,
+                        "target": "net_return_after_cost_10d",
+                        "date_count": 5,
+                        "median_ic": -0.02,
+                        "direction": "negative",
+                        "direction_consistency": 1.0,
+                        "selection": "core_candidate",
+                    }
+                    for feature in ("industry_above_sma20_rate", "stock_excess_vs_industry_20d")
+                ]
+            ),
+            bucket_returns=pd.DataFrame(
+                [
+                    {"feature": "industry_above_sma20_rate", "target": "net_return_after_cost_10d", "top_bottom_spread": -0.01},
+                    {"feature": "stock_excess_vs_industry_20d", "target": "net_return_after_cost_10d", "top_bottom_spread": 0.01},
+                ]
+            ),
+            correlation=pd.DataFrame(),
+            drift=pd.DataFrame(
+                [
+                    {"feature": "industry_above_sma20_rate", "psi": 0.30},
+                    {"feature": "stock_excess_vs_industry_20d", "psi": 0.01},
+                ]
+            ),
+            group_eligibility=pd.DataFrame(),
+        )
+
+        statuses = {row["feature"]: row for row in _feature_statuses(audit)}
+
+        self.assertEqual(statuses["industry_above_sma20_rate"]["status"], "insufficient_evidence")
+        self.assertEqual(statuses["industry_above_sma20_rate"]["reason"], "material_distribution_drift")
+        self.assertEqual(statuses["stock_excess_vs_industry_20d"]["status"], "insufficient_evidence")
+        self.assertEqual(statuses["stock_excess_vs_industry_20d"]["reason"], "bucket_spread_conflicts_with_ic_direction")
+
 
 if __name__ == "__main__":
     unittest.main()
