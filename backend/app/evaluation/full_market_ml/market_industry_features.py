@@ -51,23 +51,24 @@ def build_market_state_features(rows: pd.DataFrame) -> pd.DataFrame:
             "at_down_limit",
         },
     )
-    grouped = result.groupby("trade_date", sort=False)
-    result["market_positive_breadth_1d"] = grouped["adjusted_return_1d"].transform(lambda s: s.gt(0).mean())
-    result["market_above_sma20_rate"] = grouped["price_to_sma_20d"].transform(lambda s: s.gt(0).mean())
-    result["market_limit_up_rate"] = grouped["at_up_limit"].transform(lambda s: s.eq(True).mean())
-    result["market_limit_down_rate"] = grouped["at_down_limit"].transform(lambda s: s.eq(True).mean())
+    source = _aggregation_source(result)
+    grouped = source.groupby("trade_date", sort=False)
+    result["market_positive_breadth_1d"] = result["trade_date"].map(grouped["adjusted_return_1d"].apply(lambda s: s.gt(0).mean()))
+    result["market_above_sma20_rate"] = result["trade_date"].map(grouped["price_to_sma_20d"].apply(lambda s: s.gt(0).mean()))
+    result["market_limit_up_rate"] = result["trade_date"].map(grouped["at_up_limit"].apply(lambda s: s.eq(True).mean()))
+    result["market_limit_down_rate"] = result["trade_date"].map(grouped["at_down_limit"].apply(lambda s: s.eq(True).mean()))
     for window in (1, 5, 20):
         source = f"adjusted_return_{window}d"
-        result[f"market_cross_section_return_median_{window}d"] = grouped[source].transform("median")
+        result[f"market_cross_section_return_median_{window}d"] = result["trade_date"].map(grouped[source].median())
     for window in (5, 20):
         source = f"adjusted_return_{window}d"
-        result[f"market_return_dispersion_{window}d"] = grouped[source].transform("std")
-        result[f"small_minus_large_return_{window}d"] = grouped.apply(
+        result[f"market_return_dispersion_{window}d"] = result["trade_date"].map(grouped[source].std())
+        result[f"small_minus_large_return_{window}d"] = result["trade_date"].map(grouped.apply(
             lambda frame: _small_minus_large(frame, source), include_groups=False
-        ).reindex(result["trade_date"]).to_numpy()
-        result[f"industry_return_concentration_{window}d"] = grouped.apply(
+        ))
+        result[f"industry_return_concentration_{window}d"] = result["trade_date"].map(grouped.apply(
             lambda frame: _industry_concentration(frame, source), include_groups=False
-        ).reindex(result["trade_date"]).to_numpy()
+        ))
     return _float32(result, MARKET_FEATURE_NAMES)
 
 
@@ -92,7 +93,9 @@ def build_industry_state_features(rows: pd.DataFrame) -> pd.DataFrame:
     # industry statistics so Pandas cannot suffix the registered feature names.
     result = result.drop(columns=[name for name in INDUSTRY_FEATURE_NAMES if name in result], errors="ignore")
     keys = ["trade_date", "industry_l1"]
-    valid = result["industry_l1"].notna()
+    valid = result["industry_l1"].notna() & result["industry_l1"].astype("string").str.strip().ne("")
+    if "valid_ohlc" in result:
+        valid &= result["valid_ohlc"].eq(True)
     source = result.loc[valid].copy()
     grouped = source.groupby(keys, sort=False)
     stats = grouped.agg(
@@ -141,6 +144,12 @@ def _normalized(rows: pd.DataFrame) -> pd.DataFrame:
     _require(result, {"trade_date", "symbol"})
     result["trade_date"] = pd.to_datetime(result["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d")
     return result
+
+
+def _aggregation_source(rows: pd.DataFrame) -> pd.DataFrame:
+    if "valid_ohlc" not in rows:
+        return rows
+    return rows.loc[rows["valid_ohlc"].eq(True)].copy()
 
 
 def _require(rows: pd.DataFrame, required: set[str]) -> None:

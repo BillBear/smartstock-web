@@ -76,6 +76,34 @@ class FullMarketMLMarketIndustryFeatureTests(unittest.TestCase):
 
         assert_frame_equal(left, right)
 
+    def test_invalid_ohlc_row_does_not_change_market_cross_sectional_statistics(self):
+        rows = state_fixture()
+        rows["valid_ohlc"] = True
+        invalid = rows[rows["trade_date"].eq("2025-01-02") & rows["symbol"].eq("000004")].index[0]
+        rows.loc[invalid, ["adjusted_return_1d", "adjusted_return_5d", "adjusted_return_20d"]] = 99.0
+        rows.loc[invalid, "at_up_limit"] = True
+        rows.loc[invalid, "valid_ohlc"] = False
+
+        output = build_market_state_features(rows)
+        day = output[output["trade_date"].eq("2025-01-02")]
+
+        self.assertAlmostEqual(day["market_positive_breadth_1d"].iloc[0], 1 / 3)
+        self.assertAlmostEqual(day["market_cross_section_return_median_5d"].iloc[0], 0.02)
+        self.assertAlmostEqual(day["market_limit_up_rate"].iloc[0], 0.0)
+
+    def test_invalid_ohlc_row_does_not_change_industry_statistics(self):
+        rows = state_fixture()
+        rows["valid_ohlc"] = True
+        invalid = rows[rows["trade_date"].eq("2025-01-02") & rows["symbol"].eq("000004")].index[0]
+        rows.loc[invalid, ["adjusted_return_1d", "adjusted_return_5d", "adjusted_return_20d"]] = 99.0
+        rows.loc[invalid, "valid_ohlc"] = False
+
+        output = build_industry_state_features(rows)
+        tech = output[output["trade_date"].eq("2025-01-02") & output["industry_l1"].eq("tech")]
+
+        self.assertAlmostEqual(tech["industry_signal_return_median_5d"].iloc[0], 0.04)
+        self.assertAlmostEqual(tech["stock_excess_vs_industry_5d"].iloc[0], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
