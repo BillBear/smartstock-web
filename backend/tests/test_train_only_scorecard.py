@@ -71,6 +71,25 @@ class TrainOnlyScorecardTests(unittest.TestCase):
         self.assertEqual({}, result["directions"])
         self.assertEqual(2, result["direction_evidence"]["adjusted_return_5d"]["daily_ic_count"])
 
+    def test_can_learn_a_pre_registered_alpha_target_direction(self):
+        fit = pd.concat(
+            [
+                _rows("2025-01-02", returns=[0.01, 0.02, 0.03, 0.04]),
+                _rows("2025-01-03", returns=[0.01, 0.02, 0.03, 0.04]),
+            ],
+            ignore_index=True,
+        )
+        fit["alpha_target_10d"] = [0.04, 0.03, 0.02, 0.01] * 2
+
+        result = fit_scorecard_directions(
+            fit,
+            feature_schema=("adjusted_return_5d",),
+            target_column="alpha_target_10d",
+        )
+
+        self.assertEqual({"adjusted_return_5d": -1}, result["directions"])
+        self.assertEqual("alpha_target_10d", result["target_column"])
+
 
 def _rows(trade_date: str, *, returns: list[float]) -> pd.DataFrame:
     return pd.DataFrame(

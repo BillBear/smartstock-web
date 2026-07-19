@@ -40,6 +40,21 @@ class TrainOnlyScorecardOofTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             run_train_only_scorecard_oof_rows(pd.concat([rows, extra], ignore_index=True), _split(), bootstrap_iterations=2)
 
+    def test_can_fit_directions_on_alpha_and_keep_old_strong_for_evaluation(self):
+        rows = _rows()
+        rows["alpha_target_10d"] = -rows["adjusted_return_5d"]
+
+        result = run_train_only_scorecard_oof_rows(
+            rows,
+            _split(),
+            bootstrap_iterations=2,
+            direction_target_column="alpha_target_10d",
+        )
+
+        self.assertEqual("alpha_target_10d", result["input_summary"]["direction_target_column"])
+        self.assertEqual("alpha_target_10d", result["fold_directions"][0]["direction_target_column"])
+        self.assertIn("label_strong_path_10d", result["predictions"])
+
 
 def _split() -> SplitPlan:
     training_symbols = ("000001", "000002", "000003")

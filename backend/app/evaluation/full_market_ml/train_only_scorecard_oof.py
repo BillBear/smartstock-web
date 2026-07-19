@@ -20,7 +20,7 @@ from .evaluator import (
     validate_identical_comparison_rows,
 )
 from .splits import FinalHoldoutAccessError, SplitPlan
-from .train_only_scorecard import fit_scorecard_directions, score_with_directions
+from .train_only_scorecard import PRE_REGISTERED_DIRECTION_TARGETS, fit_scorecard_directions, score_with_directions
 from .v3_feature_evidence import _development_only_split, _load_eligible_feature_asset, _read_json
 
 
@@ -84,6 +84,7 @@ def run_train_only_scorecard_oof(
     output_root: str | Path,
     code_commit: str,
     bootstrap_iterations: int = 1000,
+    direction_target_column: str = "net_return_after_cost_10d",
 ) -> dict[str, Any]:
     """Run fixed, fold-local A/C OOF diagnostics without touching final dates."""
     source_root = Path(source_dataset_root).expanduser().resolve()
@@ -97,7 +98,7 @@ def run_train_only_scorecard_oof(
     _prepare_output(destination)
     _write_json(destination / "progress.json", _progress("running", "load-development-rows"))
     try:
-        rows = _load_development_rows(matrix_root, split_plan)
+        rows = _load_development_rows(matrix_root, split_plan, direction_target_column=direction_target_column)
         _write_json(
             destination / "progress.json",
             _progress("running", "run-folds", row_count=len(rows), total_folds=len(split_plan.walk_forward)),
@@ -106,13 +107,20 @@ def run_train_only_scorecard_oof(
             rows,
             split_plan,
             bootstrap_iterations=bootstrap_iterations,
+            direction_target_column=direction_target_column,
             on_progress=lambda payload: _write_json(
                 destination / "progress.json",
                 _progress("running", "run-folds", row_count=len(rows), total_folds=len(split_plan.walk_forward), **payload),
             ),
         )
         _write_outputs(destination, result)
-        report = _report(manifest, split_payload, result, code_commit=code_commit)
+        report = _report(
+            manifest,
+            split_payload,
+            result,
+            code_commit=code_commit,
+            direction_target_column=direction_target_column,
+        )
         _write_json(destination / "report.json", report)
         _write_json(destination / "progress.json", _progress("complete", "complete", row_count=len(rows), total_folds=len(split_plan.walk_forward)))
         return report
@@ -134,6 +142,7 @@ def run_train_only_scorecard_oof_rows(
     split_plan: SplitPlan,
     *,
     bootstrap_iterations: int = 1000,
+    direction_target_column: str = "net_return_after_cost_10d",
     on_progress: Any | None = None,
 ) -> dict[str, Any]:
     """Run exactly the registered five expanding folds on development rows.
@@ -142,7 +151,8 @@ def run_train_only_scorecard_oof_rows(
     function evaluates and bootstraps every fold separately and never pools
     duplicate dates into a single headline metric.
     """
-    data = _normalize_rows(rows, split_plan)
+    direction_target_column = _validate_direction_target(direction_target_column)
+    data = _normalize_rows(rows, split_plan, direction_target_column=direction_target_column)
     all_symbols = set(split_plan.A_dev_train_symbols) | set(split_plan.C_dev_unseen_symbols)
     data = data.loc[data["symbol"].isin(all_symbols) & data["eligible_for_training_10d"].eq(True)].copy()
     data = data.loc[pd.to_numeric(data["adjusted_return_60d"], errors="coerce").notna()].copy()
@@ -162,7 +172,11 @@ def run_train_only_scorecard_oof_rows(
         validation = data.loc[data["trade_date"].isin(fold.validation_dates)].copy()
         if fit.empty or validation.empty:
             raise ScorecardOofError(f"fold {fold.fold} has no fit or validation rows after fixed eligibility")
-        fitted = fit_scorecard_directions(fit, feature_schema=_ALL_FEATURES)
+        fitted = fit_scorecard_directions(
+            fit,
+            feature_schema=_ALL_FEATURES,
+            target_column=direction_target_column,
+        )
         trial = validation.copy()
         trial["fold"] = int(fold.fold)
         trial["score__baseline_momentum_60d"] = pd.to_numeric(trial["adjusted_return_60d"], errors="coerce")
@@ -190,6 +204,7 @@ def run_train_only_scorecard_oof_rows(
                 "fit_end": fold.train_end,
                 "validation_start": fold.validation_start,
                 "validation_end": fold.validation_end,
+                "direction_target_column": direction_target_column,
                 "directions": fitted["directions"],
                 "direction_evidence": fitted["direction_evidence"],
                 "active_comparators": sorted(active_comparators),
@@ -219,18 +234,19 @@ def run_train_only_scorecard_oof_rows(
             "row_count": int(len(data)),
             "date_count": int(data["trade_date"].nunique()),
             "symbol_count": int(data["symbol"].nunique()),
+            "direction_target_column": direction_target_column,
             "outer_test_aggregation_policy": "fold_local_metrics_only",
             "outer_test_windows_overlap": True,
         },
     }
 
 
-def _normalize_rows(rows: pd.DataFrame, split_plan: SplitPlan) -> pd.DataFrame:
+def _normalize_rows(rows: pd.DataFrame, split_plan: SplitPlan, *, direction_target_column: str) -> pd.DataFrame:
     if not isinstance(split_plan, SplitPlan):
         raise TypeError("split_plan must be a SplitPlan")
     if not isinstance(rows, pd.DataFrame):
         raise TypeError("rows must be a pandas DataFrame")
-    required = set(_REQUIRED_COLUMNS) | set(_ALL_FEATURES)
+    required = set(_REQUIRED_COLUMNS) | set(_ALL_FEATURES) | {direction_target_column}
     missing = sorted(required - set(rows.columns))
     if missing:
         raise ScorecardOofError("scorecard rows missing columns: " + ", ".join(missing))
@@ -246,8 +262,14 @@ def _normalize_rows(rows: pd.DataFrame, split_plan: SplitPlan) -> pd.DataFrame:
     return result.sort_values(["trade_date", "symbol"], kind="stable").reset_index(drop=True)
 
 
-def _load_development_rows(matrix_root: Path, split_plan: SplitPlan) -> pd.DataFrame:
-    columns = [*_REQUIRED_COLUMNS, *_ALL_FEATURES]
+def _load_development_rows(
+    matrix_root: Path,
+    split_plan: SplitPlan,
+    *,
+    direction_target_column: str,
+) -> pd.DataFrame:
+    direction_target_column = _validate_direction_target(direction_target_column)
+    columns = [*_REQUIRED_COLUMNS, *_ALL_FEATURES, direction_target_column]
     frames = []
     for trade_date in split_plan.development_dates:
         path = matrix_root / f"trade_date={trade_date}" / "data.parquet"
@@ -376,7 +398,14 @@ def _write_outputs(destination: Path, result: Mapping[str, Any]) -> None:
     _write_json(destination / "input_summary.json", result["input_summary"])
 
 
-def _report(manifest: Mapping[str, Any], split_payload: Mapping[str, Any], result: Mapping[str, Any], *, code_commit: str) -> dict[str, Any]:
+def _report(
+    manifest: Mapping[str, Any],
+    split_payload: Mapping[str, Any],
+    result: Mapping[str, Any],
+    *,
+    code_commit: str,
+    direction_target_column: str,
+) -> dict[str, Any]:
     return {
         "status": "complete",
         "research_only": True,
@@ -389,6 +418,7 @@ def _report(manifest: Mapping[str, Any], split_payload: Mapping[str, Any], resul
         "split_sha256": str(split_payload.get("sha256", "")),
         "pre_registered_feature_groups": {name: list(features) for name, features in PRE_REGISTERED_FEATURE_GROUPS.items()},
         "pre_registered_comparators": list(PRE_REGISTERED_COMPARATORS),
+        "direction_target_column": _validate_direction_target(direction_target_column),
         "input_summary": result["input_summary"],
         "candidate_screen": result["candidate_screen"],
         "limitations": [
@@ -407,6 +437,13 @@ def _prepare_output(destination: Path) -> None:
             raise ScorecardOofError(f"scorecard output root must be empty: {destination}")
     else:
         destination.mkdir(parents=True, exist_ok=False)
+
+
+def _validate_direction_target(target_column: str) -> str:
+    target_column = str(target_column)
+    if target_column not in PRE_REGISTERED_DIRECTION_TARGETS:
+        raise ScorecardOofError("direction_target_column must be one of: " + ", ".join(PRE_REGISTERED_DIRECTION_TARGETS))
+    return target_column
 
 
 def _progress(status: str, stage: str, **payload: Any) -> dict[str, Any]:

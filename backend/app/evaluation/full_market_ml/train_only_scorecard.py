@@ -12,6 +12,7 @@ from .features import assert_leak_free_schema
 
 MIN_ABSOLUTE_MEDIAN_IC = 0.01
 MIN_DIRECTION_CONSISTENCY = 0.80
+PRE_REGISTERED_DIRECTION_TARGETS = ("net_return_after_cost_10d", "alpha_target_10d")
 
 
 def fit_train_only_scorecard(
@@ -19,6 +20,7 @@ def fit_train_only_scorecard(
     prediction_rows: pd.DataFrame,
     *,
     feature_schema: Iterable[str],
+    target_column: str = "net_return_after_cost_10d",
 ) -> dict[str, Any]:
     """Learn direction from fit labels and score later rows without their labels.
 
@@ -27,9 +29,9 @@ def fit_train_only_scorecard(
     """
     features = tuple(str(feature) for feature in feature_schema)
     assert_leak_free_schema(features)
-    _validate_fit_rows(fit_rows, features)
+    _validate_fit_rows(fit_rows, features, target_column=target_column)
     _validate_prediction_rows(prediction_rows, features)
-    fitted = fit_scorecard_directions(fit_rows, feature_schema=features)
+    fitted = fit_scorecard_directions(fit_rows, feature_schema=features, target_column=target_column)
     scored = score_with_directions(prediction_rows, directions=fitted["directions"])
     return {**fitted, "predictions": scored}
 
@@ -39,15 +41,19 @@ def fit_scorecard_directions(
     *,
     feature_schema: Iterable[str],
     minimum_daily_ic_count: int = 0,
+    target_column: str = "net_return_after_cost_10d",
 ) -> dict[str, Any]:
     """Derive sign-stable feature directions from fit-period labels only."""
     minimum_daily_ic_count = int(minimum_daily_ic_count)
     if minimum_daily_ic_count < 0:
         raise ValueError("minimum_daily_ic_count must be non-negative")
+    target_column = str(target_column)
+    if target_column not in PRE_REGISTERED_DIRECTION_TARGETS:
+        raise ValueError("target_column must be one of: " + ", ".join(PRE_REGISTERED_DIRECTION_TARGETS))
     features = tuple(str(feature) for feature in feature_schema)
     assert_leak_free_schema(features)
-    _validate_fit_rows(fit_rows, features)
-    evidence = {feature: _fit_direction_evidence(fit_rows, feature) for feature in features}
+    _validate_fit_rows(fit_rows, features, target_column=target_column)
+    evidence = {feature: _fit_direction_evidence(fit_rows, feature, target_column=target_column) for feature in features}
     directions = {
         feature: int(summary["direction"])
         for feature, summary in evidence.items()
@@ -57,6 +63,7 @@ def fit_scorecard_directions(
         "directions": directions,
         "direction_evidence": evidence,
         "minimum_daily_ic_count": minimum_daily_ic_count,
+        "target_column": target_column,
     }
 
 
@@ -86,17 +93,17 @@ def score_with_directions(
     return scored
 
 
-def _fit_direction(rows: pd.DataFrame, feature: str) -> int:
-    return int(_fit_direction_evidence(rows, feature)["direction"])
+def _fit_direction(rows: pd.DataFrame, feature: str, *, target_column: str = "net_return_after_cost_10d") -> int:
+    return int(_fit_direction_evidence(rows, feature, target_column=target_column)["direction"])
 
 
-def _fit_direction_evidence(rows: pd.DataFrame, feature: str) -> dict[str, float | int]:
+def _fit_direction_evidence(rows: pd.DataFrame, feature: str, *, target_column: str) -> dict[str, float | int]:
     daily_ics = []
     for _, daily in rows.groupby("trade_date", sort=True):
-        valid = daily[[feature, "net_return_after_cost_10d"]].apply(pd.to_numeric, errors="coerce").dropna()
-        if len(valid) < 3 or valid[feature].nunique() < 2 or valid["net_return_after_cost_10d"].nunique() < 2:
+        valid = daily[[feature, target_column]].apply(pd.to_numeric, errors="coerce").dropna()
+        if len(valid) < 3 or valid[feature].nunique() < 2 or valid[target_column].nunique() < 2:
             continue
-        ic = valid[feature].corr(valid["net_return_after_cost_10d"], method="spearman")
+        ic = valid[feature].corr(valid[target_column], method="spearman")
         if pd.notna(ic):
             daily_ics.append(float(ic))
     if not daily_ics:
@@ -120,8 +127,8 @@ def _fit_direction_evidence(rows: pd.DataFrame, feature: str) -> dict[str, float
     }
 
 
-def _validate_fit_rows(rows: pd.DataFrame, features: tuple[str, ...]) -> None:
-    required = {"trade_date", "net_return_after_cost_10d", *features}
+def _validate_fit_rows(rows: pd.DataFrame, features: tuple[str, ...], *, target_column: str) -> None:
+    required = {"trade_date", target_column, *features}
     missing = sorted(required - set(rows.columns))
     if missing:
         raise ValueError("scorecard fit rows missing columns: " + ", ".join(missing))
