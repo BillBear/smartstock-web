@@ -3688,7 +3688,7 @@ class CoachService:
                 }
             )
 
-        portfolio = self.get_paper_portfolio(user_id=user_id, refresh_quotes=False)
+        portfolio = self.get_paper_portfolio(user_id=user_id, refresh_quotes=True)
         position_rows = {row["symbol"]: row for row in portfolio.get("positions", [])}
         merged: List[Dict[str, Any]] = []
         seen = set()
@@ -3809,8 +3809,8 @@ class CoachService:
                 )
 
             action_ref = latest_action_by_symbol.get(symbol, {})
-            # 自选股列表是高频页面，止损/止盈用持仓均价和当前策略配置快速计算；
-            # 避免为历史 pick_id 再触发远程推荐重建或实时查询。
+            # 自选股列表是高频页面，行情已在上面按持仓批量刷新；
+            # 止损/止盈仍用持仓均价和当前策略配置快速计算，避免为历史 pick_id 重建推荐。
             planned_stop_loss = round(avg_price * (1 - default_stop_loss_ratio), 4) if avg_price > 0 else 0
             planned_take_profit = round(avg_price * (1 + default_take_profit_ratio), 4) if avg_price > 0 else 0
             risk_status = "normal"
