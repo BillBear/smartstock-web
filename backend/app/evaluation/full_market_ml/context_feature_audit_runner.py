@@ -194,22 +194,30 @@ def _feature_statuses(audit: FeatureAuditResult) -> list[dict[str, Any]]:
             selection = "not_audited_constant_or_missing"
             median_ic = None
             direction_consistency = None
+            reason = "missing_or_constant_across_all_validation_rows"
         else:
             selection = str(evidence["selection"].iloc[0])
             median_ic = _finite_median(evidence["median_ic"])
             direction_consistency = _finite_median(evidence["direction_consistency"])
             minimum_coverage = float(coverage.min()) if not coverage.empty else 0.0
-            status = (
-                "ready_for_later_oof"
-                if selection == "core_candidate" and minimum_coverage >= 0.95 and direction_consistency is not None and direction_consistency >= 0.8
-                else "rejected"
-                if selection == "exclude"
-                else "insufficient_evidence"
-            )
+            date_count = int(pd.to_numeric(evidence["date_count"], errors="coerce").fillna(0).sum())
+            if date_count == 0:
+                status = "insufficient_evidence"
+                reason = "constant_within_daily_cross_section"
+            elif selection == "core_candidate" and minimum_coverage >= 0.95 and direction_consistency is not None and direction_consistency >= 0.8:
+                status = "ready_for_later_oof"
+                reason = "stable_development_univariate_evidence"
+            elif selection == "exclude":
+                status = "rejected"
+                reason = "unstable_or_insufficient_daily_ic"
+            else:
+                status = "insufficient_evidence"
+                reason = "does_not_meet_later_oof_screen"
         rows.append(
             {
                 "feature": feature,
                 "status": status,
+                "reason": reason,
                 "selection": selection,
                 "minimum_fold_coverage": float(coverage.min()) if not coverage.empty else 0.0,
                 "median_ic": median_ic,

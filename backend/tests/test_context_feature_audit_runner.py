@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 import pandas as pd
+from app.evaluation.full_market_ml.feature_audit import FeatureAuditResult
 
 
 def _payload_sha256(payload: dict) -> str:
@@ -124,6 +125,37 @@ class ContextFeatureAuditRunnerTests(unittest.TestCase):
             ):
                 self.assertTrue((output / name).is_file(), name)
             self.assertEqual(json.loads((output / "progress.json").read_text())["status"], "complete")
+
+    def test_marks_same_date_constant_market_context_as_insufficient_not_rejected(self):
+        from app.evaluation.full_market_ml.context_feature_audit_runner import _feature_statuses
+
+        audit = FeatureAuditResult(
+            coverage=pd.DataFrame(
+                [{"fold": 1, "feature": "market_positive_breadth_1d", "coverage": 1.0}]
+            ),
+            ic=pd.DataFrame(
+                [
+                    {
+                        "fold": 1,
+                        "feature": "market_positive_breadth_1d",
+                        "target": "net_return_after_cost_10d",
+                        "date_count": 0,
+                        "median_ic": float("nan"),
+                        "direction_consistency": 0.0,
+                        "selection": "exclude",
+                    }
+                ]
+            ),
+            bucket_returns=pd.DataFrame(),
+            correlation=pd.DataFrame(),
+            drift=pd.DataFrame(),
+            group_eligibility=pd.DataFrame(),
+        )
+
+        statuses = {row["feature"]: row for row in _feature_statuses(audit)}
+
+        self.assertEqual(statuses["market_positive_breadth_1d"]["status"], "insufficient_evidence")
+        self.assertEqual(statuses["market_positive_breadth_1d"]["reason"], "constant_within_daily_cross_section")
 
 
 if __name__ == "__main__":
