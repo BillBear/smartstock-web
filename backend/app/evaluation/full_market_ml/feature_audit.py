@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from .features import CORE_FEATURE_SPECS, OPTIONAL_FEATURE_SPECS, FeatureLeakageError, assert_leak_free_schema
+from .market_industry_features import INDUSTRY_FEATURE_NAMES, MARKET_FEATURE_NAMES
 from .splits import FinalHoldoutAccessError, SplitPlan
 
 
@@ -21,6 +22,8 @@ _FEATURE_GROUPS = {
     for spec in (*CORE_FEATURE_SPECS, *OPTIONAL_FEATURE_SPECS)
 }
 _FEATURE_GROUPS.update({"net_mf_amount": "moneyflow", "net_mf_vol": "moneyflow", "moneyflow": "moneyflow"})
+_FEATURE_GROUPS.update({name: "market_context" for name in MARKET_FEATURE_NAMES})
+_FEATURE_GROUPS.update({name: "industry_context" for name in INDUSTRY_FEATURE_NAMES})
 _NON_FEATURE_COLUMNS = {"trade_date", "symbol", TARGET_COLUMN, "eligible_for_training"}
 _LABEL_PREFIXES = ("future_", "label_", "target_", "relevance_", "mfe_", "mae_", "market_median_", "industry_median_")
 
