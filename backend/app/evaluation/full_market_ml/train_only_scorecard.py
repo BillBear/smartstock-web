@@ -38,8 +38,12 @@ def fit_scorecard_directions(
     fit_rows: pd.DataFrame,
     *,
     feature_schema: Iterable[str],
+    minimum_daily_ic_count: int = 0,
 ) -> dict[str, Any]:
     """Derive sign-stable feature directions from fit-period labels only."""
+    minimum_daily_ic_count = int(minimum_daily_ic_count)
+    if minimum_daily_ic_count < 0:
+        raise ValueError("minimum_daily_ic_count must be non-negative")
     features = tuple(str(feature) for feature in feature_schema)
     assert_leak_free_schema(features)
     _validate_fit_rows(fit_rows, features)
@@ -47,9 +51,13 @@ def fit_scorecard_directions(
     directions = {
         feature: int(summary["direction"])
         for feature, summary in evidence.items()
-        if int(summary["direction"]) != 0
+        if int(summary["direction"]) != 0 and int(summary["daily_ic_count"]) >= minimum_daily_ic_count
     }
-    return {"directions": directions, "direction_evidence": evidence}
+    return {
+        "directions": directions,
+        "direction_evidence": evidence,
+        "minimum_daily_ic_count": minimum_daily_ic_count,
+    }
 
 
 def score_with_directions(

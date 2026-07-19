@@ -4,7 +4,7 @@ import unittest
 
 import pandas as pd
 
-from app.evaluation.full_market_ml.train_only_scorecard import fit_train_only_scorecard
+from app.evaluation.full_market_ml.train_only_scorecard import fit_scorecard_directions, fit_train_only_scorecard
 
 
 class TrainOnlyScorecardTests(unittest.TestCase):
@@ -52,6 +52,24 @@ class TrainOnlyScorecardTests(unittest.TestCase):
 
         self.assertEqual(expected["directions"], observed["directions"])
         self.assertTrue(expected["predictions"]["score"].equals(observed["predictions"]["score"]))
+
+    def test_rejects_direction_when_fit_evidence_has_too_few_days(self):
+        fit = pd.concat(
+            [
+                _rows("2025-01-02", returns=[0.01, 0.02, 0.03, 0.04]),
+                _rows("2025-01-03", returns=[0.01, 0.02, 0.03, 0.04]),
+            ],
+            ignore_index=True,
+        )
+
+        result = fit_scorecard_directions(
+            fit,
+            feature_schema=("adjusted_return_5d",),
+            minimum_daily_ic_count=3,
+        )
+
+        self.assertEqual({}, result["directions"])
+        self.assertEqual(2, result["direction_evidence"]["adjusted_return_5d"]["daily_ic_count"])
 
 
 def _rows(trade_date: str, *, returns: list[float]) -> pd.DataFrame:
