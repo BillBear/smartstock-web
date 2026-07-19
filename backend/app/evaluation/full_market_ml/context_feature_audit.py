@@ -16,7 +16,7 @@ from .splits import FinalHoldoutAccessError, SplitPlan
 
 
 CONTEXT_FEATURE_NAMES = (*MARKET_FEATURE_NAMES, *INDUSTRY_FEATURE_NAMES)
-_SOURCE_COLUMNS = (
+CONTEXT_SOURCE_COLUMNS = (
     "trade_date",
     "symbol",
     "valid_ohlc",
@@ -31,7 +31,7 @@ _SOURCE_COLUMNS = (
     "at_up_limit",
     "at_down_limit",
 )
-_OUTCOME_COLUMNS = (
+CONTEXT_OUTCOME_COLUMNS = (
     "trade_date",
     "symbol",
     "future_return_10d",
@@ -56,13 +56,13 @@ class ContextFeatureAuditResult:
 def build_context_feature_audit(rows: pd.DataFrame, split_plan: SplitPlan) -> ContextFeatureAuditResult:
     """Build audited context columns without allowing outcomes into their construction."""
     dataset = _normalize_development_rows(rows, split_plan)
-    source = dataset.loc[:, _SOURCE_COLUMNS].copy()
+    source = dataset.loc[:, CONTEXT_SOURCE_COLUMNS].copy()
     context = build_market_state_features(source)
     context = build_industry_state_features(context)
     context_features = context.loc[:, ["trade_date", "symbol", *CONTEXT_FEATURE_NAMES]].copy()
     context_features = context_features.sort_values(["trade_date", "symbol"], kind="stable").reset_index(drop=True)
 
-    outcomes = dataset.loc[:, _OUTCOME_COLUMNS].copy()
+    outcomes = dataset.loc[:, CONTEXT_OUTCOME_COLUMNS].copy()
     audit_rows = outcomes.merge(
         context_features,
         on=["trade_date", "symbol"],
@@ -79,7 +79,7 @@ def _normalize_development_rows(rows: pd.DataFrame, split_plan: SplitPlan) -> pd
         raise TypeError("rows must be a pandas DataFrame")
     if not isinstance(split_plan, SplitPlan):
         raise TypeError("split_plan must be a SplitPlan")
-    required = set(_SOURCE_COLUMNS) | set(_OUTCOME_COLUMNS)
+    required = set(CONTEXT_SOURCE_COLUMNS) | set(CONTEXT_OUTCOME_COLUMNS)
     missing = sorted(required - set(rows.columns))
     if missing:
         raise ContextFeatureAuditError("context feature audit missing columns: " + ", ".join(missing))
