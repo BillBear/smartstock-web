@@ -280,6 +280,7 @@ def _verify_parity(
         if expected.empty:
             raise DetailedMoneyflowCandidateAssetError(f"parity date has no complete detailed feature rows: {trade_date}")
         symbols = tuple(sorted(expected["symbol"].unique())[:8])
+        expected = expected.loc[expected["symbol"].isin(symbols)].copy()
         history, future_rows_discarded = _panel_symbol_history(panel_paths, symbols, trade_date)
         if history.empty:
             raise DetailedMoneyflowCandidateAssetError(f"panel has no parity history for {trade_date}")

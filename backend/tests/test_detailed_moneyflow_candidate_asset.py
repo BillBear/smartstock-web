@@ -146,7 +146,9 @@ class _SourceRunFixture:
 
 def _panel_fixture() -> pd.DataFrame:
     rows = []
-    for symbol, industry, offset in (("000001", "A", 0.0), ("000002", "B", 1.0)):
+    for index, symbol in enumerate((f"{value:06d}" for value in range(1, 11))):
+        industry = "A" if index % 2 == 0 else "B"
+        offset = float(index)
         for index, date in enumerate(pd.bdate_range("2024-01-01", periods=25)):
             close = 10.0 + offset + index * 0.1
             row = {
