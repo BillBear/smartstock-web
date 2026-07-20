@@ -159,7 +159,7 @@ def _cause_for(symbol: str, moneyflow_rows: dict[str, dict[str, object]] | None,
 
 def _append_sample(samples: dict[str, dict[str, list[str]]], board: str, cause: str, symbol: str) -> None:
     values = samples[board][cause]
-    if len(values) < _SAMPLE_LIMIT:
+    if symbol not in values and len(values) < _SAMPLE_LIMIT:
         values.append(symbol)
 
 

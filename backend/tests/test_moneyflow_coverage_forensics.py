@@ -46,9 +46,21 @@ class MoneyflowCoverageForensicsTests(unittest.TestCase):
             with self.assertRaisesRegex(MoneyflowCoverageForensicsError, "escapes source root"):
                 audit_moneyflow_coverage(source_run_root=fixture.root, code_commit="test")
 
+    def test_samples_each_missing_code_only_once_across_dates(self) -> None:
+        with _SourceRunFixture(repeat_missing_symbol=True) as fixture:
+            report = audit_moneyflow_coverage(source_run_root=fixture.root, code_commit="test")
+
+        self.assertEqual(["920001.BJ"], report["samples"]["BJ"]["missing_moneyflow_symbol"])
+
 
 class _SourceRunFixture:
-    def __init__(self, *, duplicate_daily_code: bool = False, path_escape: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        duplicate_daily_code: bool = False,
+        path_escape: bool = False,
+        repeat_missing_symbol: bool = False,
+    ) -> None:
         self._temporary = tempfile.TemporaryDirectory()
         self.root = Path(self._temporary.name) / "source"
         date_one = "20240102"
@@ -57,10 +69,13 @@ class _SourceRunFixture:
         if duplicate_daily_code:
             daily_one[-1] = "000001.SZ"
         _write_parquet(self.root / f"raw/endpoint=daily/trade_date={date_one}/data.parquet", pd.DataFrame({"ts_code": daily_one}))
-        _write_parquet(self.root / f"raw/endpoint=daily/trade_date={date_two}/data.parquet", pd.DataFrame({"ts_code": ["920002.BJ", "600002.SH"]}))
+        daily_two = ["920001.BJ"] if repeat_missing_symbol else ["920002.BJ", "600002.SH"]
+        _write_parquet(self.root / f"raw/endpoint=daily/trade_date={date_two}/data.parquet", pd.DataFrame({"ts_code": daily_two}))
         moneyflow = _moneyflow_frame(["000001.SZ", "600001.SH"])
         moneyflow.loc[moneyflow["ts_code"].eq("600001.SH"), "buy_md_amount"] = float("nan")
         _write_parquet(self.root / f"raw/endpoint=moneyflow/trade_date={date_one}/data.parquet", moneyflow)
+        if repeat_missing_symbol:
+            _write_parquet(self.root / f"raw/endpoint=moneyflow/trade_date={date_two}/data.parquet", _moneyflow_frame([]))
         daily_one_path = "../outside.parquet" if path_escape else f"raw/endpoint=daily/trade_date={date_one}/data.parquet"
         _write_json(
             self.root / "manifests/full-build.json",
@@ -69,6 +84,7 @@ class _SourceRunFixture:
                     _record("daily", date_one, daily_one_path),
                     _record("moneyflow", date_one, f"raw/endpoint=moneyflow/trade_date={date_one}/data.parquet"),
                     _record("daily", date_two, f"raw/endpoint=daily/trade_date={date_two}/data.parquet"),
+                    *([_record("moneyflow", date_two, f"raw/endpoint=moneyflow/trade_date={date_two}/data.parquet")] if repeat_missing_symbol else []),
                 ]
             },
         )
@@ -90,7 +106,7 @@ def _moneyflow_frame(symbols: list[str]) -> pd.DataFrame:
         row = {"ts_code": symbol}
         row.update({field: 1.0 for field in DETAILED_MONEYFLOW_AMOUNT_FIELDS})
         rows.append(row)
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=["ts_code", *DETAILED_MONEYFLOW_AMOUNT_FIELDS])
 
 
 def _write_parquet(path: Path, frame: pd.DataFrame) -> None:
