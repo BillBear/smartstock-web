@@ -374,8 +374,9 @@ def _load_labels(inputs: Mapping[str, Any], *, on_progress) -> pd.DataFrame:
         frames.append(frame)
         on_progress(index, len(entries))
     labels = pd.concat(frames, ignore_index=True)
-    labels["trade_date"] = labels["trade_date"].map(_date_text)
-    labels["symbol"] = labels["symbol"].map(_symbol_text)
+    on_progress(len(entries), len(entries))
+    labels["trade_date"] = _normalize_trade_dates(labels["trade_date"], "R1 labels")
+    labels["symbol"] = _normalize_symbols(labels["symbol"], "R1 labels")
     labels = labels.loc[labels["eligible_for_training"].eq(True)].copy()
     labels = labels.dropna(subset=["trade_date", "symbol"])
     if labels.duplicated(["trade_date", "symbol"]).any():
@@ -402,8 +403,8 @@ def _load_joined_feature_rows(inputs: Mapping[str, Any], labels: pd.DataFrame, *
             raise SHSZH1FeatureEvidenceError(f"R2 matrix {trade_date} misses H1 evidence columns: " + ", ".join(missing))
         frame = pq.ParquetFile(path).read(columns=columns).to_pandas()
         _assert_no_bj_symbols(frame, f"R2 matrix {trade_date}")
-        frame["trade_date"] = frame["trade_date"].map(_date_text)
-        frame["symbol"] = frame["symbol"].map(_symbol_text)
+        frame["trade_date"] = _normalize_trade_dates(frame["trade_date"], f"R2 matrix {trade_date}")
+        frame["symbol"] = _normalize_symbols(frame["symbol"], f"R2 matrix {trade_date}")
         if frame.duplicated(["trade_date", "symbol"]).any():
             raise SHSZH1FeatureEvidenceError(f"R2 matrix {trade_date} contains duplicate trade_date/symbol keys")
         frames.append(frame)
@@ -614,6 +615,28 @@ def _symbol_text(value: Any) -> str:
     if not code.isdigit() or len(code) != 6:
         raise SHSZH1FeatureEvidenceError(f"invalid symbol in registered asset: {value}")
     return code
+
+
+def _normalize_trade_dates(values: pd.Series, source: str) -> pd.Series:
+    """Normalize an entire asset column without scalar datetime conversion."""
+    parsed = pd.to_datetime(values.astype("string"), errors="coerce", format="mixed")
+    result = parsed.dt.strftime("%Y-%m-%d")
+    if result.isna().any():
+        bad = values.loc[result.isna()].iloc[0]
+        raise SHSZH1FeatureEvidenceError(f"{source} has an invalid trade_date: {bad}")
+    return result
+
+
+def _normalize_symbols(values: pd.Series, source: str) -> pd.Series:
+    """Normalize an entire asset column while rejecting BJ before suffix removal."""
+    raw = values.astype("string").fillna("").str.strip().str.upper()
+    if raw.str.endswith(".BJ").any():
+        raise SHSZH1FeatureEvidenceError(f"{source} contains a BJ symbol before H1 evidence calculation")
+    codes = raw.str.split(".", n=1, regex=False).str[0].str.zfill(6)
+    invalid = raw.eq("") | ~codes.str.fullmatch(r"\d{6}").fillna(False)
+    if invalid.any():
+        raise SHSZH1FeatureEvidenceError(f"{source} has an invalid symbol: {raw.loc[invalid].iloc[0]}")
+    return codes
 
 
 def _read_json(path: Path) -> dict[str, Any]:

@@ -72,6 +72,43 @@ class SHSZH1FeatureEvidenceTests(unittest.TestCase):
             self.assertEqual("complete", report["status"])
             self.assertEqual(str((fixture.feature_root / "matrix").resolve()), report["input_manifest"]["resolved_matrix_path"])
 
+    def test_normalizes_compact_label_dates_before_joining_hive_feature_dates(self):
+        with _FixtureEvidenceAsset() as fixture:
+            label_path = next((fixture.label_root / "labels").rglob("*.parquet"))
+            labels = pq.read_table(label_path).to_pandas()
+            labels["trade_date"] = labels["trade_date"].str.replace("-", "", regex=False)
+            pq.write_table(pa.Table.from_pandas(labels, preserve_index=False), label_path)
+            fixture.refresh_label_registry()
+            fixture.refresh_feature_label_binding()
+
+            report = run_shsz_h1_feature_evidence(
+                label_root=fixture.label_root,
+                feature_asset_root=fixture.feature_root,
+                output_dir=fixture.output_root,
+                code_commit="fixture",
+                bootstrap_iterations=3,
+            )
+
+            self.assertEqual("complete", report["status"])
+
+    def test_rejects_empty_symbols_instead_of_coercing_them_to_zeroes(self):
+        with _FixtureEvidenceAsset() as fixture:
+            label_path = next((fixture.label_root / "labels").rglob("*.parquet"))
+            labels = pq.read_table(label_path).to_pandas()
+            labels.loc[0, "symbol"] = ""
+            pq.write_table(pa.Table.from_pandas(labels, preserve_index=False), label_path)
+            fixture.refresh_label_registry()
+            fixture.refresh_feature_label_binding()
+
+            with self.assertRaisesRegex(SHSZH1FeatureEvidenceError, "invalid symbol"):
+                run_shsz_h1_feature_evidence(
+                    label_root=fixture.label_root,
+                    feature_asset_root=fixture.feature_root,
+                    output_dir=fixture.output_root,
+                    code_commit="fixture",
+                    bootstrap_iterations=3,
+                )
+
     def test_rejects_bj_symbols_before_evidence_calculation(self):
         with _FixtureEvidenceAsset() as fixture:
             label_path = next((fixture.label_root / "labels").rglob("*.parquet"))
