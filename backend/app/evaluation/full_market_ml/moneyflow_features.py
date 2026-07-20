@@ -22,6 +22,23 @@ MONEYFLOW_FEATURE_NAMES = tuple(
 
 
 def build_moneyflow_features(rows: pd.DataFrame) -> pd.DataFrame:
+    """Build all detailed-flow features when ``rows`` contains the full peer set.
+
+    This convenience function is appropriate for a full-market table.  Sharded
+    pipelines must call :func:`build_moneyflow_time_series_features` first and
+    defer :func:`add_industry_relative_moneyflow_feature` until they have
+    assembled each full signal-date cross section.
+    """
+    return add_industry_relative_moneyflow_feature(build_moneyflow_time_series_features(rows))
+
+
+def build_moneyflow_time_series_features(rows: pd.DataFrame) -> pd.DataFrame:
+    """Build only symbol-local detailed-flow features.
+
+    The input can be a symbol shard.  It deliberately excludes
+    ``flow_minus_industry_median`` because that field needs every same-date
+    industry peer, not merely the symbols that happened to share a shard.
+    """
     if not isinstance(rows, pd.DataFrame):
         raise TypeError("rows must be a pandas DataFrame")
     result = rows.reset_index(drop=True).copy()
@@ -54,11 +71,35 @@ def build_moneyflow_features(rows: pd.DataFrame) -> pd.DataFrame:
             lambda s: s.rolling(window, min_periods=window).mean()
         )
         result[f"price_flow_divergence_{window}d"] = flow_mean - result[f"adjusted_return_{window}d"]
+    for name in MONEYFLOW_FEATURE_NAMES:
+        if name == "flow_minus_industry_median":
+            continue
+        if not name.endswith("_missing"):
+            result[name] = pd.to_numeric(result[name], errors="coerce").astype("float32")
+    return result
+
+
+def add_industry_relative_moneyflow_feature(rows: pd.DataFrame) -> pd.DataFrame:
+    """Add industry-relative flow using the complete same-date peer set.
+
+    The caller owns the scope guarantee: all available stocks for a trade date
+    must be in ``rows``.  This function never falls back to a shard-local
+    median, because that silently makes a feature depend on partition layout.
+    """
+    if not isinstance(rows, pd.DataFrame):
+        raise TypeError("rows must be a pandas DataFrame")
+    required = {"trade_date", "industry_l1", "large_net_flow_ratio", "extra_large_net_flow_ratio"}
+    missing = sorted(required - set(rows.columns))
+    if missing:
+        raise ValueError("industry-relative moneyflow missing columns: " + ", ".join(missing))
+    result = rows.copy()
+    result["trade_date"] = pd.to_datetime(result["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    aggregate = (
+        pd.to_numeric(result["large_net_flow_ratio"], errors="coerce")
+        + pd.to_numeric(result["extra_large_net_flow_ratio"], errors="coerce")
+    )
     industry_median = aggregate.groupby(
         [result["trade_date"], result["industry_l1"]], dropna=True, sort=False
     ).transform("median")
-    result["flow_minus_industry_median"] = aggregate - industry_median
-    for name in MONEYFLOW_FEATURE_NAMES:
-        if not name.endswith("_missing"):
-            result[name] = pd.to_numeric(result[name], errors="coerce").astype("float32")
+    result["flow_minus_industry_median"] = (aggregate - industry_median).astype("float32")
     return result

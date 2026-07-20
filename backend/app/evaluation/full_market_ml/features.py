@@ -17,7 +17,11 @@ from .market_industry_features import (
     build_industry_state_features,
     build_market_state_features,
 )
-from .moneyflow_features import MONEYFLOW_FEATURE_NAMES, build_moneyflow_features
+from .moneyflow_features import (
+    MONEYFLOW_FEATURE_NAMES,
+    add_industry_relative_moneyflow_feature,
+    build_moneyflow_time_series_features,
+)
 
 
 @dataclass(frozen=True)
@@ -256,7 +260,7 @@ def build_time_series_features(
         for size in ("sm", "md", "lg", "elg")
     }
     if include_moneyflow and detailed_flow_columns.issubset(result.columns):
-        result = build_moneyflow_features(result)
+        result = build_moneyflow_time_series_features(result)
     elif include_moneyflow:
         result = pd.concat(
             [
@@ -437,6 +441,15 @@ def _add_optional_time_series(result: pd.DataFrame, grouped, *, include_moneyflo
 
 def _cross_section_for_date(market: pd.DataFrame, *, include_moneyflow: bool) -> pd.DataFrame:
     result = market.copy()
+    detailed_flow_ready = {"large_net_flow_ratio", "extra_large_net_flow_ratio"}.issubset(result.columns)
+    if include_moneyflow and detailed_flow_ready and "industry_l1" in result:
+        # This function is called only after all symbol shards for one date are
+        # assembled, so the industry median is invariant to shard boundaries.
+        result = add_industry_relative_moneyflow_feature(result)
+    elif include_moneyflow and detailed_flow_ready:
+        # Preserve the declared missing policy when the point-in-time industry
+        # classification is unavailable; never substitute a market-wide median.
+        result["flow_minus_industry_median"] = np.nan
     ranked_sources = [
         "adjusted_return_5d", "adjusted_return_10d", "adjusted_return_20d", "volume_log",
         "amount_log", "turnover_rate", "total_mv_log",

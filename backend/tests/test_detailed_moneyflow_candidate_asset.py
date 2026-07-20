@@ -28,7 +28,7 @@ class DetailedMoneyflowCandidateAssetTests(unittest.TestCase):
 
     def test_certifies_reference_only_asset_but_blocks_sub_95pct_moneyflow(self) -> None:
         with _SourceRunFixture(moneyflow_coverage=0.94) as fixture:
-            report = fixture.inspect()
+            report = fixture.inspect(parity_dates=(fixture.signal_date,))
 
         self.assertEqual("complete_moneyflow_admission_blocked", report["status"])
         self.assertFalse(report["training_ready"])
@@ -36,6 +36,14 @@ class DetailedMoneyflowCandidateAssetTests(unittest.TestCase):
         self.assertTrue(report["reference_only"])
         self.assertEqual(0.94, report["quality_gate"]["reported_moneyflow_coverage"])
         self.assertIn("medium_net_flow_persistence_20d", report["field_coverage"])
+
+    def test_requires_explicit_parity_dates_before_candidate_status(self) -> None:
+        with _SourceRunFixture() as fixture:
+            report = fixture.inspect()
+
+        self.assertEqual("complete_feature_parity_not_run", report["status"])
+        self.assertFalse(report["quality_gate"]["feature_parity_requested"])
+        self.assertFalse(report["quality_gate"]["feature_parity_passed"])
 
     def test_rejects_registry_hash_mismatch_before_scanning_parquet(self) -> None:
         with _SourceRunFixture() as fixture:
@@ -70,15 +78,15 @@ class DetailedMoneyflowCandidateAssetTests(unittest.TestCase):
         self.assertEqual(fixture.signal_date, parity["max_feature_input_trade_date"])
         self.assertEqual(0, parity["future_rows_used"])
 
-    def test_reports_shard_local_industry_flow_as_feature_contract_blocked(self) -> None:
+    def test_reconciles_industry_relative_flow_after_merging_symbol_shards(self) -> None:
         with _SourceRunFixture(shard_local_moneyflow=True) as fixture:
             report = fixture.inspect(parity_dates=(fixture.signal_date,))
 
         parity = report["parity"][fixture.signal_date]
-        self.assertEqual("complete_feature_contract_blocked", report["status"])
-        self.assertFalse(report["quality_gate"]["feature_parity_passed"])
-        self.assertFalse(parity["passed"])
-        self.assertTrue(any("industry-relative detailed moneyflow parity mismatch" in value for value in parity["mismatches"]))
+        self.assertEqual("complete_candidate_only", report["status"])
+        self.assertTrue(report["quality_gate"]["feature_parity_passed"])
+        self.assertTrue(parity["passed"])
+        self.assertFalse(any("industry-relative detailed moneyflow parity mismatch" in value for value in parity["mismatches"]))
 
 
 class _SourceRunFixture:

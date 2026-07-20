@@ -80,8 +80,11 @@ def inspect_detailed_moneyflow_candidate_asset(
     )
     reported = float(source["quality"]["moneyflow_coverage"])
     admission_blocked = reported < MONEYFLOW_COVERAGE_GATE or observed_minimum < MONEYFLOW_COVERAGE_GATE
-    feature_parity_passed = all(bool(report.get("passed")) for report in parity.values())
-    if not feature_parity_passed:
+    feature_parity_requested = bool(parity)
+    feature_parity_passed = feature_parity_requested and all(bool(report.get("passed")) for report in parity.values())
+    if not feature_parity_requested:
+        status = "complete_feature_parity_not_run"
+    elif not feature_parity_passed:
         status = "complete_feature_contract_blocked"
     elif admission_blocked:
         status = "complete_moneyflow_admission_blocked"
@@ -111,6 +114,7 @@ def inspect_detailed_moneyflow_candidate_asset(
             "reported_moneyflow_coverage": reported,
             "observed_minimum_raw_detail_coverage": observed_minimum,
             "moneyflow_admission_blocked": admission_blocked,
+            "feature_parity_requested": feature_parity_requested,
             "feature_parity_passed": feature_parity_passed,
             "source_quality_ready": True,
             "source_duplicate_key_count": int(source["quality"]["duplicate_key_count"]),
