@@ -184,7 +184,7 @@ def _load_full_market_matrix(inputs: Mapping[str, Any], *, on_progress) -> pd.Da
 
 
 def _join_labels_and_scores(labels: pd.DataFrame, scored_matrix: pd.DataFrame) -> pd.DataFrame:
-    needed = ["trade_date", "symbol", "h2_input_complete", "h2_raw_score", "h2_residual_score", PRIMARY_BASELINE, *DIAGNOSTIC_BASELINES]
+    needed = ["trade_date", "symbol", *H2_FEATURES, "h2_input_complete", "h2_raw_score", "h2_residual_score", PRIMARY_BASELINE, *DIAGNOSTIC_BASELINES]
     score_rows = scored_matrix.loc[:, list(dict.fromkeys(needed))].copy()
     score_rows["matrix_key_present"] = True
     rows = labels.merge(score_rows, on=["trade_date", "symbol"], how="left", validate="one_to_one")

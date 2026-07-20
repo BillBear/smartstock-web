@@ -10,6 +10,7 @@ from app.evaluation.full_market_ml.shsz_h2_order_flow_evidence import (
     H2_FEATURES,
     H2_MATRIX_FEATURES,
     SHSZH2OrderFlowEvidenceError,
+    _join_labels_and_scores,
     residualize_h2_order_flow_score,
 )
 
@@ -19,6 +20,25 @@ class SHSZH2OrderFlowEvidenceTests(unittest.TestCase):
         self.assertIn("adjusted_return_60d", H2_MATRIX_FEATURES)
         self.assertIn("adjusted_return_20d", H2_MATRIX_FEATURES)
         self.assertIn("amount_log_rank", H2_MATRIX_FEATURES)
+
+    def test_label_join_preserves_the_frozen_h2_columns_for_feature_audit(self):
+        labels = pd.DataFrame([{
+            "trade_date": "2025-01-02", "symbol": "000001", "entry_tradeable": True,
+            "horizon_available_10d": True, "path_ambiguous_10d": False, "severe_negative_10d": False,
+        }])
+        scores = labels.loc[:, ["trade_date", "symbol"]].copy()
+        scores["h2_input_complete"] = True
+        scores["h2_raw_score"] = 0.5
+        scores["h2_residual_score"] = 0.1
+        scores["adjusted_return_60d"] = 0.2
+        scores["adjusted_return_20d"] = 0.1
+        scores["amount_log_rank"] = 0.3
+        for feature in H2_FEATURES:
+            scores[feature] = 0.4
+
+        merged = _join_labels_and_scores(labels, scores)
+
+        self.assertTrue(set(H2_FEATURES).issubset(merged.columns))
 
     def test_residualization_removes_a_score_explained_only_by_fixed_controls(self):
         rows = _synthetic_h2_rows()
