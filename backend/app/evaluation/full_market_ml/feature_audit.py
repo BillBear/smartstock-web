@@ -70,6 +70,7 @@ def audit_features(
     split_plan: SplitPlan,
     *,
     feature_schema: Iterable[str] | None = None,
+    primary_target: str | None = None,
     on_progress: Callable[[Mapping[str, object]], None] | None = None,
 ) -> FeatureAuditResult:
     """Audit signal-day features exclusively inside the sealed plan's development period.
@@ -91,7 +92,7 @@ def audit_features(
     correlation_rows: list[dict] = []
     drift_rows: list[dict] = []
     prior_fold_values: dict[str, pd.Series] | None = None
-    return_target = _preferred_return_target(dataset.columns)
+    return_target = _preferred_return_target(dataset, primary_target=primary_target)
     target_columns = [return_target]
     risk_target = _preferred_risk_target(dataset.columns)
     if risk_target is not None:
@@ -369,8 +370,25 @@ def _audit_allowed_features(features: Iterable[str], audit: FeatureAuditResult |
     return tuple(feature for feature in requested if feature in eligible)
 
 
-def _preferred_return_target(columns: Iterable[str]) -> str:
-    available = set(columns)
+def _preferred_return_target(
+    dataset_or_columns: pd.DataFrame | Iterable[str],
+    *,
+    primary_target: str | None = None,
+) -> str:
+    dataset = dataset_or_columns if isinstance(dataset_or_columns, pd.DataFrame) else None
+    available = set(dataset.columns) if dataset is not None else {str(column) for column in dataset_or_columns}
+    if primary_target is not None:
+        requested = str(primary_target)
+        if requested not in available:
+            raise ValueError(f"primary_target is not available: {requested}")
+        if not _is_declared_outcome_target(requested):
+            raise ValueError(f"primary_target must be a declared outcome label: {requested}")
+        if dataset is None:
+            raise TypeError("explicit primary_target requires a DataFrame with numeric observations")
+        values = pd.to_numeric(dataset[requested], errors="coerce")
+        if not values.notna().any():
+            raise ValueError(f"primary_target has no numeric observations: {requested}")
+        return requested
     for candidate in (
         "target_clipped_return_10d",
         "net_return_after_cost_10d",
@@ -380,6 +398,10 @@ def _preferred_return_target(columns: Iterable[str]) -> str:
         if candidate in available:
             return candidate
     return TARGET_COLUMN
+
+
+def _is_declared_outcome_target(name: str) -> bool:
+    return name.startswith(("future_", "target_", "alpha_", "net_return", "gross_return"))
 
 
 def _preferred_risk_target(columns: Iterable[str]) -> str | None:
