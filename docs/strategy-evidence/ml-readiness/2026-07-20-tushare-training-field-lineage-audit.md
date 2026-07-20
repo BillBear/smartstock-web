@@ -105,6 +105,12 @@ PYTHONPATH=. /Users/xiong/Documents/SmartStock/.venvs/ml-py313/bin/python \
 
 实际输出：`overall_verdict=pipeline_lineage_gap`，`production_integration_allowed=false`。
 
+```bash
+PYTHONPATH=. /Users/xiong/Documents/SmartStock/.venvs/ml-py313/bin/python -m unittest discover -s tests
+```
+
+实际输出：`Ran 643 tests in 103.414s`，`OK`，退出码 `0`。测试过程中有既有 SQLite `ResourceWarning`。末尾的 ML 预检仍输出 `status: blocked`，原因是可用全市场快照数量、股票数量、日期数量和样本数均未达到门槛；该预检没有被本次改动修改、放宽或绕过。
+
 `git diff --check` 也已通过。
 
 ## 对抗性审查与下一道门
