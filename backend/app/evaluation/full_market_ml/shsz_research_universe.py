@@ -44,6 +44,7 @@ def certify_shsz_research_universe(*, source_run_root: str | Path, code_commit: 
     expected_by_date = _historical_expected_symbols(stock_basic, tuple(sorted(daily_records)))
     blocking_codes: set[str] = set()
     excluded: dict[str, set[str]] = defaultdict(set)
+    unresolved_daily_master_symbols: set[str] = set()
     daily_coverage: list[dict[str, object]] = []
     all_shsz_symbols: set[str] = set()
 
@@ -53,15 +54,19 @@ def certify_shsz_research_universe(*, source_run_root: str | Path, code_commit: 
             suffix = _exchange(code)
             if suffix not in ALLOWED_EXCHANGES:
                 excluded[suffix].add(code)
-        observed = {code for code in daily_codes if _exchange(code) in ALLOWED_EXCHANGES}
-        if len(observed) != len([code for code in daily_codes if _exchange(code) in ALLOWED_EXCHANGES]):
+        raw_shsz_observed = {code for code in daily_codes if _exchange(code) in ALLOWED_EXCHANGES}
+        if len(raw_shsz_observed) != len([code for code in daily_codes if _exchange(code) in ALLOWED_EXCHANGES]):
             blocking_codes.add("duplicate_shsz_daily_symbol")
         expected = expected_by_date[trade_date]
-        unexpected = observed - expected
+        unresolved = raw_shsz_observed - expected
+        # A daily row absent from the static L/D/P master has no defensible
+        # listing-age or historical-status contract. It is explicitly excluded
+        # from this research universe, not silently included or used as a
+        # reason to lower expected-universe coverage.
+        observed = raw_shsz_observed & expected
         missing = expected - observed
-        if unexpected:
-            blocking_codes.add("daily_symbol_not_in_historical_universe")
-        coverage = len(observed & expected) / len(expected) if expected else 0.0
+        unresolved_daily_master_symbols.update(unresolved)
+        coverage = len(observed) / len(expected) if expected else 0.0
         if coverage < MINIMUM_COVERAGE:
             blocking_codes.add("daily_historical_coverage_below_0_95")
 
@@ -85,9 +90,10 @@ def certify_shsz_research_universe(*, source_run_root: str | Path, code_commit: 
             {
                 "trade_date": trade_date,
                 "historical_expected_count": len(expected),
+                "raw_shsz_daily_count": len(raw_shsz_observed),
                 "daily_observed_count": len(observed),
                 "daily_historical_coverage": coverage,
-                "unexpected_daily_symbol_count": len(unexpected),
+                "unresolved_daily_master_count": len(unresolved),
                 "missing_daily_symbol_count": len(missing),
                 "detailed_moneyflow_covered_count": covered,
                 "missing_moneyflow_symbol_count": missing_moneyflow,
@@ -116,6 +122,7 @@ def certify_shsz_research_universe(*, source_run_root: str | Path, code_commit: 
         "trade_date_count": len(daily_coverage),
         "symbol_count": len(all_shsz_symbols),
         "excluded_exchange_counts": {exchange: len(symbols) for exchange, symbols in sorted(excluded.items())},
+        "unresolved_daily_master_symbols": sorted(unresolved_daily_master_symbols),
         "blocking_codes": sorted(blocking_codes),
         "daily_coverage": daily_coverage,
         "interpretation": (

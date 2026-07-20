@@ -70,9 +70,10 @@ def _write_daily_coverage(path: Path, value: object) -> None:
     columns = (
         "trade_date",
         "historical_expected_count",
+        "raw_shsz_daily_count",
         "daily_observed_count",
         "daily_historical_coverage",
-        "unexpected_daily_symbol_count",
+        "unresolved_daily_master_count",
         "missing_daily_symbol_count",
         "detailed_moneyflow_covered_count",
         "missing_moneyflow_symbol_count",

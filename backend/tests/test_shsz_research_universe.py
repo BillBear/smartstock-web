@@ -42,9 +42,24 @@ class SHSZResearchUniverseTests(unittest.TestCase):
         self.assertEqual("blocked_research_universe_contract", report["status"])
         self.assertIn("detailed_moneyflow_coverage_below_0_95", report["blocking_codes"])
 
+    def test_excludes_observed_symbol_without_historical_master_evidence(self) -> None:
+        with _RawFixture(unresolved_daily_symbol=True) as fixture:
+            report = certify_shsz_research_universe(source_run_root=fixture.root, code_commit="test")
+
+        self.assertEqual("complete_research_universe_certified", report["status"])
+        self.assertTrue(report["research_ready"])
+        self.assertEqual(["300114.SZ"], report["unresolved_daily_master_symbols"])
+        self.assertEqual(1, report["daily_coverage"][0]["unresolved_daily_master_count"])
+
 
 class _RawFixture:
-    def __init__(self, *, missing_daily_symbol: bool = False, missing_moneyflow_symbol: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        missing_daily_symbol: bool = False,
+        missing_moneyflow_symbol: bool = False,
+        unresolved_daily_symbol: bool = False,
+    ) -> None:
         self._temporary = tempfile.TemporaryDirectory()
         self.root = Path(self._temporary.name) / "source"
         stock_basic = pd.DataFrame(
@@ -58,6 +73,8 @@ class _RawFixture:
         date_one = "20250102"
         date_two = "20250103"
         daily_one = ["000001.SZ", "600001.SH", "920001.BJ"]
+        if unresolved_daily_symbol:
+            daily_one.append("300114.SZ")
         if missing_daily_symbol:
             daily_one.remove("600001.SH")
         daily_two = ["000001.SZ", "600001.SH", "920001.BJ"]
