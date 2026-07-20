@@ -70,14 +70,31 @@ class DetailedMoneyflowCandidateAssetTests(unittest.TestCase):
         self.assertEqual(fixture.signal_date, parity["max_feature_input_trade_date"])
         self.assertEqual(0, parity["future_rows_used"])
 
+    def test_reports_shard_local_industry_flow_as_feature_contract_blocked(self) -> None:
+        with _SourceRunFixture(shard_local_moneyflow=True) as fixture:
+            report = fixture.inspect(parity_dates=(fixture.signal_date,))
+
+        parity = report["parity"][fixture.signal_date]
+        self.assertEqual("complete_feature_contract_blocked", report["status"])
+        self.assertFalse(report["quality_gate"]["feature_parity_passed"])
+        self.assertFalse(parity["passed"])
+        self.assertTrue(any("industry-relative detailed moneyflow parity mismatch" in value for value in parity["mismatches"]))
+
 
 class _SourceRunFixture:
-    def __init__(self, *, moneyflow_coverage: float = 1.0, drop_dataset_field: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        moneyflow_coverage: float = 1.0,
+        drop_dataset_field: str | None = None,
+        shard_local_moneyflow: bool = False,
+    ) -> None:
         self._temporary = tempfile.TemporaryDirectory()
         self.run_root = Path(self._temporary.name) / "source-run"
         self.signal_date = "2024-02-02"
+        self._shard_local_moneyflow = shard_local_moneyflow
         panel = _panel_fixture()
-        dataset = _featured_dataset(panel)
+        dataset = _featured_dataset_from_shards(panel) if shard_local_moneyflow else _featured_dataset(panel)
         if moneyflow_coverage < 1.0:
             null_count = int(round(len(dataset) * (1.0 - moneyflow_coverage)))
             dataset.loc[: null_count - 1, "buy_md_amount"] = float("nan")
@@ -100,13 +117,17 @@ class _SourceRunFixture:
 
     def _write_source(self, panel: pd.DataFrame, dataset: pd.DataFrame, moneyflow_coverage: float) -> None:
         dataset_path = self.run_root / "artifacts" / "full-build" / "dataset.parquet"
-        panel_path = self.run_root / "panel" / "stage=full-build" / "shard=00" / "data.parquet"
         quality_path = self.run_root / "artifacts" / "full-build" / "quality_report.json"
         manifest_path = self.run_root / "manifests" / "full-build.json"
         raw_source = self.run_root / "upstream-raw"
         raw_source_manifest = raw_source / "manifests" / "full-build.json"
         _write_parquet(dataset_path, dataset)
-        _write_parquet(panel_path, panel)
+        if self._shard_local_moneyflow:
+            symbol_numbers = panel["symbol"].astype(int)
+            for shard, rows in enumerate((panel.loc[symbol_numbers.le(5)].copy(), panel.loc[symbol_numbers.gt(5)].copy())):
+                _write_parquet(self.run_root / "panel" / "stage=full-build" / f"shard={shard:02d}" / "data.parquet", rows)
+        else:
+            _write_parquet(self.run_root / "panel" / "stage=full-build" / "shard=00" / "data.parquet", panel)
         quality = {
             "ready": True,
             "blocking_codes": [],
@@ -146,11 +167,11 @@ class _SourceRunFixture:
 
 def _panel_fixture() -> pd.DataFrame:
     rows = []
-    for index, symbol in enumerate((f"{value:06d}" for value in range(1, 11))):
-        industry = "A" if index % 2 == 0 else "B"
-        offset = float(index)
-        for index, date in enumerate(pd.bdate_range("2024-01-01", periods=25)):
-            close = 10.0 + offset + index * 0.1
+    for symbol_index, symbol in enumerate((f"{value:06d}" for value in range(1, 11))):
+        industry = "A" if symbol_index % 2 == 0 else "B"
+        offset = float(symbol_index)
+        for session_index, date in enumerate(pd.bdate_range("2024-01-01", periods=25)):
+            close = 10.0 + offset + session_index * 0.1
             row = {
                 "trade_date": date.strftime("%Y-%m-%d"),
                 "symbol": symbol,
@@ -172,10 +193,12 @@ def _panel_fixture() -> pd.DataFrame:
                 "industry_l1": industry,
                 "at_up_limit": False,
                 "at_down_limit": False,
-                "market_index_close": 3000.0 + index,
+                "market_index_close": 3000.0 + session_index,
                 "market_index_amount": 1_000_000_000.0,
             }
-            row.update({field: float(index + 1) for field in DETAILED_MONEYFLOW_AMOUNT_FIELDS})
+            for group_index, prefix in enumerate(("sm", "md", "lg", "elg"), start=1):
+                row[f"buy_{prefix}_amount"] = float((session_index + 1) * (symbol_index + group_index + 2))
+                row[f"sell_{prefix}_amount"] = float((session_index + 1) * group_index)
             rows.append(row)
     return pd.DataFrame(rows)
 
@@ -186,6 +209,19 @@ def _featured_dataset(panel: pd.DataFrame) -> pd.DataFrame:
     featured = build_cross_section_features(None, {"market": featured}, include_moneyflow=True)["market"].copy()
     featured["eligible_for_training"] = True
     return featured
+
+
+def _featured_dataset_from_shards(panel: pd.DataFrame) -> pd.DataFrame:
+    dates = sorted(panel["trade_date"].unique().tolist())
+    symbol_numbers = panel["symbol"].astype(int)
+    time_series = {
+        "first": build_time_series_features(None, panel.loc[symbol_numbers.le(5)].copy(), include_moneyflow=True, market_sessions=dates),
+        "second": build_time_series_features(None, panel.loc[symbol_numbers.gt(5)].copy(), include_moneyflow=True, market_sessions=dates),
+    }
+    featured = build_cross_section_features(None, time_series, include_moneyflow=True)
+    result = pd.concat(featured.values(), ignore_index=True).copy()
+    result["eligible_for_training"] = True
+    return result
 
 
 def _write_parquet(path: Path, frame: pd.DataFrame) -> None:

@@ -80,7 +80,13 @@ def inspect_detailed_moneyflow_candidate_asset(
     )
     reported = float(source["quality"]["moneyflow_coverage"])
     admission_blocked = reported < MONEYFLOW_COVERAGE_GATE or observed_minimum < MONEYFLOW_COVERAGE_GATE
-    status = "complete_moneyflow_admission_blocked" if admission_blocked else "complete_candidate_only"
+    feature_parity_passed = all(bool(report.get("passed")) for report in parity.values())
+    if not feature_parity_passed:
+        status = "complete_feature_contract_blocked"
+    elif admission_blocked:
+        status = "complete_moneyflow_admission_blocked"
+    else:
+        status = "complete_candidate_only"
     return {
         "schema_version": 1,
         "candidate_asset_version": "detailed_moneyflow_candidate_v1",
@@ -105,6 +111,7 @@ def inspect_detailed_moneyflow_candidate_asset(
             "reported_moneyflow_coverage": reported,
             "observed_minimum_raw_detail_coverage": observed_minimum,
             "moneyflow_admission_blocked": admission_blocked,
+            "feature_parity_passed": feature_parity_passed,
             "source_quality_ready": True,
             "source_duplicate_key_count": int(source["quality"]["duplicate_key_count"]),
         },
@@ -292,12 +299,18 @@ def _verify_parity(
         )
         actual_time_series = time_series.loc[time_series["trade_date"].eq(trade_date), ["symbol", *_PARITY_TIME_SERIES_FEATURES]]
         expected_time_series = expected.loc[:, ["symbol", *_PARITY_TIME_SERIES_FEATURES]]
-        _assert_close(expected_time_series, actual_time_series, "time-series detailed moneyflow parity")
+        mismatches = []
+        time_series_mismatch = _parity_mismatch(expected_time_series, actual_time_series, "time-series detailed moneyflow parity")
+        if time_series_mismatch:
+            mismatches.append(time_series_mismatch)
         expected_flow = expected.loc[:, ["symbol", "flow_minus_industry_median"]]
         actual_flow = _same_day_flow_minus_industry(panel_paths, trade_date, symbols)
-        _assert_close(expected_flow, actual_flow, "industry-relative detailed moneyflow parity")
+        industry_mismatch = _parity_mismatch(expected_flow, actual_flow, "industry-relative detailed moneyflow parity")
+        if industry_mismatch:
+            mismatches.append(industry_mismatch)
         reports[trade_date] = {
-            "passed": True,
+            "passed": not mismatches,
+            "mismatches": mismatches,
             "symbols": list(symbols),
             "max_feature_input_trade_date": str(history["trade_date"].max()),
             "future_rows_used": 0,
@@ -363,12 +376,12 @@ def _same_day_flow_minus_industry(panel_paths: tuple[Path, ...], trade_date: str
     return market.loc[market["symbol"].isin(symbols), ["symbol", "flow_minus_industry_median"]].copy()
 
 
-def _assert_close(expected: pd.DataFrame, actual: pd.DataFrame, label: str) -> None:
+def _parity_mismatch(expected: pd.DataFrame, actual: pd.DataFrame, label: str) -> str | None:
     columns = [column for column in expected.columns if column != "symbol"]
     left = expected.sort_values("symbol").reset_index(drop=True)
     right = actual.sort_values("symbol").reset_index(drop=True)
     if left["symbol"].tolist() != right["symbol"].tolist():
-        raise DetailedMoneyflowCandidateAssetError(f"{label} symbols do not match")
+        return f"{label} symbols do not match"
     for column in columns:
         if not np.allclose(
             pd.to_numeric(left[column], errors="coerce").to_numpy(),
@@ -377,7 +390,8 @@ def _assert_close(expected: pd.DataFrame, actual: pd.DataFrame, label: str) -> N
             atol=1e-8,
             equal_nan=True,
         ):
-            raise DetailedMoneyflowCandidateAssetError(f"{label} mismatch: {column}")
+            return f"{label} mismatch: {column}"
+    return None
 
 
 def _coverage(pair: list[int]) -> dict[str, object]:
