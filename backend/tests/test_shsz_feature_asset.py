@@ -8,6 +8,7 @@ import unittest
 
 import pandas as pd
 import pyarrow as pa
+import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
 from app.evaluation.full_market_ml.shsz_feature_asset import materialize_shsz_feature_asset
@@ -83,6 +84,26 @@ class SHSZFeatureAssetTests(unittest.TestCase):
                     parity_dates=("2025-05-01", "2025-05-30", "2025-06-20"),
                     materialized_shard_count=2,
                 )
+
+    def test_matrix_is_readable_as_a_hive_partitioned_dataset(self):
+        with _FixtureAsset() as fixture:
+            materialize_shsz_feature_asset(
+                panel_root=fixture.panel_root,
+                label_root=fixture.label_root,
+                output_dir=fixture.output_root,
+                code_commit="test-commit",
+                parity_dates=("2025-05-01", "2025-05-30", "2025-06-20"),
+                materialized_shard_count=2,
+            )
+
+            matrix = ds.dataset(
+                fixture.output_root / "matrix",
+                format="parquet",
+                partitioning="hive",
+            ).to_table(columns=["trade_date", "symbol"])
+
+            self.assertGreater(matrix.num_rows, 0)
+            self.assertEqual(pa.string(), matrix.schema.field("trade_date").type)
 
 
 class _FixtureAsset:

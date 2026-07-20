@@ -647,7 +647,17 @@ def _write_parquet(rows: pd.DataFrame, path: Path) -> None:
     os.close(descriptor)
     temporary = Path(temporary_name)
     try:
-        pq.write_table(pa.Table.from_pandas(rows, preserve_index=False), temporary, compression="zstd")
+        table = pa.Table.from_pandas(rows, preserve_index=False)
+        # ``trade_date=...`` is a Hive partition key.  Its in-file Arrow type must
+        # match the partition parser's string type so a standard dataset scan does
+        # not fail while merging schemas.
+        for column in ("trade_date", "symbol"):
+            if column not in table.column_names:
+                continue
+            index = table.schema.get_field_index(column)
+            values = [None if pd.isna(value) else str(value) for value in rows[column]]
+            table = table.set_column(index, column, pa.array(values, type=pa.string()))
+        pq.write_table(table, temporary, compression="zstd")
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
