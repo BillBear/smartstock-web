@@ -23,6 +23,7 @@ class SHSZResearchUniverseTests(unittest.TestCase):
         self.assertEqual(["SH", "SZ"], report["allowed_exchanges"])
         self.assertEqual(1, report["excluded_exchange_counts"]["BJ"])
         first = report["daily_coverage"][0]
+        self.assertEqual("2025-01-02", first["trade_date"])
         self.assertEqual(2, first["historical_expected_count"])
         self.assertEqual(2, first["daily_observed_count"])
         self.assertEqual(1.0, first["daily_historical_coverage"])

@@ -34,8 +34,8 @@ def certify_shsz_research_universe(*, source_run_root: str | Path, code_commit: 
     manifest = _read_manifest(manifest_path)
     records = _records_by_endpoint(manifest)
     stock_basic = _read_stock_basic(root, records.get("stock_basic", ()))
-    daily_records = _records_by_key(records.get("daily", ()), "daily")
-    moneyflow_records = _records_by_key(records.get("moneyflow", ()), "moneyflow")
+    daily_records = _records_by_trade_date(records.get("daily", ()), "daily")
+    moneyflow_records = _records_by_trade_date(records.get("moneyflow", ()), "moneyflow")
     if not daily_records:
         raise SHSZResearchUniverseError("full-build manifest has no daily partitions")
     if stock_basic.empty:
@@ -153,15 +153,16 @@ def _records_by_endpoint(manifest: Mapping[str, object]) -> dict[str, tuple[Mapp
     return {endpoint: tuple(values) for endpoint, values in grouped.items()}
 
 
-def _records_by_key(records: tuple[Mapping[str, object], ...], endpoint: str) -> dict[str, Mapping[str, object]]:
+def _records_by_trade_date(records: tuple[Mapping[str, object], ...], endpoint: str) -> dict[str, Mapping[str, object]]:
+    """Normalize partition keys before exposing them in date-bearing evidence."""
     keyed: dict[str, Mapping[str, object]] = {}
     for record in records:
-        key = str(record.get("key", ""))
-        if not key:
-            raise SHSZResearchUniverseError(f"{endpoint} partition has no key")
-        if key in keyed:
-            raise SHSZResearchUniverseError(f"duplicate {endpoint} partition key: {key}")
-        keyed[key] = record
+        trade_date = _date_text(record.get("key", ""))
+        if not trade_date:
+            raise SHSZResearchUniverseError(f"{endpoint} partition has no trade-date key")
+        if trade_date in keyed:
+            raise SHSZResearchUniverseError(f"duplicate {endpoint} partition trade date: {trade_date}")
+        keyed[trade_date] = record
     return keyed
 
 
