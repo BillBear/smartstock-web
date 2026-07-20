@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 import pyarrow as pa
@@ -104,6 +105,33 @@ class SHSZFeatureAssetTests(unittest.TestCase):
 
             self.assertGreater(matrix.num_rows, 0)
             self.assertEqual(pa.string(), matrix.schema.field("trade_date").type)
+
+    def test_emits_coverage_and_parity_progress_heartbeats(self):
+        with _FixtureAsset() as fixture:
+            events = []
+
+            def record(_root, stage, *, status, **details):
+                events.append((stage, status, details))
+
+            with patch(
+                "app.evaluation.full_market_ml.shsz_feature_asset._write_progress",
+                side_effect=record,
+            ):
+                materialize_shsz_feature_asset(
+                    panel_root=fixture.panel_root,
+                    label_root=fixture.label_root,
+                    output_dir=fixture.output_root,
+                    code_commit="test-commit",
+                    parity_dates=("2025-05-01", "2025-05-30", "2025-06-20"),
+                    materialized_shard_count=2,
+                )
+
+            coverage = [event for event in events if event[0] == "coverage"]
+            parity = [event for event in events if event[0] == "parity"]
+            self.assertEqual([1, 2, 3, 4, 5], [event[2]["completed_folds"] for event in coverage])
+            self.assertTrue(all(event[2]["total_folds"] == 5 for event in coverage))
+            self.assertEqual([1, 2, 3], [event[2]["completed_dates"] for event in parity])
+            self.assertTrue(all(event[2]["total_dates"] == 3 for event in parity))
 
 
 class _FixtureAsset:

@@ -9,7 +9,7 @@ import tempfile
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -194,7 +194,19 @@ def materialize_shsz_feature_asset(
             contract,
             materialized_shard_count,
         )
-        coverage = _coverage_report(matrix_root, contract, labels["validation_folds"])
+        coverage = _coverage_report(
+            matrix_root,
+            contract,
+            labels["validation_folds"],
+            progress_callback=lambda completed, total, fold: _write_progress(
+                temporary,
+                "coverage",
+                status="running",
+                completed_folds=completed,
+                total_folds=total,
+                current_fold=fold,
+            ),
+        )
         _write_json(temporary / "feature_coverage_report.json", coverage)
         if not coverage["passed"]:
             raise SHSZFeatureAssetError("registered core feature coverage is below the fixed gate")
@@ -205,6 +217,14 @@ def materialize_shsz_feature_asset(
             matrix_root,
             contract,
             normalized_parity_dates,
+            progress_callback=lambda completed, total, trade_date: _write_progress(
+                temporary,
+                "parity",
+                status="running",
+                completed_dates=completed,
+                total_dates=total,
+                current_trade_date=trade_date,
+            ),
         )
         if not all(item["passed"] for item in parity.values()):
             raise SHSZFeatureAssetError("offline/online feature parity failed")
@@ -520,10 +540,17 @@ def _materialize_cross_sections(
     return output
 
 
-def _coverage_report(matrix_root: Path, contract: FeatureContract, validation_folds: Mapping[str, tuple[str, ...]]) -> dict[str, Any]:
+def _coverage_report(
+    matrix_root: Path,
+    contract: FeatureContract,
+    validation_folds: Mapping[str, tuple[str, ...]],
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> dict[str, Any]:
     coverage_by_fold: dict[str, dict[str, float]] = {}
     failures: list[str] = []
-    for fold, dates in validation_folds.items():
+    total_folds = len(validation_folds)
+    for index, (fold, dates) in enumerate(validation_folds.items(), start=1):
         frames = []
         for trade_date in dates:
             path = matrix_root / f"trade_date={trade_date}" / "data.parquet"
@@ -541,6 +568,8 @@ def _coverage_report(matrix_root: Path, contract: FeatureContract, validation_fo
             for feature, coverage in values.items()
             if coverage < contract.minimum_fold_coverage
         )
+        if progress_callback is not None:
+            progress_callback(index, total_folds, fold)
     return {
         "passed": not failures,
         "minimum_required_coverage": contract.minimum_fold_coverage,
@@ -556,9 +585,12 @@ def _parity_report(
     matrix_root: Path,
     contract: FeatureContract,
     parity_dates: tuple[str, ...],
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> dict[str, Any]:
     report = {}
-    for trade_date in parity_dates:
+    total_dates = len(parity_dates)
+    for index, trade_date in enumerate(parity_dates, start=1):
         offline = pq.read_table(matrix_root / f"trade_date={trade_date}" / "data.parquet").to_pandas()
         symbols = tuple(
             sorted(offline["symbol"].astype(str).unique(), key=lambda value: hashlib.sha256(value.encode()).hexdigest())[:MAX_PARITY_SYMBOLS]
@@ -592,6 +624,8 @@ def _parity_report(
             "future_rows_discarded_before_calculation": future_rows_discarded,
             "tolerance": contract.parity_tolerance,
         }
+        if progress_callback is not None:
+            progress_callback(index, total_dates, trade_date)
     return report
 
 
