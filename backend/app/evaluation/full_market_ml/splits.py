@@ -53,6 +53,39 @@ class InnerSelectionSplit:
     selection_dates: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class DevelopmentOnlySplitPlan:
+    """A/C development split with the formal future time holdout left unopened."""
+
+    development_dates: tuple[str, ...]
+    stock_holdout_symbols: tuple[str, ...]
+    A_dev_train_symbols: tuple[str, ...]
+    C_dev_unseen_symbols: tuple[str, ...]
+    walk_forward: tuple[WalkForwardFold, ...]
+    stratum_counts_before: dict[str, int]
+    stratum_counts_after: dict[str, int]
+    embargo_trade_days: int
+    split_sha256: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "development_dates": list(self.development_dates),
+            "stock_holdout_symbols": list(self.stock_holdout_symbols),
+            "A_dev_train_symbols": list(self.A_dev_train_symbols),
+            "C_dev_unseen_symbols": list(self.C_dev_unseen_symbols),
+            "walk_forward": [fold.to_dict() for fold in self.walk_forward],
+            "stratum_counts_before": dict(sorted(self.stratum_counts_before.items())),
+            "stratum_counts_after": dict(sorted(self.stratum_counts_after.items())),
+            "embargo_trade_days": self.embargo_trade_days,
+            "future_holdout": {
+                "status": "awaiting_model_freeze_and_future_labels",
+                "minimum_labelable_signal_days": 40,
+                "formal_evaluation_allowed": False,
+            },
+            "split_sha256": self.split_sha256,
+        }
+
+
 def build_inner_selection_split(
     contract: RankingResearchContract,
     outer_fold: WalkForwardFold,
@@ -179,6 +212,68 @@ def build_split_plan(config: FullMarketMLConfig, labeled_dataset: pd.DataFrame) 
     )
 
 
+def build_development_only_split_plan(
+    labeled_dataset: pd.DataFrame,
+    *,
+    embargo_trade_days: int = 20,
+    walk_forward_folds: int = 5,
+    minimum_inner_fit_dates: int = 60,
+    minimum_inner_early_stop_dates: int = 20,
+    minimum_inner_selection_dates: int = 20,
+) -> DevelopmentOnlySplitPlan:
+    """Freeze A/C development membership without opening a historical final set.
+
+    The first outer validation fold starts only after the inner fit, early-stop,
+    selection, and embargo windows are all available.  This rejects the old
+    layout where early outer folds could never satisfy the registered inner
+    selection contract.
+    """
+    if walk_forward_folds != 5:
+        raise ValueError("development-only split requires exactly five walk-forward folds")
+    if embargo_trade_days < 10:
+        raise ValueError("development-only embargo must cover the 10-day label horizon")
+    minimum_train_dates = minimum_inner_fit_dates + minimum_inner_early_stop_dates + minimum_inner_selection_dates
+    if minimum_train_dates < 100:
+        raise ValueError("development-only split requires at least 100 pre-validation dates")
+    dataset = _normalize_labeled_dataset(labeled_dataset)
+    development_dates = tuple(sorted(dataset["trade_date"].unique()))
+    strata, stratum_counts_before = _development_strata(dataset)
+    holdout_symbols, stratum_counts_after = _select_stock_holdout(strata)
+    all_symbols = tuple(sorted(strata))
+    training_symbols = tuple(symbol for symbol in all_symbols if symbol not in set(holdout_symbols))
+    folds = _development_only_walk_forward_folds(
+        development_dates,
+        training_symbols,
+        embargo_trade_days=embargo_trade_days,
+        fold_count=walk_forward_folds,
+        minimum_train_dates=minimum_train_dates,
+    )
+    payload = {
+        "development_dates": list(development_dates),
+        "stock_holdout_symbols": list(holdout_symbols),
+        "training_symbols": list(training_symbols),
+        "walk_forward": [fold.to_dict() for fold in folds],
+        "stratum_counts_before": dict(sorted(stratum_counts_before.items())),
+        "stratum_counts_after": dict(sorted(stratum_counts_after.items())),
+        "embargo_trade_days": embargo_trade_days,
+        "future_holdout_status": "awaiting_model_freeze_and_future_labels",
+    }
+    split_sha256 = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return DevelopmentOnlySplitPlan(
+        development_dates=development_dates,
+        stock_holdout_symbols=holdout_symbols,
+        A_dev_train_symbols=training_symbols,
+        C_dev_unseen_symbols=holdout_symbols,
+        walk_forward=folds,
+        stratum_counts_before=stratum_counts_before,
+        stratum_counts_after=stratum_counts_after,
+        embargo_trade_days=embargo_trade_days,
+        split_sha256=split_sha256,
+    )
+
+
 def _normalize_labeled_dataset(labeled_dataset: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(labeled_dataset, pd.DataFrame):
         raise TypeError("labeled_dataset must be a pandas DataFrame")
@@ -269,6 +364,41 @@ def _walk_forward_folds(
         training_dates = development_dates[:validation_start_index - embargo]
         if not training_dates or not validation_dates:
             raise ValueError("development calendar cannot form an embargoed expanding fold")
+        folds.append(
+            WalkForwardFold(
+                fold=index + 1,
+                training_dates=training_dates,
+                validation_dates=validation_dates,
+                training_symbols=training_symbols,
+                train_start=training_dates[0],
+                train_end=training_dates[-1],
+                validation_start=validation_dates[0],
+                validation_end=validation_dates[-1],
+            )
+        )
+    return tuple(folds)
+
+
+def _development_only_walk_forward_folds(
+    development_dates: tuple[str, ...],
+    training_symbols: tuple[str, ...],
+    *,
+    embargo_trade_days: int,
+    fold_count: int,
+    minimum_train_dates: int,
+) -> tuple[WalkForwardFold, ...]:
+    first_validation_index = minimum_train_dates + embargo_trade_days
+    remaining = len(development_dates) - first_validation_index
+    validation_count = remaining // fold_count
+    if validation_count <= 0:
+        raise ValueError("development calendar is too short for five fully registered embargoed folds")
+    folds = []
+    for index in range(fold_count):
+        validation_start_index = first_validation_index + index * validation_count
+        validation_dates = development_dates[validation_start_index:validation_start_index + validation_count]
+        training_dates = development_dates[:validation_start_index - embargo_trade_days]
+        if len(training_dates) < minimum_train_dates or not validation_dates:
+            raise ValueError("development calendar cannot form registered embargoed folds")
         folds.append(
             WalkForwardFold(
                 fold=index + 1,
