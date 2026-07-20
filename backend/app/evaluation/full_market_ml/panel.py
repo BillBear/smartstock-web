@@ -22,6 +22,17 @@ from .manifests import CollectionManifest, load_manifest, validate_partition
 
 SHARD_COUNT = 64
 _STATIC_ENDPOINTS = {"stock_basic", "namechange", "index_classify", "index_member_all"}
+_STOCK_CODE_ENDPOINTS = {
+    "daily",
+    "daily_basic",
+    "adj_factor",
+    "stk_limit",
+    "moneyflow",
+    "stock_basic",
+    "namechange",
+    "suspend_d",
+    "index_member_all",
+}
 ALLOWED_FEATURE_COLUMNS = (
     "adjusted_open",
     "adjusted_high",
@@ -164,15 +175,25 @@ def _validate_ready_manifest_partitions(root: Path, manifest: CollectionManifest
 
 
 def build_panel_from_frames(
-    frames: Mapping[str, pd.DataFrame], *, industry_relative_enabled: bool = True
+    frames: Mapping[str, pd.DataFrame], *, industry_relative_enabled: bool = True,
+    allowed_exchanges: Iterable[str] | None = None,
 ) -> pd.DataFrame:
     """In-memory test helper with the same historical transformations as production."""
-    return _finalize_symbol_panel(_build_base_panel(frames, industry_relative_enabled=industry_relative_enabled))
+    return _finalize_symbol_panel(
+        _build_base_panel(
+            frames,
+            industry_relative_enabled=industry_relative_enabled,
+            allowed_exchanges=allowed_exchanges,
+        )
+    )
 
 
 def _build_base_panel(
-    frames: Mapping[str, pd.DataFrame], *, industry_relative_enabled: bool, calendar_lookup: _CalendarLookup | None = None
+    frames: Mapping[str, pd.DataFrame], *, industry_relative_enabled: bool,
+    calendar_lookup: _CalendarLookup | None = None,
+    allowed_exchanges: Iterable[str] | None = None,
 ) -> pd.DataFrame:
+    frames = filter_frames_to_exchanges(frames, allowed_exchanges)
     daily = _deduplicate_market_rows(_frame(frames, "daily"), "daily")
     if daily.empty:
         return pd.DataFrame()
@@ -231,6 +252,35 @@ def _build_base_panel(
     panel["at_up_limit"], panel["at_down_limit"], panel["at_up_limit_open"] = _limit_flags(panel, limits)
     panel["next_open_date"] = _next_open_dates(panel, _frame(frames, "trade_cal"))
     return panel.sort_values(["symbol", "trade_date"], kind="stable").reset_index(drop=True)
+
+
+def filter_frames_to_exchanges(
+    frames: Mapping[str, pd.DataFrame], allowed_exchanges: Iterable[str] | None,
+) -> dict[str, pd.DataFrame]:
+    """Filter raw stock-code frames before stripping their exchange suffixes.
+
+    The panel's public ``symbol`` identity is intentionally six-digit for
+    downstream compatibility.  Therefore an exchange-specific research
+    universe must be applied here, before any call to :func:`_symbols`.
+    """
+    if allowed_exchanges is None:
+        return {name: _frame(frames, name) for name in frames}
+    allowed = {str(exchange).strip().upper() for exchange in allowed_exchanges}
+    if not allowed or any(not exchange.isalpha() for exchange in allowed):
+        raise ValueError("allowed_exchanges must contain one or more exchange suffixes")
+    filtered: dict[str, pd.DataFrame] = {}
+    for name in frames:
+        frame = _frame(frames, name)
+        if name not in _STOCK_CODE_ENDPOINTS or frame.empty:
+            filtered[name] = frame
+            continue
+        code_column = "con_code" if name == "index_member_all" and "con_code" in frame else "ts_code"
+        if code_column not in frame:
+            raise ValueError(f"{name} requires a stock code before exchange-universe filtering")
+        codes = frame[code_column].astype("string").str.strip().str.upper()
+        exchanges = codes.str.rsplit(".", n=1).str[-1]
+        filtered[name] = frame.loc[exchanges.isin(allowed)].copy()
+    return filtered
 
 
 def _finalize_symbol_panel(panel: pd.DataFrame) -> pd.DataFrame:

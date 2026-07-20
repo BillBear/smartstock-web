@@ -146,6 +146,40 @@ class FullMarketMLPanelTests(unittest.TestCase):
             self.assertEqual(first["buy_sm_amount"], 20.0)
             self.assertEqual(first["sell_elg_amount"], 2.0)
 
+    def test_exchange_universe_filters_raw_codes_before_symbol_normalization(self):
+        """A .BJ row sharing a six-digit code must not collide with its .SZ peer."""
+        fixtures = two_day_split_fixture()
+        expected_close = build_panel_from_frames(fixtures)["adjusted_close"].max()
+        for endpoint in ("daily", "daily_basic", "adj_factor", "stk_limit", "moneyflow"):
+            source = fixtures.get(endpoint, frame())
+            if source.empty:
+                continue
+            copied = source.copy()
+            copied["ts_code"] = "000001.BJ"
+            if endpoint == "daily":
+                copied["close"] = pd.to_numeric(copied["close"], errors="coerce") * 10
+            fixtures[endpoint] = pd.concat([source, copied], ignore_index=True)
+        fixtures["stock_basic"] = pd.concat(
+            [
+                fixtures["stock_basic"],
+                frame([{"ts_code": "000001.BJ", "list_date": "20240101", "list_status": "L"}]),
+            ],
+            ignore_index=True,
+        )
+        fixtures["index_classify"] = frame([{"index_code": "801010.SI", "industry_name": "行业样本"}])
+        fixtures["index_member_all"] = frame(
+            [
+                {"l1_code": "801010.SI", "con_code": "000001.SZ", "in_date": "20240101", "out_date": ""},
+                {"l1_code": "801010.SI", "con_code": "000001.BJ", "in_date": "20240101", "out_date": ""},
+            ]
+        )
+
+        panel = build_panel_from_frames(fixtures, allowed_exchanges=("SH", "SZ"))
+
+        self.assertEqual(set(panel["symbol"]), {"000001"})
+        self.assertEqual(panel["adjusted_close"].max(), expected_close)
+        self.assertEqual(set(panel["industry_l1"].dropna()), {"行业样本"})
+
     def test_panel_joins_index_context_by_trade_date(self):
         fixtures = two_day_split_fixture()
         fixtures["index_daily"] = frame(
