@@ -509,7 +509,11 @@ def _cross_section_for_date(market: pd.DataFrame, *, include_moneyflow: bool) ->
 
 
 def _schema_requires_moneyflow(feature_schema: Iterable[str]) -> bool:
-    return any("moneyflow" in name or name.startswith(("main_net_", "net_mf_")) for name in feature_schema)
+    names = {str(name) for name in feature_schema}
+    return bool(
+        set(MONEYFLOW_FEATURE_NAMES) & names
+        or any("moneyflow" in name or name.startswith(("main_net_", "net_mf_")) for name in names)
+    )
 
 
 def _market_session_dates(result: pd.DataFrame, market_sessions: Iterable[object] | None) -> tuple[str, ...]:
