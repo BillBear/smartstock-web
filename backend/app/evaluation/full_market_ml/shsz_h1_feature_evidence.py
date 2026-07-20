@@ -168,7 +168,12 @@ def run_shsz_h1_feature_evidence(
         raise
 
 
-def _load_bound_inputs(labels_root: Path, features_root: Path) -> dict[str, Any]:
+def _load_bound_inputs(
+    labels_root: Path,
+    features_root: Path,
+    *,
+    required_feature_names: Iterable[str] = _SCORE_COLUMNS,
+) -> dict[str, Any]:
     registry_path = labels_root / "dataset_registry.json"
     split_path = labels_root / "development_split_plan.json"
     label_manifest_path = labels_root / "label_split_manifest.json"
@@ -193,7 +198,7 @@ def _load_bound_inputs(labels_root: Path, features_root: Path) -> dict[str, Any]
     _verify_label_files(labels_root, registry)
     matrix_root = _verify_feature_matrix(features_root, feature_manifest, split_plan.development_dates)
     available = _feature_contract_names(feature_manifest)
-    required = set(_SCORE_COLUMNS)
+    required = {str(value) for value in required_feature_names}
     missing = sorted(required - available)
     if missing:
         raise SHSZH1FeatureEvidenceError("R2 feature contract misses H1 evidence fields: " + ", ".join(missing))
@@ -388,11 +393,17 @@ def _load_labels(inputs: Mapping[str, Any], *, on_progress) -> pd.DataFrame:
     return labels.sort_values(["trade_date", "symbol"], kind="stable").reset_index(drop=True)
 
 
-def _load_joined_feature_rows(inputs: Mapping[str, Any], labels: pd.DataFrame, *, on_progress) -> pd.DataFrame:
+def _load_joined_feature_rows(
+    inputs: Mapping[str, Any],
+    labels: pd.DataFrame,
+    *,
+    on_progress,
+    feature_columns: Iterable[str] = _SCORE_COLUMNS,
+) -> pd.DataFrame:
     matrix_root = Path(inputs["matrix_root"])
     dates = tuple(inputs["split_plan"].development_dates)
     frames = []
-    columns = ["trade_date", "symbol", *_SCORE_COLUMNS]
+    columns = ["trade_date", "symbol", *(str(value) for value in feature_columns)]
     for index, trade_date in enumerate(dates, start=1):
         path = matrix_root / f"trade_date={trade_date}" / "data.parquet"
         if not path.is_file():
