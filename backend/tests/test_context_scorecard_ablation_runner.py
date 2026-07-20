@@ -29,7 +29,7 @@ class ContextScorecardAblationRunnerTests(unittest.TestCase):
             )
 
             self.assertEqual(report["status"], "complete")
-            self.assertEqual(report["model_status"], "research_only_exploratory")
+            self.assertEqual(report["model_status"], "research_only_failed_gate")
             self.assertTrue(report["post_selection_exploratory"])
             self.assertFalse(report["production_integration_allowed"])
             self.assertFalse(report["final_holdout_used"])
@@ -93,6 +93,41 @@ class ContextScorecardAblationRunnerTests(unittest.TestCase):
             progress = json.loads((output / "progress.json").read_text(encoding="utf-8"))
             self.assertEqual(progress["status"], "failed")
             self.assertEqual(progress["stage"], "failed")
+
+    def test_reports_inactive_candidate_as_failed_research_gate(self):
+        from app.evaluation.full_market_ml.context_scorecard_ablation_runner import _report
+
+        report = _report(
+            {"source_dataset_id": "dataset", "source_dataset_sha256": "dataset-sha", "sha256": "asset-sha", "feature_contract_sha256": "contract-sha"},
+            {"sha256": "split-sha"},
+            {
+                "input_summary": {"row_count": 1},
+                "candidate_screen": {"status": "exploratory_inactive", "production_integration_allowed": False},
+            },
+            code_commit="fixture-commit",
+        )
+
+        self.assertEqual(report["model_status"], "research_only_failed_gate")
+
+    def test_reports_supported_candidate_as_exploratory_not_production_candidate(self):
+        from app.evaluation.full_market_ml.context_scorecard_ablation_runner import _report
+
+        report = _report(
+            {"source_dataset_id": "dataset", "source_dataset_sha256": "dataset-sha", "sha256": "asset-sha", "feature_contract_sha256": "contract-sha"},
+            {"sha256": "split-sha"},
+            {
+                "input_summary": {"row_count": 1},
+                "candidate_screen": {
+                    "status": "exploratory_post_selection_only",
+                    "diagnostic_support_observed": True,
+                    "production_integration_allowed": False,
+                },
+            },
+            code_commit="fixture-commit",
+        )
+
+        self.assertEqual(report["model_status"], "research_only_exploratory")
+        self.assertFalse(report["production_integration_allowed"])
 
 
 def _write_fixture_assets(root: Path) -> tuple[Path, Path]:

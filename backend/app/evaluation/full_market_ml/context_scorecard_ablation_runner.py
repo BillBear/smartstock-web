@@ -212,9 +212,14 @@ def _report(
     *,
     code_commit: str,
 ) -> dict[str, Any]:
+    candidate_screen = result["candidate_screen"]
+    has_exploratory_support = (
+        candidate_screen.get("status") == "exploratory_post_selection_only"
+        and candidate_screen.get("diagnostic_support_observed") is True
+    )
     return {
         "status": "complete",
-        "model_status": "research_only_exploratory",
+        "model_status": "research_only_exploratory" if has_exploratory_support else "research_only_failed_gate",
         "research_only": True,
         "post_selection_exploratory": True,
         "model_selection_allowed": False,
@@ -227,7 +232,7 @@ def _report(
         "feature_contract_sha256": str(manifest.get("feature_contract_sha256", "")),
         "split_sha256": str(split_payload.get("sha256", "")),
         "input_summary": result["input_summary"],
-        "candidate_screen": result["candidate_screen"],
+        "candidate_screen": candidate_screen,
         "limitations": [
             "The context features were selected by a prior development-period audit; this comparison is post-selection exploratory research.",
             "Each context direction is fit only from the current outer fold's A-quadrant training dates and symbols.",
