@@ -45,6 +45,14 @@ class DetailedMoneyflowCandidateAssetTests(unittest.TestCase):
             with self.assertRaisesRegex(DetailedMoneyflowCandidateAssetError, "quality report SHA256"):
                 fixture.inspect()
 
+    def test_rejects_raw_seed_manifest_hash_mismatch(self) -> None:
+        with _SourceRunFixture() as fixture:
+            nested_manifest = fixture.run_root / "upstream-raw" / "manifests" / "full-build.json"
+            nested_manifest.write_text(json.dumps({"partitions": []}), encoding="utf-8")
+
+            with self.assertRaisesRegex(DetailedMoneyflowCandidateAssetError, "raw seed provenance"):
+                fixture.inspect()
+
     def test_rejects_missing_detailed_raw_or_derived_fields(self) -> None:
         with _SourceRunFixture(drop_dataset_field="buy_md_amount") as fixture:
             with self.assertRaisesRegex(DetailedMoneyflowCandidateAssetError, "raw detailed fields"):
@@ -96,7 +104,7 @@ class _SourceRunFixture:
         quality_path = self.run_root / "artifacts" / "full-build" / "quality_report.json"
         manifest_path = self.run_root / "manifests" / "full-build.json"
         raw_source = self.run_root / "upstream-raw"
-        raw_source_manifest = raw_source / "source_manifest.json"
+        raw_source_manifest = raw_source / "manifests" / "full-build.json"
         _write_parquet(dataset_path, dataset)
         _write_parquet(panel_path, panel)
         quality = {
@@ -109,7 +117,14 @@ class _SourceRunFixture:
         manifest = {"partitions": [{"endpoint": "moneyflow", "status": "collected"}]}
         _write_json(quality_path, quality)
         _write_json(manifest_path, manifest)
-        _write_json(raw_source_manifest, {"asset_id": "raw-fixture"})
+        _write_json(raw_source_manifest, {"partitions": [{"endpoint": "moneyflow", "status": "collected"}]})
+        _write_json(
+            raw_source / "source_manifest.json",
+            {
+                "asset_id": "raw-fixture",
+                "files": [{"path": "manifests/full-build.json", "sha256": _sha256(raw_source_manifest)}],
+            },
+        )
         _write_json(
             self.run_root / "raw_seed_provenance.json",
             {

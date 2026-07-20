@@ -97,6 +97,7 @@ def inspect_detailed_moneyflow_candidate_asset(
             "quality_report_sha256": source["hashes"]["quality_report"],
             "collection_manifest_sha256": source["hashes"]["collection_manifest"],
             "raw_seed_source_manifest_sha256": source["hashes"]["raw_seed_source_manifest"],
+            "raw_seed_asset_manifest_sha256": source["hashes"]["raw_seed_asset_manifest"],
             "panel_shard_count": len(source["panel_paths"]),
         },
         "quality_gate": {
@@ -168,13 +169,31 @@ def _load_verified_source(root: Path) -> dict[str, object]:
     if not moneyflow_partitions or any(item.get("status") == "failed" for item in moneyflow_partitions):
         raise DetailedMoneyflowCandidateAssetError("collection manifest has unavailable moneyflow partitions")
     raw_source = _require_directory(provenance.get("source_root", ""), "raw seed source root")
-    raw_source_manifest = raw_source / "source_manifest.json"
+    raw_asset_manifest_path = raw_source / "source_manifest.json"
+    if not raw_asset_manifest_path.is_file():
+        raise DetailedMoneyflowCandidateAssetError("raw seed asset manifest is missing")
+    raw_asset_manifest = _read_json(raw_asset_manifest_path)
+    raw_source_manifest = raw_source / "manifests" / "full-build.json"
     if not raw_source_manifest.is_file():
         raise DetailedMoneyflowCandidateAssetError("raw seed source manifest is missing")
+    source_record = next(
+        (
+            item
+            for item in raw_asset_manifest.get("files", [])
+            if isinstance(item, Mapping) and item.get("path") == "manifests/full-build.json"
+        ),
+        None,
+    )
     observed_raw_source_hash = _sha256_file(raw_source_manifest)
-    if provenance.get("verification_status") != "verified" or provenance.get("source_manifest_sha256") != observed_raw_source_hash:
+    if (
+        not isinstance(source_record, Mapping)
+        or provenance.get("verification_status") != "verified"
+        or provenance.get("source_manifest_sha256") != observed_raw_source_hash
+        or source_record.get("sha256") != observed_raw_source_hash
+    ):
         raise DetailedMoneyflowCandidateAssetError("raw seed provenance does not match its source manifest")
     hashes["raw_seed_source_manifest"] = observed_raw_source_hash
+    hashes["raw_seed_asset_manifest"] = _sha256_file(raw_asset_manifest_path)
     dataset = pq.ParquetFile(dataset_path)
     dataset_columns = set(dataset.schema_arrow.names)
     _require_columns(dataset_columns, DETAILED_MONEYFLOW_AMOUNT_FIELDS, "dataset raw detailed fields")
