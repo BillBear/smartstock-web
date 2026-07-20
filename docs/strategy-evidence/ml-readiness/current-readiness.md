@@ -95,6 +95,9 @@ docs/strategy-evidence/ml-readiness/2026-07-04-training-dataset-audit.md
 
 最新审计结果显示：当前最新全 A 快照为 `2026-07-03`，数量 `5210`，股票数、板块和行业覆盖已经达标；但满足全市场阈值的历史快照日期只有 `18` 个，按 `sample_step=3` 估算样本数 `31260`，低于 `100000` 最低要求。因此 `dataset_build_ready=false`，还不能训练新的生产候选模型。
 
+这个旧的“持久化候选快照”预检不再是全市场离线原始面板的唯一数据来源。它继续约束旧快照训练流程，
+不能被删除或放宽；但是它不能否定下文 2026-07-20 认证的 TuShare SH/SZ 原始面板资产。
+
 在新模型通过样本外证据前，前端和 API 必须继续把模型概率标记为 `弱模型参考`。
 
 ## 2026-07-12 Full-Market R2
@@ -125,3 +128,19 @@ baseline、风险和受控组合评估。历史覆盖与日截面 alpha 标签�
 不能展示为可靠概率。完整证据见
 `2026-07-14-ranking-reset-development-review.md` 和
 `2026-07-14-ranking-reset-closure.md`。
+
+## 2026-07-20 SH/SZ R1 数据资产
+
+新的 `shsz_a_share_v1` 离线研究 universe 已从 TuShare 原始分区重建，明确排除了北交所。R1
+认证资产包含 2,650,198 行面板、5,284 只 SH/SZ 股票和 516 个交易日；开发期标签资产包含
+1,845,361 条完整 3/5/10/20 日标签、5,134 只股票和 377 个信号日。每日完整标签数为
+4,826 至 4,942，标签质量审计通过。
+
+这只解决了训练输入、标签和开发期切分的可复现性：开发期固定为 4,107 只 A 股票和 1,027 只 C
+股票，五折均有 20 交易日 embargo。它没有训练、选择或冻结新模型；正式 B/D 时间留出仍为
+`awaiting_model_freeze_and_future_labels`，至少需要模型冻结后收集 40 个新的可标注信号日。
+
+因此当前生产模型的状态仍是 `paper_only` / `weak_reference_only`，历史全市场候选仍为
+`research_only_failed_gate`。下一步只能是 R2 特征覆盖、泄漏和 offline/online parity 审计，
+不能把这批数据资产表述为模型已具备预测能力。详见
+`2026-07-20-shsz-r1-panel-label-split-certification.md`。

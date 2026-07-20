@@ -8,6 +8,7 @@ Current readiness summary:
 
 - [ML current readiness](current-readiness.md)
 - [2026-07-04 training dataset audit](2026-07-04-training-dataset-audit.md)
+- [2026-07-20 SH/SZ R1 panel, label, and split certification](2026-07-20-shsz-r1-panel-label-split-certification.md)
 
 ## Production Minimums
 
