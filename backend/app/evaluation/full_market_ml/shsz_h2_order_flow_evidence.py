@@ -47,7 +47,7 @@ H2_CONTROL_FEATURES = (
 )
 PRIMARY_BASELINE = "adjusted_return_60d"
 DIAGNOSTIC_BASELINES = ("adjusted_return_20d", "amount_log_rank")
-_FEATURE_COLUMNS = (*H2_FEATURES, *H2_CONTROL_FEATURES, PRIMARY_BASELINE)
+H2_MATRIX_FEATURES = tuple(dict.fromkeys((*H2_FEATURES, *H2_CONTROL_FEATURES, PRIMARY_BASELINE, *DIAGNOSTIC_BASELINES)))
 
 
 class SHSZH2OrderFlowEvidenceError(ValueError):
@@ -118,7 +118,7 @@ def run_shsz_h2_order_flow_evidence(
     temporary.mkdir(parents=True)
     try:
         _write_progress(temporary, "data-verify", status="running")
-        inputs = _load_bound_inputs(labels_root, features_root, required_feature_names=_FEATURE_COLUMNS)
+        inputs = _load_bound_inputs(labels_root, features_root, required_feature_names=H2_MATRIX_FEATURES)
         inputs["input_manifest"].update({"hypothesis": "H2_observed_detailed_order_flow", "h2_features": list(H2_FEATURES), "h2_controls": list(H2_CONTROL_FEATURES)})
         _write_json(temporary / "input_manifest.json", inputs["input_manifest"])
         labels = _load_labels(inputs, on_progress=lambda current, total: _write_progress(temporary, "load-labels", status="running", completed_files=current, total_files=total))
@@ -163,7 +163,7 @@ def run_shsz_h2_order_flow_evidence(
 
 
 def _load_full_market_matrix(inputs: Mapping[str, Any], *, on_progress) -> pd.DataFrame:
-    columns = ["trade_date", "symbol", *_FEATURE_COLUMNS]
+    columns = ["trade_date", "symbol", *H2_MATRIX_FEATURES]
     frames = []
     dates = inputs["split_plan"].development_dates
     for index, date in enumerate(dates, start=1):

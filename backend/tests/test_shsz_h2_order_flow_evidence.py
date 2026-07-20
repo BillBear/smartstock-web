@@ -8,12 +8,18 @@ import pandas as pd
 from app.evaluation.full_market_ml.shsz_h2_order_flow_evidence import (
     H2_CONTROL_FEATURES,
     H2_FEATURES,
+    H2_MATRIX_FEATURES,
     SHSZH2OrderFlowEvidenceError,
     residualize_h2_order_flow_score,
 )
 
 
 class SHSZH2OrderFlowEvidenceTests(unittest.TestCase):
+    def test_matrix_contract_contains_every_registered_diagnostic_baseline(self):
+        self.assertIn("adjusted_return_60d", H2_MATRIX_FEATURES)
+        self.assertIn("adjusted_return_20d", H2_MATRIX_FEATURES)
+        self.assertIn("amount_log_rank", H2_MATRIX_FEATURES)
+
     def test_residualization_removes_a_score_explained_only_by_fixed_controls(self):
         rows = _synthetic_h2_rows()
         for feature in H2_FEATURES:
