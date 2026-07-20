@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+from contextlib import redirect_stderr
+import io
+from pathlib import Path
+import tempfile
 import unittest
 
 import pandas as pd
 
-from scripts.probe_full_market_tushare_history import probe_tushare_history
+from scripts.probe_full_market_tushare_history import (
+    DEFAULT_ENDPOINTS,
+    _parse_endpoint_subset,
+    main,
+    probe_tushare_history,
+)
 
 
 class FakeTuSharePro:
@@ -31,6 +40,34 @@ class FakeTuSharePro:
 
 
 class FullMarketMLTuShareHistoryProbeTests(unittest.TestCase):
+    def test_endpoint_subset_preserves_order_and_default(self):
+        self.assertEqual(DEFAULT_ENDPOINTS, _parse_endpoint_subset(None))
+        self.assertEqual(
+            ("moneyflow", "daily_basic", "stk_limit"),
+            _parse_endpoint_subset("moneyflow,daily_basic,stk_limit"),
+        )
+
+    def test_endpoint_subset_rejects_duplicates_and_unknown_endpoints(self):
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            _parse_endpoint_subset("moneyflow,moneyflow")
+        with self.assertRaisesRegex(ValueError, "unknown"):
+            _parse_endpoint_subset("moneyflow,not_a_real_endpoint")
+
+    def test_cli_rejects_invalid_endpoint_subset_before_reading_token(self):
+        with tempfile.TemporaryDirectory() as root, redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            main(
+                [
+                    "--start-date",
+                    "20240603",
+                    "--end-date",
+                    "20260710",
+                    "--output",
+                    str(Path(root) / "probe.json"),
+                    "--endpoints",
+                    "moneyflow,moneyflow",
+                ]
+            )
+
     def test_probe_reports_timestamp_and_coverage_contracts(self):
         report = probe_tushare_history(
             FakeTuSharePro(),

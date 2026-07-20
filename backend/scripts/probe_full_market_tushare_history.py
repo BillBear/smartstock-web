@@ -368,20 +368,46 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
-def main() -> int:
+def _parse_endpoint_subset(value: str | None) -> tuple[str, ...]:
+    """Validate an explicit, bounded probe set while preserving the default."""
+    if value is None:
+        return DEFAULT_ENDPOINTS
+    endpoints = tuple(item.strip() for item in str(value).split(",") if item.strip())
+    if not endpoints:
+        raise ValueError("endpoint subset cannot be empty")
+    duplicates = sorted({name for name in endpoints if endpoints.count(name) > 1})
+    if duplicates:
+        raise ValueError("duplicate endpoints: " + ", ".join(duplicates))
+    unknown = sorted(set(endpoints) - set(DEFAULT_ENDPOINTS))
+    if unknown:
+        raise ValueError("unknown endpoints: " + ", ".join(unknown))
+    return endpoints
+
+
+def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--start-date", required=True)
     parser.add_argument("--end-date", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--stock-basic-output", type=Path)
-    args = parser.parse_args()
+    parser.add_argument("--endpoints", help="optional comma-separated subset of known endpoints")
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    try:
+        endpoints = _parse_endpoint_subset(args.endpoints)
+    except ValueError as exc:
+        parser.error(str(exc))
     token = os.environ.get("TUSHARE_TOKEN", "").strip()
     if not token:
         parser.error("TUSHARE_TOKEN is not configured")
     import tushare as ts
 
     pro = ts.pro_api(token)
-    report = probe_tushare_history(pro, start_date=args.start_date, end_date=args.end_date)
+    report = probe_tushare_history(
+        pro,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        endpoints=endpoints,
+    )
     _write_json_atomic(args.output, report)
     if args.stock_basic_output:
         args.stock_basic_output.parent.mkdir(parents=True, exist_ok=True)
