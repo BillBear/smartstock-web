@@ -39,6 +39,8 @@ class SHSZH1FeatureEvidenceTests(unittest.TestCase):
             self.assertTrue((fixture.output_root / "predictions.parquet").is_file())
             self.assertTrue((fixture.output_root / "model_card.md").is_file())
             self.assertIn("No model was trained", (fixture.output_root / "model_card.md").read_text())
+            predictions = pq.read_table(fixture.output_root / "predictions.parquet").to_pandas()
+            self.assertTrue(predictions["label_severe_negative_10d"].equals(predictions["severe_negative_10d"]))
 
     def test_rejects_feature_asset_with_stale_label_registry_hash(self):
         with _FixtureEvidenceAsset() as fixture:

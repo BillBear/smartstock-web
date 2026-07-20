@@ -441,6 +441,9 @@ def _score_fixed_h1(rows: pd.DataFrame) -> pd.DataFrame:
         scores[feature] = result.groupby("trade_date", sort=False)[feature].rank(method="average", pct=True)
     result["h1_industry_relative_score"] = scores.mean(axis=1)
     result["baseline_adjusted_return_60d_score"] = result[BASELINE_FEATURE]
+    # The shared evaluator uses the historical label-prefixed spelling. Preserve
+    # the R1 field and expose a value-identical alias so risk rates are factual.
+    result["label_severe_negative_10d"] = result["severe_negative_10d"]
     return result
 
 
