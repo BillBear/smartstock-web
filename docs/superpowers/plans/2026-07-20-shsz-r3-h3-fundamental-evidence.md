@@ -119,7 +119,7 @@ H3 只有同时满足全部条件才能标记为 `development_feature_group_cand
 4. C 至少 `4/5` 折的 NDCG@10 uplift 不低于 `-0.02`；C 中位 uplift 至少为 A 中位 uplift 的 `80%`。A 中位 uplift 非正时直接失败。
 5. A 不得在超过 `3/5` 折中同时劣于两个诊断 baseline 的 NDCG@10 与 Top5 成本后平均收益。
 6. 每个 A/C 折的 H3 完整行覆盖率至少 `0.95`，所有使用日期的残差化 contract 均成功。
-7. H3 九个水平和九个变化字段必须分别输出 daily IC、ICIR、分桶收益、相关性、PSI、行业/市值/流动性分层；任何核心字段或整个组合出现跨折方向反转、不可接受漂移或单一分层驱动时，候选状态必须失败，而不是通过增加模型复杂度掩盖。
+7. H3 九个水平和九个变化字段必须分别输出 daily IC、ICIR、分桶收益、相关性、PSI、行业/市值/流动性分层；其可计算的 `feature_audit_gate` 只使用 A 的五个开发验证折和 `alpha_target_10d`：每一个冻结字段在每折覆盖率必须至少 `0.95`，其折级 `median_ic` 的符号必须在至少 `4/5` 折匹配预注册经济方向（`debt_to_assets` 与 `debt_to_assets_change` 为负，其余为正），且相对前一折的 PSI 在第 2 至第 5 折均不得超过 `0.50`。任一字段不满足即 `feature_audit_gate=false`，整个等权 H3 配置失败；不得删除、反转、重加权或以更复杂模型掩盖该失败。`0.50` 是此前 R4B 基本面块使用且已记录的漂移上限，本次在正式 H3 运行前固定，并不根据 smoke 或正式结果改变。
 
 即使通过，`production_integration_allowed=false`。H3 不训练分类器、回归器或 ranker，不生成概率，不会进入页面或 CoachService。
 
