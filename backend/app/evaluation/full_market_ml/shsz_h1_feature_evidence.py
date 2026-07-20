@@ -214,6 +214,8 @@ def _load_bound_inputs(labels_root: Path, features_root: Path) -> dict[str, Any]
             "feature_asset_manifest_sha256": _sha256_file(feature_manifest_path),
             "feature_asset_payload_sha256": str(feature_manifest.get("sha256", "")),
             "source_panel_manifest_sha256": panel_sha,
+            "registered_matrix_path": str(feature_manifest.get("matrix_path", "")),
+            "resolved_matrix_path": str(matrix_root),
             "formal_future_holdout_status": "awaiting_model_freeze_and_future_labels",
             "bound_at": _now(),
         },
@@ -313,8 +315,16 @@ def _verify_label_files(root: Path, registry: Mapping[str, Any]) -> None:
 
 
 def _verify_feature_matrix(root: Path, manifest: Mapping[str, Any], development_dates: Iterable[str]) -> Path:
-    matrix_root = Path(str(manifest.get("matrix_path", ""))).expanduser().resolve()
-    if not matrix_root.is_dir() or not matrix_root.is_relative_to(root):
+    registered = Path(str(manifest.get("matrix_path", ""))).expanduser().resolve()
+    root_matrix = (root / "matrix").resolve()
+    if registered.is_dir() and registered.is_relative_to(root):
+        matrix_root = registered
+    elif root_matrix.is_dir():
+        # R2 was atomically promoted from a staging directory.  Older manifests
+        # retain that now-removed staging path, but only the same asset's fixed
+        # matrix/ directory is admissible as a relocation target.
+        matrix_root = root_matrix
+    else:
         raise SHSZH1FeatureEvidenceError("R2 matrix path is unavailable or escapes its feature asset root")
     # This deliberate Hive scan rejects the old v1 large_string/string partition
     # mismatch before any labels or scores are consumed.

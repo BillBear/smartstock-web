@@ -56,6 +56,22 @@ class SHSZH1FeatureEvidenceTests(unittest.TestCase):
                     bootstrap_iterations=3,
                 )
 
+    def test_resolves_matrix_from_asset_root_when_manifest_keeps_old_staging_path(self):
+        with _FixtureEvidenceAsset() as fixture:
+            fixture._feature_manifest["matrix_path"] = str(fixture.feature_root / ".old-staging" / "matrix")
+            fixture.refresh_feature_label_binding()
+
+            report = run_shsz_h1_feature_evidence(
+                label_root=fixture.label_root,
+                feature_asset_root=fixture.feature_root,
+                output_dir=fixture.output_root,
+                code_commit="fixture",
+                bootstrap_iterations=3,
+            )
+
+            self.assertEqual("complete", report["status"])
+            self.assertEqual(str((fixture.feature_root / "matrix").resolve()), report["input_manifest"]["resolved_matrix_path"])
+
     def test_rejects_bj_symbols_before_evidence_calculation(self):
         with _FixtureEvidenceAsset() as fixture:
             label_path = next((fixture.label_root / "labels").rglob("*.parquet"))
