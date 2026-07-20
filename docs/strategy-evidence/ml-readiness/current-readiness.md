@@ -125,3 +125,18 @@ baseline、风险和受控组合评估。历史覆盖与日截面 alpha 标签�
 不能展示为可靠概率。完整证据见
 `2026-07-14-ranking-reset-development-review.md` 和
 `2026-07-14-ranking-reset-closure.md`。
+
+## 2026-07-20 SH/SZ R1 与 R2 数据准备
+
+新的 SH/SZ 研究数据链路已经完成研究级准备，但**没有训练新模型**：
+
+- R1 标签与五折 development split：1,845,361 条可标注样本、5,134 只股票、377 个信号日；
+  正式未来时间 holdout 仍为 `awaiting_model_freeze_and_future_labels`。
+- R2 特征资产：2,546,333 行、5,280 只 SH/SZ 股票、496 个特征日、111 个特征；五折最低
+  覆盖率 95.6954%，三个固定交易日 offline/online parity 均通过。
+- R2 保持 `research_ready=true`、`production_integration_allowed=false`，不含标签、未来字段或
+  模型预测，也不能改变生产候选池和 CoachService 决策。
+
+首个 R2 文件封装版本因 Hive 分区键类型冲突不能被标准 dataset scanner 读取，已保留为失败
+证据且不得使用；经读取契约修复后，v2 已重新物化并通过分区哈希、键唯一性和 Hive 扫描验证。
+完整证据见 `2026-07-20-shsz-r2-feature-asset-certification.md`。
