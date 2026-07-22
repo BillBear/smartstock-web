@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from datetime import datetime, timezone
 from pathlib import Path
+import tempfile
 from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 from sklearn.linear_model import LogisticRegression
 
@@ -334,6 +338,80 @@ def run_fixed_logistic_oof(rows: pd.DataFrame, split_plan: Mapping[str, Any]) ->
     }
 
 
+def run_ml_recovery_acceptance(
+    *,
+    label_root: str | Path,
+    feature_asset_root: str | Path,
+    panel_root: str | Path,
+    output_dir: str | Path,
+    code_commit: str,
+) -> dict[str, Any]:
+    """Run the sealed recovery baseline and atomically publish local artifacts."""
+    destination = Path(output_dir).expanduser().resolve()
+    if destination.exists():
+        raise FileExistsError(f"recovery acceptance output directory already exists: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.parent / f".{destination.name}.running"
+    if temporary.exists():
+        raise FileExistsError(f"incomplete recovery acceptance requires inspection: {temporary}")
+    temporary.mkdir()
+    try:
+        _write_progress(temporary, "data-verify", status="running")
+        inputs = verify_recovery_inputs(label_root, feature_asset_root, panel_root)
+        input_manifest = {**inputs["input_manifest"], "code_commit": str(code_commit)}
+        _write_json(temporary / "input_manifest.json", input_manifest)
+        _write_json(temporary / "fixed_feature_contract.json", _fixed_feature_contract(inputs["feature_manifest"]))
+
+        _write_progress(temporary, "build-common-mask", status="running")
+        rows, mask_report = build_recovery_dataset(inputs)
+        _write_json(temporary / "common_mask_report.json", mask_report)
+        _write_json(temporary / "data_quality_report.json", _data_quality_report(rows, mask_report))
+
+        _write_progress(temporary, "feature-diagnostics", status="running", eligible_row_count=int(len(rows)))
+        diagnostics = audit_fixed_features(rows, inputs["split_plan"])
+        diagnostics.to_csv(temporary / "feature_diagnostics.csv", index=False)
+
+        _write_progress(temporary, "fixed-oof", status="running", eligible_row_count=int(len(rows)))
+        predictions, oof_report = run_fixed_logistic_oof(rows, inputs["split_plan"])
+        _write_parquet(temporary / "oof_predictions.parquet", predictions)
+        _write_json(temporary / "fold_metrics.json", oof_report["fold_metrics"])
+        _write_daily_metrics(predictions, temporary / "daily_metrics.csv")
+        pd.DataFrame(oof_report["coefficients"]).to_csv(temporary / "coefficients.csv", index=False)
+        _write_json(temporary / "candidate_screen.json", oof_report["candidate_screen"])
+        report = {
+            "status": "complete",
+            "research_only": True,
+            "production_integration_allowed": False,
+            "model_role": "fixed_development_only_ranking_baseline",
+            "model_serialized": False,
+            "code_commit": str(code_commit),
+            "input_manifest": input_manifest,
+            "fixed_features": list(FIXED_FEATURES),
+            "eligible_row_count": int(len(rows)),
+            "eligible_symbol_count": int(rows["symbol"].nunique()),
+            "eligible_trade_date_count": int(rows["trade_date"].nunique()),
+            "candidate_screen": oof_report["candidate_screen"],
+            "limitations": [
+                "Only the sealed R1 development A/C folds were read; no future time holdout was opened.",
+                "The model score is an uncalibrated ranking score, not a probability or trading instruction.",
+                "This research run cannot modify production selection, ranking, trading, or risk behavior.",
+            ],
+        }
+        _write_json(temporary / "ml_recovery_acceptance.json", report)
+        _write_progress(temporary, "complete", status="complete", eligible_row_count=int(len(rows)))
+        os.replace(temporary, destination)
+        return report
+    except BaseException as error:
+        _write_progress(
+            temporary,
+            "failed",
+            status="failed",
+            failure_type=type(error).__name__,
+            failure_message=str(error),
+        )
+        raise
+
+
 def _evaluate_daily_rankings(rows: pd.DataFrame, score_column: str) -> dict[str, float | int]:
     daily = [_daily_ranking_metrics(current, score_column) for _, current in rows.groupby("trade_date", sort=True)]
     if not daily:
@@ -396,6 +474,59 @@ def _fixed_baseline_gate(fold_metrics: Mapping[str, Any]) -> dict[str, Any]:
         "evaluated_fold_counts": {key: len(value) for key, value in grouped.items()},
         "production_integration_allowed": False,
     }
+
+
+def _fixed_feature_contract(feature_manifest: Mapping[str, Any]) -> dict[str, Any]:
+    by_name = {
+        str(item.get("name")): item
+        for item in feature_manifest.get("feature_contract", {}).get("features", ())
+        if isinstance(item, Mapping) and item.get("name")
+    }
+    return {
+        "features": [
+            {
+                "name": feature,
+                "source": by_name[feature].get("source"),
+                "formula": by_name[feature].get("formula"),
+                "availability": by_name[feature].get("availability"),
+                "rank_transform": "same_trade_date_percentile_rank",
+            }
+            for feature in FIXED_FEATURES
+        ],
+        "forbidden_feature_tokens": list(_FORBIDDEN_FEATURE_TOKENS),
+        "selection_or_tuning_allowed": False,
+        "production_integration_allowed": False,
+    }
+
+
+def _data_quality_report(rows: pd.DataFrame, mask_report: Mapping[str, Any]) -> dict[str, Any]:
+    daily_positive = rows.groupby("trade_date", sort=True)["alpha_top10_10d"].mean()
+    feature_coverage = {
+        feature: float(rows[feature].notna().mean())
+        for feature in FIXED_FEATURES
+    }
+    return {
+        "status": "complete",
+        "source": dict(mask_report),
+        "eligible_row_count": int(len(rows)),
+        "eligible_symbol_count": int(rows["symbol"].nunique()),
+        "eligible_trade_date_count": int(rows["trade_date"].nunique()),
+        "daily_positive_rate_min": float(daily_positive.min()),
+        "daily_positive_rate_median": float(daily_positive.median()),
+        "daily_positive_rate_max": float(daily_positive.max()),
+        "fixed_feature_coverage": feature_coverage,
+        "common_mask_applied": True,
+        "formal_future_holdout_read": False,
+    }
+
+
+def _write_daily_metrics(predictions: pd.DataFrame, path: Path) -> None:
+    records = []
+    for (fold, quadrant, trade_date), current in predictions.groupby(["fold", "quadrant", "trade_date"], sort=True):
+        for score_name in ("model", "baseline"):
+            metrics = _daily_ranking_metrics(current, f"{score_name}_score")
+            records.append({"fold": int(fold), "quadrant": str(quadrant), "trade_date": str(trade_date), "score": score_name, **metrics})
+    pd.DataFrame(records).to_csv(path, index=False)
 
 
 def _require_r1_research_only(registry: Mapping[str, Any], manifest: Mapping[str, Any]) -> None:
@@ -642,3 +773,55 @@ def _sha256_payload(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(
         json.dumps(dict(payload), ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _write_progress(path: Path, stage: str, *, status: str, **details: Any) -> None:
+    _write_json(
+        path / "progress.json",
+        {
+            "stage": stage,
+            "status": status,
+            "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+            **details,
+        },
+    )
+
+
+def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    _atomic_write(path, lambda handle: json.dump(payload, handle, ensure_ascii=True, indent=2, sort_keys=True, default=_json_default))
+
+
+def _write_parquet(path: Path, rows: pd.DataFrame) -> None:
+    def write(handle: Any) -> None:
+        table = pa.Table.from_pandas(rows, preserve_index=False)
+        pq.write_table(table, handle, compression="zstd")
+
+    _atomic_write(path, write, binary=True)
+
+
+def _atomic_write(path: Path, writer: Any, *, binary: bool = False) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        mode = "wb" if binary else "w"
+        with os.fdopen(descriptor, mode, encoding=None if binary else "utf-8") as handle:
+            writer(handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, np.bool_):
+        return bool(value)
+    raise TypeError(f"cannot serialize {type(value).__name__}")

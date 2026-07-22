@@ -16,6 +16,7 @@ from app.evaluation.ml_recovery_acceptance import (
     audit_fixed_features,
     build_recovery_dataset,
     build_recovery_rows,
+    run_ml_recovery_acceptance,
     run_fixed_logistic_oof,
     validate_fixed_features,
     verify_recovery_inputs,
@@ -105,6 +106,27 @@ class MLRecoveryAcceptanceOOFTests(unittest.TestCase):
         self.assertTrue((predictions["train_max_date"] < predictions["trade_date"]).all())
         self.assertFalse(set(_oof_split()["C_dev_unseen_symbols"]) & set(report["fit_symbols_by_fold"]["1"]))
         self.assertTrue(pd.to_numeric(predictions["model_score"], errors="coerce").notna().all())
+
+
+class MLRecoveryAcceptanceRunnerTests(unittest.TestCase):
+    def test_runner_preserves_failed_attempt_with_explicit_progress(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "result"
+
+            with self.assertRaisesRegex(MLRecoveryAcceptanceError, "label registry is missing"):
+                run_ml_recovery_acceptance(
+                    label_root=root / "missing-labels",
+                    feature_asset_root=root / "missing-features",
+                    panel_root=root / "missing-panel",
+                    output_dir=output,
+                    code_commit="test",
+                )
+
+            progress = json.loads((root / ".result.running" / "progress.json").read_text(encoding="utf-8"))
+            self.assertFalse(output.exists())
+            self.assertEqual("failed", progress["status"])
+            self.assertEqual("MLRecoveryAcceptanceError", progress["failure_type"])
 
 
 def _asset_roots(root: Path) -> dict[str, Path]:
