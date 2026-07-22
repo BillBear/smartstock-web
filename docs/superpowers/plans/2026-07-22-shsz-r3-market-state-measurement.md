@@ -34,6 +34,7 @@
 | `mixed` | all other complete-history dates |
 | Index | one finite positive `market_index_close` per day from certified panel context |
 | Breadth | all R2 SH/SZ rows where `valid_ohlc_flag == True` and `adjusted_return_1d > 0` |
+| Limit flags | `at_up_limit` and `at_down_limit` from the certified panel, keyed by `trade_date + symbol`; R2 v2 does not materialize these fields |
 | Daily quality | `valid_stock_count >= 4500` on every evaluated state date |
 | Baseline eligibility | `entry_tradeable`, `horizon_available_10d`, not `path_ambiguous_10d`, and finite `adjusted_return_60d` |
 
@@ -120,11 +121,13 @@ def build_shsz_market_state_table(panel_rows, r2_rows):
     _reject_bj_symbols(r2_rows, "R2 matrix")
     index_rows = _one_index_close_per_date(panel_rows)
     breadth_rows = _full_market_state_rows(r2_rows)
-    source = breadth_rows.merge(index_rows, on="trade_date", how="inner", validate="many_to_one")
+    limit_rows = _limit_flags_by_symbol(panel_rows)
+    source = breadth_rows.merge(limit_rows, on=["trade_date", "symbol"], how="inner", validate="one_to_one")
+    source = source.merge(index_rows, on="trade_date", how="inner", validate="many_to_one")
     return build_market_regime_table(source.rename(columns={"valid_ohlc_flag": "valid_ohlc"}))
 ```
 
-The implementation must normalize dates, reject duplicate R2 keys, use allowlisted columns only, require exactly one finite positive close per day, require 4,500 valid rows per date, preserve warm-up dates as `insufficient_history`, and return one unique state row per date.
+The implementation must normalize dates, reject duplicate R2 or panel symbol keys, use allowlisted columns only, require exactly one finite positive close per day, require complete same-date panel limit flags, require 4,500 valid rows per date, preserve warm-up dates as `insufficient_history`, and return one unique state row per date. It must not infer limit flags from R2 or replace missing panel flags with defaults.
 
 - [ ] **Step 4: Verify focused regression**
 
