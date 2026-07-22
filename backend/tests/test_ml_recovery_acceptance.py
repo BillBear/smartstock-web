@@ -11,7 +11,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from app.evaluation.ml_recovery_acceptance import (
+    FIXED_FEATURES,
     MLRecoveryAcceptanceError,
+    audit_fixed_features,
+    build_recovery_dataset,
+    build_recovery_rows,
+    validate_fixed_features,
     verify_recovery_inputs,
 )
 
@@ -36,6 +41,59 @@ class MLRecoveryAcceptanceInputTests(unittest.TestCase):
 
             with self.assertRaisesRegex(MLRecoveryAcceptanceError, "future holdout"):
                 verify_recovery_inputs(roots["labels"], roots["features"], roots["panel"])
+
+
+class MLRecoveryAcceptanceDatasetTests(unittest.TestCase):
+    def test_dataset_loader_reads_only_registered_development_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            label_path = root / "labels" / "labels" / "shard=00" / "data.parquet"
+            matrix_path = root / "features" / "matrix" / "trade_date=2025-01-02" / "data.parquet"
+            label_path.parent.mkdir(parents=True)
+            matrix_path.parent.mkdir(parents=True)
+            _write_parquet(label_path, _recovery_labels().to_dict("list"))
+            _write_parquet(matrix_path, _recovery_matrix().to_dict("list"))
+            inputs = {
+                "labels_root": root / "labels",
+                "features_root": root / "features",
+                "registry": {"label_files": [_file_entry(label_path, root / "labels", "2025-01-02")]},
+                "feature_manifest": {
+                    "matrix_files": [_file_entry(matrix_path, root / "features", "2025-01-02")],
+                    "feature_contract": {"features": [{"name": feature} for feature in FIXED_FEATURES]},
+                },
+                "split_plan": {"development_dates": ("2025-01-02",)},
+            }
+
+            rows, report = build_recovery_dataset(inputs)
+
+        self.assertEqual(6, len(rows))
+        self.assertEqual(6, report["source_label_row_count"])
+        self.assertEqual(6, report["source_matrix_row_count"])
+
+    def test_common_mask_drops_rows_missing_any_fixed_feature(self):
+        labels = _recovery_labels()
+        matrix = _recovery_matrix()
+        matrix.loc[0, "turnover_rate_rank"] = None
+
+        rows, report = build_recovery_rows(labels, matrix)
+
+        self.assertEqual(5, len(rows))
+        self.assertEqual(1, report["excluded_missing_feature_count"])
+        self.assertTrue(rows["risk_eligible"].all())
+        self.assertTrue(all(f"rank__{feature}" in rows for feature in FIXED_FEATURES))
+
+    def test_rejects_future_or_label_named_feature(self):
+        with self.assertRaisesRegex(MLRecoveryAcceptanceError, "future or label"):
+            validate_fixed_features(("adjusted_return_20d", "future_return_10d"))
+
+    def test_feature_audit_reports_each_fixed_feature_for_a_and_c(self):
+        rows, _ = build_recovery_rows(_recovery_labels(), _recovery_matrix())
+
+        diagnostics = audit_fixed_features(rows, _diagnostic_split())
+
+        self.assertEqual(len(FIXED_FEATURES) * 2, len(diagnostics))
+        self.assertEqual(set(FIXED_FEATURES), set(diagnostics["feature"]))
+        self.assertTrue(diagnostics["coverage"].eq(1.0).all())
 
 
 def _asset_roots(root: Path) -> dict[str, Path]:
@@ -130,6 +188,48 @@ def _panel_manifest() -> dict[str, object]:
         "production_integration_allowed": False,
         "universe_id": "shsz_a_share_v1",
         "allowed_exchanges": ["SH", "SZ"],
+    }
+
+
+def _recovery_labels() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "trade_date": ["2025-01-02"] * 6,
+            "symbol": [f"00000{index}.SZ" for index in range(1, 7)],
+            "eligible_for_training": [True] * 6,
+            "entry_tradeable": [True] * 6,
+            "horizon_available_10d": [True] * 6,
+            "path_ambiguous_10d": [False] * 6,
+            "alpha_top10_10d": [False, False, False, False, True, True],
+            "alpha_target_10d": [-0.05, -0.03, -0.01, 0.01, 0.04, 0.08],
+            "net_return_after_cost_10d": [-0.04, -0.02, -0.01, 0.01, 0.03, 0.07],
+            "severe_negative_10d": [True, False, False, False, False, False],
+        }
+    )
+
+
+def _recovery_matrix() -> pd.DataFrame:
+    rows = {
+        "trade_date": ["2025-01-02"] * 6,
+        "symbol": [f"00000{index}.SZ" for index in range(1, 7)],
+    }
+    for index, feature in enumerate(FIXED_FEATURES, start=1):
+        rows[feature] = [float(index * 10 + row) for row in range(1, 7)]
+    return pd.DataFrame(rows)
+
+
+def _diagnostic_split() -> dict[str, object]:
+    return {
+        "A_dev_train_symbols": ("000001", "000002", "000003"),
+        "C_dev_unseen_symbols": ("000004", "000005", "000006"),
+        "walk_forward": (
+            {
+                "fold": 1,
+                "training_dates": ("2025-01-01",),
+                "validation_dates": ("2025-01-02",),
+                "training_symbols": ("000001", "000002", "000003"),
+            },
+        ),
     }
 
 
