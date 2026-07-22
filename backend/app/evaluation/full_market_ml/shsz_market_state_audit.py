@@ -2,14 +2,26 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import tempfile
 from typing import Any
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from .market_regime import build_market_regime_table
 from .evaluator import evaluate_ranking, simulate_daily_topk_portfolio
 from .splits import SplitPlan
+from .shsz_h1_feature_evidence import (
+    _load_bound_inputs as _load_r1_r2_bound_inputs,
+    _load_labels as _load_r1_labels,
+)
 
 
 MIN_VALID_STOCK_COUNT = 4_500
@@ -59,6 +71,24 @@ _BASELINE_LABEL_COLUMNS = (
 )
 _STATE_PAIR_NAMES = ("trend_up", "trend_down")
 _MIN_STATE_VALIDATION_DATES = 20
+_RUN_R2_COLUMNS = (*STATE_R2_COLUMNS, "adjusted_return_60d")
+_STATE_CONTRACT = {
+    "state_version": "shsz_r3_market_state_v1",
+    "universe": "shsz_a_share_v1",
+    "allowed_exchanges": ["SH", "SZ"],
+    "index_source": "certified_panel.market_index_close",
+    "limit_source": "certified_panel.at_up_limit/at_down_limit",
+    "breadth_source": "r2.valid_ohlc_flag + r2.adjusted_return_1d",
+    "state_formula": {
+        "trend_up": "market_return_20d > 0 and market_positive_breadth_1d >= 0.50",
+        "trend_down": "market_return_20d < 0 and market_positive_breadth_1d <= 0.50",
+        "mixed": "all other complete-history dates",
+    },
+    "minimum_valid_stock_count": MIN_VALID_STOCK_COUNT,
+    "history_sessions": 20,
+    "labels_allowed_for_state_construction": False,
+    "production_integration_allowed": False,
+}
 
 
 class SHSZMarketStateAuditError(ValueError):
@@ -85,6 +115,161 @@ def validate_shsz_state_inputs(
         raise SHSZMarketStateAuditError("R2 feature asset does not define shsz_a_share_v1")
     if tuple(str(value).upper() for value in r2_manifest.get("allowed_exchanges", ())) != ("SH", "SZ"):
         raise SHSZMarketStateAuditError("R2 feature asset does not restrict the universe to SH/SZ")
+
+
+def verify_shsz_panel_manifest_binding(
+    panel_root: str | Path,
+    *,
+    expected_panel_manifest_sha256: str,
+) -> dict[str, Any]:
+    """Validate the supplied panel root against the immutable R1/R2 hash."""
+    root = Path(panel_root).expanduser().resolve()
+    path = root / "panel_rebuild_manifest.json"
+    if not path.is_file():
+        raise SHSZMarketStateAuditError(f"certified panel manifest is missing: {path}")
+    actual_sha = _sha256_file(path)
+    if actual_sha != str(expected_panel_manifest_sha256):
+        raise SHSZMarketStateAuditError("certified panel manifest SHA256 does not match R1/R2 registration")
+    manifest = _read_json(path, "certified panel manifest")
+    if manifest.get("status") != "complete_shsz_panel_rebuilt" or manifest.get("research_ready") is not True:
+        raise SHSZMarketStateAuditError("certified panel is not a complete SH/SZ rebuilt research panel")
+    if manifest.get("production_integration_allowed") is True:
+        raise SHSZMarketStateAuditError("certified panel must remain research-only for this audit")
+    return manifest
+
+
+def run_shsz_market_state_audit(
+    *,
+    label_root: str | Path,
+    feature_asset_root: str | Path,
+    panel_root: str | Path,
+    output_dir: str | Path,
+    code_commit: str,
+    bootstrap_iterations: int = 1_000,
+) -> dict[str, Any]:
+    """Publish a bound, development-only SH/SZ market-state measurement.
+
+    This runner deliberately evaluates one fixed baseline.  It does not train,
+    tune, calibrate, open a future holdout, or change any production behavior.
+    """
+    labels_root = Path(label_root).expanduser().resolve()
+    features_root = Path(feature_asset_root).expanduser().resolve()
+    certified_panel_root = Path(panel_root).expanduser().resolve()
+    destination = Path(output_dir).expanduser().resolve()
+    if destination.exists():
+        raise FileExistsError(f"market-state audit output directory already exists: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.parent / f".{destination.name}.running"
+    if temporary.exists():
+        raise FileExistsError(f"incomplete market-state audit requires inspection: {temporary}")
+    temporary.mkdir()
+    try:
+        _write_progress(temporary, "data-verify", status="running")
+        inputs = _load_bound_r1_r2_inputs(labels_root, features_root)
+        panel_manifest = verify_shsz_panel_manifest_binding(
+            certified_panel_root,
+            expected_panel_manifest_sha256=inputs["expected_panel_manifest_sha256"],
+        )
+        validate_shsz_state_inputs(
+            panel_manifest,
+            inputs["feature_manifest"],
+            inputs["expected_panel_manifest_sha256"],
+        )
+        input_manifest = {
+            **inputs["input_manifest"],
+            "panel_rebuild_manifest_sha256": _sha256_file(certified_panel_root / "panel_rebuild_manifest.json"),
+            "resolved_panel_root": str(certified_panel_root),
+            "state_contract_sha256": _sha256_payload(_STATE_CONTRACT),
+            "code_commit": str(code_commit),
+            "production_integration_allowed": False,
+        }
+        _write_json(temporary / "input_manifest.json", input_manifest)
+        _write_json(temporary / "state_contract.json", _STATE_CONTRACT)
+
+        _write_progress(temporary, "load-state-input", status="running")
+        r2_rows = _load_r2_state_rows(inputs, on_progress=lambda current, total, date: _write_progress(
+            temporary,
+            "load-state-input",
+            status="running",
+            completed_dates=current,
+            total_dates=total,
+            current_trade_date=date,
+        ))
+        panel_rows = _load_certified_panel_state_rows(
+            certified_panel_root,
+            trade_dates=tuple(sorted(r2_rows["trade_date"].unique())),
+            on_progress=lambda current, total, shard: _write_progress(
+                temporary,
+                "load-state-input",
+                status="running",
+                completed_panel_shards=current,
+                total_panel_shards=total,
+                current_panel_shard=shard,
+            ),
+        )
+
+        _write_progress(temporary, "build-states", status="running", r2_row_count=int(len(r2_rows)))
+        states = build_shsz_market_state_table(panel_rows, r2_rows.loc[:, STATE_R2_COLUMNS])
+        _write_parquet(temporary / "market_states.parquet", states)
+        _write_json(
+            temporary / "data_quality_report.json",
+            _state_data_quality_report(r2_rows, panel_rows, states),
+        )
+
+        _write_progress(temporary, "load-labels", status="running")
+        labels = _load_registered_labels(inputs, on_progress=lambda current, total: _write_progress(
+            temporary,
+            "load-labels",
+            status="running",
+            completed_label_files=current,
+            total_label_files=total,
+        ))
+        baseline_rows = _join_labels_with_baseline(labels, r2_rows, inputs["split_plan"])
+
+        _write_progress(temporary, "evaluate-baseline", status="running", row_count=int(len(baseline_rows)))
+        evaluation = evaluate_shsz_baseline_state_heterogeneity(
+            baseline_rows,
+            states,
+            inputs["split_plan"],
+            bootstrap_iterations=max(1, int(bootstrap_iterations)),
+        )
+        _write_parquet(temporary / "daily_baseline_metrics.parquet", evaluation["daily_baseline_metrics"])
+        _write_json(temporary / "fold_metrics.json", evaluation["fold_metrics"])
+        _write_json(temporary / "bootstrap.json", _bootstrap_by_fold(evaluation["fold_metrics"]))
+        _write_json(temporary / "portfolio_metrics.json", _portfolio_by_fold(evaluation["fold_metrics"]))
+        _write_json(temporary / "candidate_screen.json", evaluation["candidate_screen"])
+        report = {
+            "status": "complete",
+            "research_only": True,
+            "model_trained": False,
+            "production_integration_allowed": False,
+            "code_commit": str(code_commit),
+            "input_manifest": input_manifest,
+            "state_contract": _STATE_CONTRACT,
+            "state_row_count": int(len(states)),
+            "state_counts": {str(key): int(value) for key, value in states["market_regime"].value_counts().sort_index().items()},
+            "baseline_row_count": int(len(baseline_rows)),
+            "walk_forward_fold_count": len(inputs["split_plan"].walk_forward),
+            "candidate_screen": evaluation["candidate_screen"],
+            "limitations": [
+                "One frozen adjusted_return_60d baseline was measured; no candidate model was trained.",
+                "Only development A/C folds were read; the formal future holdout remains sealed.",
+                "A supported state difference would still require a separate research plan before model or production changes.",
+            ],
+        }
+        _write_json(temporary / "market_state_audit.json", report)
+        _write_progress(temporary, "complete", status="complete", baseline_row_count=int(len(baseline_rows)))
+        os.replace(temporary, destination)
+        return report
+    except BaseException as error:
+        _write_progress(
+            temporary,
+            "failed",
+            status="failed",
+            failure_type=type(error).__name__,
+            failure_message=str(error),
+        )
+        raise
 
 
 def build_shsz_market_state_table(panel_rows: pd.DataFrame, r2_rows: pd.DataFrame) -> pd.DataFrame:
@@ -464,3 +649,219 @@ def _sample_circular_blocks(values: np.ndarray, rng: np.random.Generator, block_
         start = int(rng.integers(0, len(values)))
         positions.extend((start + offset) % len(values) for offset in range(block_length))
     return values[np.asarray(positions[: len(values)], dtype="int64")]
+
+
+def _load_bound_r1_r2_inputs(labels_root: Path, features_root: Path) -> dict[str, Any]:
+    try:
+        inputs = _load_r1_r2_bound_inputs(
+            labels_root,
+            features_root,
+            required_feature_names=("adjusted_return_1d", "price_to_sma_20d", "adjusted_return_60d"),
+        )
+    except Exception as error:
+        raise SHSZMarketStateAuditError(f"R1/R2 immutable input binding failed: {error}") from error
+    expected_panel_sha = str(inputs["registry"].get("source_panel_manifest_sha256", ""))
+    if not expected_panel_sha:
+        raise SHSZMarketStateAuditError("R1 registry has no source panel manifest SHA256")
+    return {
+        **inputs,
+        "expected_panel_manifest_sha256": expected_panel_sha,
+    }
+
+
+def _load_r2_state_rows(inputs: Mapping[str, Any], *, on_progress) -> pd.DataFrame:
+    entries = inputs["feature_manifest"].get("matrix_files", ())
+    if not isinstance(entries, list) or not entries:
+        raise SHSZMarketStateAuditError("R2 feature asset has no registered matrix files")
+    maximum_date = max(inputs["split_plan"].development_dates)
+    selected = sorted(
+        (entry for entry in entries if _date_text(entry.get("trade_date"), "R2 matrix manifest") <= maximum_date),
+        key=lambda entry: _date_text(entry.get("trade_date"), "R2 matrix manifest"),
+    )
+    if not selected:
+        raise SHSZMarketStateAuditError("R2 feature asset has no state history before the development end date")
+    frames = []
+    matrix_root = Path(inputs["matrix_root"])
+    for index, entry in enumerate(selected, start=1):
+        trade_date = _date_text(entry.get("trade_date"), "R2 matrix manifest")
+        path = matrix_root / f"trade_date={trade_date}" / "data.parquet"
+        if not path.is_file():
+            raise SHSZMarketStateAuditError(f"registered R2 matrix file is missing: {path}")
+        available = set(pq.ParquetFile(path).schema_arrow.names)
+        missing = sorted(set(_RUN_R2_COLUMNS) - available)
+        if missing:
+            raise SHSZMarketStateAuditError(f"R2 matrix {trade_date} misses state fields: " + ", ".join(missing))
+        raw = pq.ParquetFile(path).read(columns=list(_RUN_R2_COLUMNS)).to_pandas()
+        state = _normalize_rows(raw, STATE_R2_COLUMNS, f"R2 matrix {trade_date}")
+        state["adjusted_return_60d"] = pd.to_numeric(raw["adjusted_return_60d"], errors="coerce")
+        frames.append(state)
+        on_progress(index, len(selected), trade_date)
+    result = pd.concat(frames, ignore_index=True)
+    if result.duplicated(["trade_date", "symbol"]).any():
+        raise SHSZMarketStateAuditError("R2 state history has duplicate trade_date and symbol keys")
+    return result.sort_values(["trade_date", "symbol"], kind="stable").reset_index(drop=True)
+
+
+def _load_certified_panel_state_rows(
+    panel_root: Path,
+    *,
+    trade_dates: tuple[str, ...],
+    on_progress,
+) -> pd.DataFrame:
+    stage = panel_root / "panel" / "stage=full-build"
+    paths = sorted(stage.glob("shard=*/data.parquet"))
+    if not paths:
+        raise SHSZMarketStateAuditError(f"certified panel has no full-build parquet shards: {stage}")
+    requested = set(trade_dates)
+    frames = []
+    for index, path in enumerate(paths, start=1):
+        available = set(pq.ParquetFile(path).schema_arrow.names)
+        missing = sorted(set(STATE_PANEL_COLUMNS) - available)
+        if missing:
+            raise SHSZMarketStateAuditError(f"certified panel shard {path.parent.name} misses state fields: " + ", ".join(missing))
+        raw = pq.ParquetFile(path).read(columns=list(STATE_PANEL_COLUMNS)).to_pandas()
+        frame = _normalize_rows(raw, STATE_PANEL_COLUMNS, f"certified panel {path.parent.name}")
+        frame = frame.loc[frame["trade_date"].isin(requested)].copy()
+        if not frame.empty:
+            frames.append(frame)
+        on_progress(index, len(paths), path.parent.name)
+    if not frames:
+        raise SHSZMarketStateAuditError("certified panel has no rows for the registered R2 state dates")
+    result = pd.concat(frames, ignore_index=True)
+    if result.duplicated(["trade_date", "symbol"]).any():
+        raise SHSZMarketStateAuditError("certified panel has duplicate trade_date and symbol keys")
+    return result.sort_values(["trade_date", "symbol"], kind="stable").reset_index(drop=True)
+
+
+def _load_registered_labels(inputs: Mapping[str, Any], *, on_progress) -> pd.DataFrame:
+    try:
+        labels = _load_r1_labels(inputs, on_progress=on_progress)
+    except Exception as error:
+        raise SHSZMarketStateAuditError(f"registered R1 label load failed: {error}") from error
+    missing = sorted(set(_BASELINE_LABEL_COLUMNS) - {"adjusted_return_60d"} - set(labels.columns))
+    if missing:
+        raise SHSZMarketStateAuditError("R1 labels miss baseline fields: " + ", ".join(missing))
+    return labels
+
+
+def _join_labels_with_baseline(labels: pd.DataFrame, r2_rows: pd.DataFrame, split_plan: SplitPlan) -> pd.DataFrame:
+    baseline = r2_rows.loc[
+        r2_rows["trade_date"].isin(split_plan.development_dates),
+        ["trade_date", "symbol", "adjusted_return_60d"],
+    ].copy()
+    if baseline.duplicated(["trade_date", "symbol"]).any():
+        raise SHSZMarketStateAuditError("R2 baseline rows have duplicate trade_date and symbol keys")
+    merged = labels.merge(baseline, on=["trade_date", "symbol"], how="left", validate="one_to_one", indicator=True)
+    missing = merged.loc[merged["_merge"].ne("both"), ["trade_date", "symbol"]]
+    if not missing.empty:
+        first = missing.iloc[0]
+        raise SHSZMarketStateAuditError(f"R2 baseline does not cover registered R1 label key: {first['trade_date']}/{first['symbol']}")
+    result = _normalize_baseline_label_rows(merged.drop(columns="_merge"))
+    # The shared evaluator recognizes the historical label-prefixed spelling.
+    # Preserve the registered source field and expose only an identical alias.
+    result["label_severe_negative_10d"] = result["severe_negative_10d"].eq(True)
+    if set(result["trade_date"]) != set(split_plan.development_dates):
+        raise SHSZMarketStateAuditError("baseline rows do not exactly cover the registered development dates")
+    return result.sort_values(["trade_date", "symbol"], kind="stable").reset_index(drop=True)
+
+
+def _state_data_quality_report(r2_rows: pd.DataFrame, panel_rows: pd.DataFrame, states: pd.DataFrame) -> dict[str, Any]:
+    valid = r2_rows.loc[r2_rows["valid_ohlc_flag"].eq(True)]
+    coverage = valid.groupby("trade_date", sort=True).size()
+    state_counts = states["market_regime"].value_counts().sort_index()
+    return {
+        "status": "complete",
+        "r2_state_row_count": int(len(r2_rows)),
+        "panel_state_row_count": int(len(panel_rows)),
+        "trade_date_count": int(states["trade_date"].nunique()),
+        "minimum_valid_stock_count": int(coverage.min()),
+        "maximum_valid_stock_count": int(coverage.max()),
+        "low_coverage_trade_dates": states.loc[states["valid_stock_count"].lt(MIN_VALID_STOCK_COUNT), "trade_date"].tolist(),
+        "state_counts": {str(key): int(value) for key, value in state_counts.items()},
+        "bj_symbol_rejected_before_normalization": True,
+        "future_labels_read_for_state_construction": False,
+    }
+
+
+def _bootstrap_by_fold(fold_metrics: Mapping[str, Any]) -> dict[str, Any]:
+    return {str(key): value.get("bootstrap") for key, value in fold_metrics.items()}
+
+
+def _portfolio_by_fold(fold_metrics: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        str(key): {
+            state: value.get(state, {}).get("portfolio")
+            for state in _STATE_PAIR_NAMES
+        }
+        for key, value in fold_metrics.items()
+    }
+
+
+def _read_json(path: Path, source: str) -> dict[str, Any]:
+    if not path.is_file():
+        raise SHSZMarketStateAuditError(f"{source} is missing: {path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise SHSZMarketStateAuditError(f"{source} is invalid JSON: {path}") from error
+    if not isinstance(value, dict):
+        raise SHSZMarketStateAuditError(f"{source} must be a JSON object: {path}")
+    return value
+
+
+def _date_text(value: object, source: str) -> str:
+    result = pd.to_datetime(str(value).replace("-", ""), errors="coerce", format="%Y%m%d")
+    if pd.isna(result):
+        raise SHSZMarketStateAuditError(f"{source} has an invalid trade_date: {value}")
+    return result.strftime("%Y-%m-%d")
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sha256_payload(payload: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(dict(payload), ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(dict(payload), handle, ensure_ascii=False, indent=2, sort_keys=True, default=_json_default)
+            handle.write("\n")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _write_parquet(path: Path, rows: pd.DataFrame) -> None:
+    temporary = path.with_name(f".{path.name}.tmp")
+    pq.write_table(pa.Table.from_pandas(rows, preserve_index=False), temporary, compression="zstd")
+    os.replace(temporary, path)
+
+
+def _write_progress(destination: Path, stage: str, *, status: str, **values: Any) -> None:
+    _write_json(
+        destination / "progress.json",
+        {"status": status, "stage": stage, "updated_at": datetime.now(timezone.utc).isoformat(), **values},
+    )
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    if isinstance(value, Path):
+        return str(value)
+    raise TypeError(f"not JSON serializable: {type(value).__name__}")

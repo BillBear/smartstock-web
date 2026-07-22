@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
+from pathlib import Path
+import tempfile
 import unittest
 
 import pandas as pd
@@ -12,6 +16,7 @@ from app.evaluation.full_market_ml.shsz_market_state_audit import (
     decide_market_state_explanation_gate,
     evaluate_shsz_baseline_state_heterogeneity,
     validate_shsz_state_inputs,
+    verify_shsz_panel_manifest_binding,
 )
 from app.evaluation.full_market_ml.splits import SplitPlan, WalkForwardFold
 
@@ -99,6 +104,49 @@ class SHSZMarketStateAuditTests(unittest.TestCase):
         self.assertEqual({"A_development_seen", "C_development_unseen"}, {row["quadrant"] for row in metrics.values()})
         self.assertTrue(all(row["trend_up"]["date_count"] == 20 for row in metrics.values()))
         self.assertTrue(all(row["trend_down"]["date_count"] == 20 for row in metrics.values()))
+
+    def test_panel_binding_rejects_a_manifest_hash_not_registered_by_r1_r2(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "panel_rebuild_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "status": "complete",
+                        "research_ready": True,
+                        "production_integration_allowed": False,
+                        "universe_id": "shsz_a_share_v1",
+                        "allowed_exchanges": ["SH", "SZ"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(SHSZMarketStateAuditError, "panel manifest SHA256"):
+                verify_shsz_panel_manifest_binding(root, expected_panel_manifest_sha256="0" * 64)
+
+    def test_panel_binding_accepts_the_registered_rebuilt_panel_completion_status(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "panel_rebuild_manifest.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "status": "complete_shsz_panel_rebuilt",
+                        "research_ready": True,
+                        "production_integration_allowed": False,
+                        "universe_id": "shsz_a_share_v1",
+                        "allowed_exchanges": ["SH", "SZ"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = verify_shsz_panel_manifest_binding(
+                root,
+                expected_panel_manifest_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
+
+            self.assertEqual("complete_shsz_panel_rebuilt", result["status"])
 
 
 def _panel_rows(*, days: int) -> pd.DataFrame:
