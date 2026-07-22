@@ -39,6 +39,7 @@ def main() -> int:
                 "research_only": report["research_only"],
                 "candidate_status": report["candidate_screen"]["status"],
                 "production_integration_allowed": report["production_integration_allowed"],
+                "output_dir": str(Path(args.output_dir).expanduser().resolve()),
             },
             ensure_ascii=True,
             sort_keys=True,
