@@ -16,6 +16,7 @@ from app.evaluation.ml_recovery_acceptance import (
     audit_fixed_features,
     build_recovery_dataset,
     build_recovery_rows,
+    run_fixed_logistic_oof,
     validate_fixed_features,
     verify_recovery_inputs,
 )
@@ -94,6 +95,16 @@ class MLRecoveryAcceptanceDatasetTests(unittest.TestCase):
         self.assertEqual(len(FIXED_FEATURES) * 2, len(diagnostics))
         self.assertEqual(set(FIXED_FEATURES), set(diagnostics["feature"]))
         self.assertTrue(diagnostics["coverage"].eq(1.0).all())
+
+
+class MLRecoveryAcceptanceOOFTests(unittest.TestCase):
+    def test_oof_fit_never_reads_validation_dates_or_c_symbols(self):
+        predictions, report = run_fixed_logistic_oof(_oof_rows(), _oof_split())
+
+        self.assertEqual({"A", "C"}, set(predictions["quadrant"]))
+        self.assertTrue((predictions["train_max_date"] < predictions["trade_date"]).all())
+        self.assertFalse(set(_oof_split()["C_dev_unseen_symbols"]) & set(report["fit_symbols_by_fold"]["1"]))
+        self.assertTrue(pd.to_numeric(predictions["model_score"], errors="coerce").notna().all())
 
 
 def _asset_roots(root: Path) -> dict[str, Path]:
@@ -228,6 +239,42 @@ def _diagnostic_split() -> dict[str, object]:
                 "training_dates": ("2025-01-01",),
                 "validation_dates": ("2025-01-02",),
                 "training_symbols": ("000001", "000002", "000003"),
+            },
+        ),
+    }
+
+
+def _oof_rows() -> pd.DataFrame:
+    rows = []
+    features = tuple(f"rank__{feature}" for feature in FIXED_FEATURES)
+    for trade_date in ("2025-01-02", "2025-01-03", "2025-01-06"):
+        for symbol_index, symbol in enumerate(("000001", "000002", "000003", "000004", "000005", "000006"), start=1):
+            strong = symbol_index >= 3
+            row = {
+                "trade_date": trade_date,
+                "symbol": symbol,
+                "risk_eligible": True,
+                "alpha_top10_10d": strong,
+                "alpha_target_10d": 0.02 * symbol_index,
+                "net_return_after_cost_10d": 0.01 * symbol_index,
+                "severe_negative_10d": False,
+            }
+            for feature_index, feature in enumerate(features, start=1):
+                row[feature] = (symbol_index + feature_index) / 12.0
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _oof_split() -> dict[str, object]:
+    return {
+        "A_dev_train_symbols": ("000001", "000002", "000003", "000004"),
+        "C_dev_unseen_symbols": ("000005", "000006"),
+        "walk_forward": (
+            {
+                "fold": 1,
+                "training_dates": ("2025-01-02", "2025-01-03"),
+                "validation_dates": ("2025-01-06",),
+                "training_symbols": ("000001", "000002", "000003", "000004"),
             },
         ),
     }

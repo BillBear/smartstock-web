@@ -15,6 +15,7 @@ from typing import Any, Mapping
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
+from sklearn.linear_model import LogisticRegression
 
 
 UNIVERSE_ID = "shsz_a_share_v1"
@@ -261,6 +262,142 @@ def audit_fixed_features(rows: pd.DataFrame, split_plan: Mapping[str, Any]) -> p
     return pd.DataFrame(diagnostics).sort_values(["fold", "quadrant", "feature"], kind="stable").reset_index(drop=True)
 
 
+def run_fixed_logistic_oof(rows: pd.DataFrame, split_plan: Mapping[str, Any]) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Fit the one registered model on A history and score later A/C rows."""
+    _require_oof_rows(rows)
+    ranked_features = tuple(f"rank__{feature}" for feature in FIXED_FEATURES)
+    predictions = []
+    coefficients = []
+    fold_metrics: dict[str, Any] = {}
+    fit_symbols_by_fold: dict[str, list[str]] = {}
+    for fold in split_plan["walk_forward"]:
+        fold_number = int(fold["fold"])
+        training_dates = tuple(fold["training_dates"])
+        validation_dates = tuple(fold["validation_dates"])
+        training_symbols = tuple(fold["training_symbols"])
+        if max(training_dates) >= min(validation_dates):
+            raise MLRecoveryAcceptanceError(f"fold {fold_number} training dates are not strictly before validation dates")
+        train = rows.loc[
+            rows["trade_date"].isin(training_dates)
+            & rows["symbol"].isin(training_symbols)
+            & rows["risk_eligible"].eq(True)
+        ].copy()
+        if train.empty or train["alpha_top10_10d"].nunique() != 2:
+            raise MLRecoveryAcceptanceError(f"fold {fold_number} has no two-class A training data")
+        model = LogisticRegression(
+            C=0.1,
+            solver="lbfgs",
+            max_iter=200,
+            class_weight="balanced",
+            random_state=20_260_722,
+        )
+        model.fit(train.loc[:, ranked_features], train["alpha_top10_10d"].astype(int))
+        fit_symbols_by_fold[str(fold_number)] = sorted(set(train["symbol"]))
+        for feature, coefficient in zip(ranked_features, model.coef_[0], strict=True):
+            coefficients.append({"fold": fold_number, "feature": feature.removeprefix("rank__"), "coefficient": float(coefficient)})
+        for quadrant, symbols in (
+            ("A", tuple(split_plan["A_dev_train_symbols"])),
+            ("C", tuple(split_plan["C_dev_unseen_symbols"])),
+        ):
+            validation = rows.loc[
+                rows["trade_date"].isin(validation_dates)
+                & rows["symbol"].isin(symbols)
+                & rows["risk_eligible"].eq(True)
+            ].copy()
+            if validation.empty:
+                raise MLRecoveryAcceptanceError(f"fold {fold_number} {quadrant} has no eligible validation rows")
+            validation["model_score"] = model.decision_function(validation.loc[:, ranked_features])
+            validation["baseline_score"] = validation["rank__adjusted_return_60d"]
+            validation["fold"] = fold_number
+            validation["quadrant"] = quadrant
+            validation["train_max_date"] = max(training_dates)
+            metric = {
+                "fold": fold_number,
+                "quadrant": quadrant,
+                "row_count": int(len(validation)),
+                "date_count": int(validation["trade_date"].nunique()),
+                "model": _evaluate_daily_rankings(validation, "model_score"),
+                "baseline": _evaluate_daily_rankings(validation, "baseline_score"),
+            }
+            fold_metrics[f"fold_{fold_number}_{quadrant}"] = metric
+            predictions.append(validation)
+    prediction_rows = pd.concat(predictions, ignore_index=True).sort_values(
+        ["fold", "quadrant", "trade_date", "symbol"], kind="stable"
+    ).reset_index(drop=True)
+    candidate_screen = _fixed_baseline_gate(fold_metrics)
+    return prediction_rows, {
+        "fit_symbols_by_fold": fit_symbols_by_fold,
+        "coefficients": coefficients,
+        "fold_metrics": fold_metrics,
+        "candidate_screen": candidate_screen,
+        "production_integration_allowed": False,
+    }
+
+
+def _evaluate_daily_rankings(rows: pd.DataFrame, score_column: str) -> dict[str, float | int]:
+    daily = [_daily_ranking_metrics(current, score_column) for _, current in rows.groupby("trade_date", sort=True)]
+    if not daily:
+        raise MLRecoveryAcceptanceError("ranking evaluation has no signal dates")
+    summary: dict[str, float | int] = {"date_count": len(daily), "candidate_count": int(sum(item["candidate_count"] for item in daily))}
+    for metric in ("precision_at_3", "precision_at_5", "precision_at_10", "ndcg_at_10", "mrr", "top_5_mean_net_return", "severe_negative_rate"):
+        summary[metric] = float(np.mean([float(item[metric]) for item in daily]))
+    return summary
+
+
+def _daily_ranking_metrics(rows: pd.DataFrame, score_column: str) -> dict[str, float]:
+    ranked = rows.sort_values([score_column, "symbol"], ascending=[False, True], kind="stable").reset_index(drop=True)
+    strong = ranked["alpha_top10_10d"].eq(True).to_numpy(dtype=bool)
+    top = lambda count: slice(0, min(count, len(ranked)))
+    denominator = lambda count: max(1, min(count, len(ranked)))
+    grades = strong.astype("float64")
+    ideal = np.sort(grades)[::-1][:10]
+    dcg = sum(float(value) / np.log2(index + 2) for index, value in enumerate(grades[:10]))
+    idcg = sum(float(value) / np.log2(index + 2) for index, value in enumerate(ideal))
+    first = np.flatnonzero(strong)
+    selected = ranked.iloc[top(5)]
+    returns = pd.to_numeric(selected["net_return_after_cost_10d"], errors="coerce")
+    return {
+        "candidate_count": float(len(ranked)),
+        "precision_at_3": float(strong[top(3)].sum() / denominator(3)),
+        "precision_at_5": float(strong[top(5)].sum() / denominator(5)),
+        "precision_at_10": float(strong[top(10)].sum() / denominator(10)),
+        "ndcg_at_10": float(dcg / idcg) if idcg > 0 else 0.0,
+        "mrr": float(1.0 / (first[0] + 1)) if len(first) else 0.0,
+        "top_5_mean_net_return": float(returns.mean()) if not returns.empty else 0.0,
+        "severe_negative_rate": float(selected["severe_negative_10d"].eq(True).mean()) if not selected.empty else 0.0,
+    }
+
+
+def _fixed_baseline_gate(fold_metrics: Mapping[str, Any]) -> dict[str, Any]:
+    grouped = {"A": [], "C": []}
+    for metric in fold_metrics.values():
+        quadrant = str(metric.get("quadrant", ""))
+        if quadrant in grouped:
+            grouped[quadrant].append(metric)
+    support = {}
+    complete = all(len(grouped[quadrant]) == 5 for quadrant in grouped)
+    for quadrant, metrics in grouped.items():
+        support[quadrant] = sum(
+            metric["model"]["ndcg_at_10"] > metric["baseline"]["ndcg_at_10"]
+            and metric["model"]["precision_at_5"] > metric["baseline"]["precision_at_5"]
+            for metric in metrics
+        )
+    if not complete:
+        status = "incomplete_fixed_folds"
+    elif support["A"] >= 4 and support["C"] >= 4:
+        status = "baseline_research_completed"
+    else:
+        status = "baseline_research_failed_gate"
+    return {
+        "status": status,
+        "passed": status == "baseline_research_completed",
+        "required_fold_count": 4,
+        "supporting_fold_counts": support,
+        "evaluated_fold_counts": {key: len(value) for key, value in grouped.items()},
+        "production_integration_allowed": False,
+    }
+
+
 def _require_r1_research_only(registry: Mapping[str, Any], manifest: Mapping[str, Any]) -> None:
     if registry.get("label_quality_passed") is not True:
         raise MLRecoveryAcceptanceError("R1 labels failed their quality gate")
@@ -433,6 +570,16 @@ def _require_recovery_rows(rows: pd.DataFrame) -> None:
     missing = sorted(required - set(rows.columns))
     if missing:
         raise MLRecoveryAcceptanceError("recovery rows miss required fields: " + ", ".join(missing))
+
+
+def _require_oof_rows(rows: pd.DataFrame) -> None:
+    _require_recovery_rows(rows)
+    required = {"alpha_top10_10d", "severe_negative_10d", *(f"rank__{feature}" for feature in FIXED_FEATURES)}
+    missing = sorted(required - set(rows.columns))
+    if missing:
+        raise MLRecoveryAcceptanceError("OOF rows miss required fields: " + ", ".join(missing))
+    if rows.duplicated(["trade_date", "symbol"]).any():
+        raise MLRecoveryAcceptanceError("OOF rows have duplicate trade_date and symbol keys")
 
 
 def _normalize_date_series(values: pd.Series, source: str) -> pd.Series:
