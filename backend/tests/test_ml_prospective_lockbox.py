@@ -9,6 +9,7 @@ import pandas as pd
 
 from app.evaluation.ml_prospective_lockbox import (
     MLProspectiveLockboxError,
+    call_with_retries,
     capture_prospective_batch,
     validate_capture_date,
     validate_endpoint_frame,
@@ -16,6 +17,18 @@ from app.evaluation.ml_prospective_lockbox import (
 
 
 class MLProspectiveLockboxTests(unittest.TestCase):
+    def test_retry_boundary_retries_only_a_finite_number_of_times(self):
+        attempts = []
+
+        def operation():
+            attempts.append(len(attempts))
+            if len(attempts) < 3:
+                raise ConnectionError("transient")
+            return "ok"
+
+        self.assertEqual("ok", call_with_retries(operation, attempts=3, sleep_seconds=0))
+        self.assertEqual(3, len(attempts))
+
     def test_capture_writes_an_immutable_outcome_sealed_batch(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "batch"

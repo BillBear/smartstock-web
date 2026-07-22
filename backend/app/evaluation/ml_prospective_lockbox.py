@@ -8,7 +8,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
-from typing import Any, Mapping, Protocol
+import time
+from typing import Any, Callable, Mapping, Protocol, TypeVar
 
 import pandas as pd
 import pyarrow as pa
@@ -18,6 +19,7 @@ import pyarrow.parquet as pq
 REQUIRED_ENDPOINTS = ("daily", "daily_basic", "adj_factor", "stk_limit", "suspend_d")
 FULL_MARKET_ENDPOINTS = frozenset(REQUIRED_ENDPOINTS) - {"suspend_d"}
 MIN_FULL_MARKET_ROWS = 4_500
+T = TypeVar("T")
 
 
 class MLProspectiveLockboxError(ValueError):
@@ -26,6 +28,21 @@ class MLProspectiveLockboxError(ValueError):
 
 class ProspectiveFetcher(Protocol):
     def fetch(self, endpoint: str, trade_date: str) -> pd.DataFrame: ...
+
+
+def call_with_retries(operation: Callable[[], T], *, attempts: int = 3, sleep_seconds: float = 0.25) -> T:
+    """Retry only transient source calls and preserve the terminal error."""
+    if attempts < 1:
+        raise ValueError("retry attempts must be positive")
+    for attempt in range(1, attempts + 1):
+        try:
+            return operation()
+        except Exception:
+            if attempt == attempts:
+                raise
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+    raise AssertionError("unreachable retry boundary")
 
 
 def normalize_trade_date(value: object, source: str) -> str:
