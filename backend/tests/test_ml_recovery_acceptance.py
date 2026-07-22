@@ -84,6 +84,13 @@ class MLRecoveryAcceptanceDatasetTests(unittest.TestCase):
         self.assertTrue(rows["risk_eligible"].all())
         self.assertTrue(all(f"rank__{feature}" in rows for feature in FIXED_FEATURES))
 
+    def test_rejects_a_label_key_missing_from_registered_feature_matrix(self):
+        labels = _recovery_labels()
+        matrix = _recovery_matrix().iloc[1:].copy()
+
+        with self.assertRaisesRegex(MLRecoveryAcceptanceError, "does not cover R1 label key"):
+            build_recovery_rows(labels, matrix)
+
     def test_rejects_future_or_label_named_feature(self):
         with self.assertRaisesRegex(MLRecoveryAcceptanceError, "future or label"):
             validate_fixed_features(("adjusted_return_20d", "future_return_10d"))
