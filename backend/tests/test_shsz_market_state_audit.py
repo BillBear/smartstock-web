@@ -8,8 +8,12 @@ from pandas.testing import assert_frame_equal
 from app.evaluation.full_market_ml.shsz_market_state_audit import (
     SHSZMarketStateAuditError,
     build_shsz_market_state_table,
+    bootstrap_state_metric_delta,
+    decide_market_state_explanation_gate,
+    evaluate_shsz_baseline_state_heterogeneity,
     validate_shsz_state_inputs,
 )
+from app.evaluation.full_market_ml.splits import SplitPlan, WalkForwardFold
 
 
 class SHSZMarketStateAuditTests(unittest.TestCase):
@@ -63,6 +67,39 @@ class SHSZMarketStateAuditTests(unittest.TestCase):
                 _r2_rows(days=21, first_symbol="430001.BJ"),
             )
 
+    def test_state_pair_bootstrap_uses_precomputed_daily_scalars(self):
+        result = bootstrap_state_metric_delta(
+            [0.10, 0.20, 0.30],
+            [0.00, 0.00, 0.10],
+            seed=7,
+            iterations=50,
+        )
+
+        self.assertEqual(50, result["iterations"])
+        self.assertGreater(result["ndcg_delta"], 0.0)
+        self.assertGreater(result["ndcg_delta_ci_low"], 0.0)
+
+    def test_state_gate_requires_four_supporting_a_and_c_folds(self):
+        supported = decide_market_state_explanation_gate(_gate_rows(a_supporting=4, c_supporting=4))
+        rejected = decide_market_state_explanation_gate(_gate_rows(a_supporting=4, c_supporting=3))
+
+        self.assertEqual("market_state_explanation_supported", supported["status"])
+        self.assertFalse(bool(supported["production_integration_allowed"]))
+        self.assertEqual("market_state_explanation_rejected", rejected["status"])
+
+    def test_evaluator_reports_a_and_c_on_their_fixed_symbols(self):
+        result = evaluate_shsz_baseline_state_heterogeneity(
+            _label_rows(),
+            _state_rows(),
+            _evaluation_split(),
+            bootstrap_iterations=20,
+        )
+
+        metrics = result["fold_metrics"]
+        self.assertEqual({"A_development_seen", "C_development_unseen"}, {row["quadrant"] for row in metrics.values()})
+        self.assertTrue(all(row["trend_up"]["date_count"] == 20 for row in metrics.values()))
+        self.assertTrue(all(row["trend_down"]["date_count"] == 20 for row in metrics.values()))
+
 
 def _panel_rows(*, days: int) -> pd.DataFrame:
     dates = pd.bdate_range("2025-01-02", periods=days)
@@ -100,6 +137,87 @@ def _r2_rows(*, days: int, valid_count: int = 4_500, first_symbol: str | None = 
             for symbol in symbols
         )
     return pd.DataFrame(rows)
+
+
+def _evaluation_split() -> SplitPlan:
+    dates = tuple(pd.bdate_range("2025-02-03", periods=40).strftime("%Y-%m-%d"))
+    a_symbols = ("000001", "000002", "000003")
+    c_symbols = ("000004", "000005", "000006")
+    fold = WalkForwardFold(
+        fold=1,
+        training_dates=(dates[0],),
+        validation_dates=dates,
+        training_symbols=a_symbols,
+        train_start=dates[0],
+        train_end=dates[0],
+        validation_start=dates[0],
+        validation_end=dates[-1],
+    )
+    return SplitPlan(
+        development_dates=dates,
+        final_dates=(),
+        stock_holdout_symbols=c_symbols,
+        A_dev_train_symbols=a_symbols,
+        B_final_train_symbols=(),
+        C_dev_unseen_symbols=c_symbols,
+        D_final_unseen_symbols=(),
+        walk_forward=(fold,),
+        stratum_counts_before={},
+        stratum_counts_after={},
+        split_sha256="fixture",
+    )
+
+
+def _state_rows() -> pd.DataFrame:
+    dates = tuple(pd.bdate_range("2025-02-03", periods=40).strftime("%Y-%m-%d"))
+    return pd.DataFrame(
+        {
+            "trade_date": dates,
+            "market_regime": ["trend_up"] * 20 + ["trend_down"] * 20,
+            "regime_history_complete": True,
+        }
+    )
+
+
+def _label_rows() -> pd.DataFrame:
+    dates = tuple(pd.bdate_range("2025-02-03", periods=40).strftime("%Y-%m-%d"))
+    rows = []
+    for trade_date in dates:
+        for symbol_index, symbol in enumerate(("000001", "000002", "000003", "000004", "000005", "000006"), start=1):
+            rows.append(
+                {
+                    "trade_date": trade_date,
+                    "symbol": symbol,
+                    "adjusted_return_60d": float(symbol_index),
+                    "entry_tradeable": True,
+                    "horizon_available_10d": True,
+                    "path_ambiguous_10d": False,
+                    "alpha_relevance_grade_10d": 2 if symbol_index >= 5 else 0,
+                    "alpha_top10_10d": symbol_index >= 5,
+                    "future_return_10d": 0.01 * symbol_index,
+                    "severe_negative_10d": False,
+                    "entry_price": 10.0,
+                    "exit_price": 10.0 + symbol_index,
+                    "exit_trade_date": "2025-03-31",
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _gate_rows(*, a_supporting: int, c_supporting: int) -> dict[str, dict[str, object]]:
+    rows = {}
+    for fold in range(1, 6):
+        rows[f"fold_{fold}_A_development_seen"] = {
+            "quadrant": "A_development_seen",
+            "status": "evaluated",
+            "supports_claim": fold <= a_supporting,
+        }
+        rows[f"fold_{fold}_C_development_unseen"] = {
+            "quadrant": "C_development_unseen",
+            "status": "evaluated",
+            "supports_claim": fold <= c_supporting,
+        }
+    return rows
 
 
 if __name__ == "__main__":
