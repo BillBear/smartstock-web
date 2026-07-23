@@ -76,9 +76,9 @@ source /Users/xiong/Documents/SmartStock/.local-secrets/smartstock.env
 set +a
 PYTHONPATH=. /Users/xiong/Documents/SmartStock/.venvs/ml-py313/bin/python \
   scripts/capture_ml_prospective_lockbox.py \
-  --label-root /Users/xiong/Documents/SmartStock/ml-assets/runs/ml-recovery-acceptance-20260722-r1 \
-  --feature-asset-root /Users/xiong/Documents/SmartStock/ml-assets/runs/ml-recovery-acceptance-20260722-r2 \
-  --panel-root /Users/xiong/Documents/SmartStock/ml-assets/panels/fm_rank_10d_20260711_r2 \
+  --label-root /Users/xiong/Documents/SmartStock/ml-assets/derivations/shsz-r1-v2-development-labels-v1-20260720 \
+  --feature-asset-root /Users/xiong/Documents/SmartStock/ml-assets/derivations/shsz-r1-v2-feature-asset-v2-20260720 \
+  --panel-root /Users/xiong/Documents/SmartStock/ml-assets/runs/full-market-history-shsz-20260720-v2 \
   --development-cutoff 2026-06-18 \
   --start-date 2026-06-22 \
   --end-date 2026-07-22 \
