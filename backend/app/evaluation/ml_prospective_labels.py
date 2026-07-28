@@ -90,6 +90,56 @@ def build_prospective_forward_labels(panel: pd.DataFrame, contract: ProspectiveL
     return pd.concat([rows.reset_index(drop=True), pd.DataFrame(outcomes)], axis=1)
 
 
+def add_prospective_alpha_labels(rows: pd.DataFrame, contract: ProspectiveLabelContract | None = None) -> pd.DataFrame:
+    """Add full-cross-section R1 alpha targets to already-computed outcomes.
+
+    This function is pure and does not decide whether a prospective archive may
+    be opened. Its caller must provide a complete same-date cross-section.
+    """
+    active_contract = contract or ProspectiveLabelContract()
+    required = {
+        "trade_date",
+        "symbol",
+        "industry_l1",
+        "eligible_for_training_10d",
+        "net_return_after_cost_10d",
+        "mae_10d",
+        "sl_before_tp_10d",
+        "future_limit_down_count_10d",
+    }
+    if not isinstance(rows, pd.DataFrame):
+        raise TypeError("prospective alpha rows must be a pandas DataFrame")
+    missing = sorted(required - set(rows.columns))
+    if missing:
+        raise ValueError("prospective alpha rows miss columns: " + ", ".join(missing))
+    result = rows.copy()
+    result["trade_date"] = _normalize_date_series(result["trade_date"], "trade_date", allow_null=False)
+    result["symbol"] = result["symbol"].astype("string").fillna("").str.split(".", regex=False).str[0].str.zfill(6)
+    if result["symbol"].eq("").any() or result["symbol"].str.fullmatch(r"\d{6}").ne(True).any():
+        raise ValueError("prospective alpha rows have an invalid symbol")
+    for column in (
+        "market_median_net_return_10d",
+        "industry_median_net_return_10d",
+        "market_excess_10d",
+        "industry_excess_10d",
+        "alpha_target_10d",
+        "alpha_percentile_10d",
+    ):
+        result[column] = np.nan
+    result["industry_fallback_to_market_10d"] = pd.array([pd.NA] * len(result), dtype="boolean")
+    result["alpha_top10_10d"] = False
+    result["positive_net_return_10d"] = pd.array([pd.NA] * len(result), dtype="boolean")
+    result["severe_negative_10d"] = pd.array([pd.NA] * len(result), dtype="boolean")
+    result["alpha_relevance_grade_10d"] = pd.array([pd.NA] * len(result), dtype="Int64")
+
+    eligible = result["eligible_for_training_10d"].eq(True) & pd.to_numeric(
+        result["net_return_after_cost_10d"], errors="coerce"
+    ).notna()
+    for _, index in result.loc[eligible].groupby("trade_date", sort=True).groups.items():
+        _assign_alpha_for_date(result, pd.Index(index), active_contract)
+    return result
+
+
 def _normalize_panel(panel: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(panel, pd.DataFrame):
         raise TypeError("prospective label panel must be a pandas DataFrame")
@@ -109,6 +159,59 @@ def _normalize_panel(panel: pd.DataFrame) -> pd.DataFrame:
     for column in ("eligible_signal_day", "entry_tradeable", "at_up_limit", "at_down_limit", "valid_ohlc", "is_st", "is_suspended"):
         rows[column] = rows[column].eq(True)
     return rows.sort_values(["symbol", "trade_date"], kind="stable").reset_index(drop=True)
+
+
+def _assign_alpha_for_date(result: pd.DataFrame, index: pd.Index, contract: ProspectiveLabelContract) -> None:
+    cross_section = result.loc[index].copy()
+    returns = pd.to_numeric(cross_section["net_return_after_cost_10d"], errors="coerce")
+    market_median = float(returns.median())
+    industry = cross_section["industry_l1"].fillna("").astype(str)
+    peer_counts = industry.groupby(industry).transform("size")
+    industry_medians = returns.groupby(industry).transform("median")
+    use_industry = industry.ne("") & peer_counts.ge(contract.minimum_industry_peers)
+    reference = industry_medians.where(use_industry, market_median)
+    market_excess = returns - market_median
+    industry_excess = returns - reference
+    alpha = 0.5 * market_excess + 0.5 * industry_excess
+    ordered = pd.DataFrame(
+        {"index": index, "alpha": alpha.to_numpy(), "symbol": cross_section["symbol"].to_numpy()}
+    ).sort_values(["alpha", "symbol"], kind="stable")
+    denominator = max(len(ordered) - 1, 1)
+    ordered["percentile"] = np.arange(len(ordered), dtype=float) / denominator
+    if len(ordered) == 1:
+        ordered["percentile"] = 1.0
+    grades = pd.Series(0, index=index, dtype="int64")
+    ordered_indices = ordered["index"].tolist()
+    for grade, count in {
+        1: int(np.floor(len(ordered) * 0.50)),
+        2: int(np.floor(len(ordered) * 0.20)),
+        3: int(np.floor(len(ordered) * 0.10)),
+        4: int(np.floor(len(ordered) * 0.05)),
+    }.items():
+        if count:
+            grades.loc[ordered_indices[-count:]] = grade
+    top10_count = int(np.floor(len(ordered) * 0.10))
+    top10 = pd.Series(False, index=index)
+    if top10_count:
+        top10.loc[ordered_indices[-top10_count:]] = True
+    severe = (
+        returns.le(-0.05)
+        | pd.to_numeric(cross_section["mae_10d"], errors="coerce").le(contract.severe_drawdown)
+        | cross_section["sl_before_tp_10d"].eq(True)
+        | pd.to_numeric(cross_section["future_limit_down_count_10d"], errors="coerce").gt(0)
+    )
+    percentiles = ordered.set_index("index")["percentile"].reindex(index)
+    result.loc[index, "market_median_net_return_10d"] = market_median
+    result.loc[index, "industry_median_net_return_10d"] = reference.to_numpy()
+    result.loc[index, "market_excess_10d"] = market_excess.to_numpy()
+    result.loc[index, "industry_excess_10d"] = industry_excess.to_numpy()
+    result.loc[index, "alpha_target_10d"] = alpha.to_numpy()
+    result.loc[index, "alpha_percentile_10d"] = percentiles.to_numpy()
+    result.loc[index, "industry_fallback_to_market_10d"] = pd.array((~use_industry).to_numpy(), dtype="boolean")
+    result.loc[index, "alpha_top10_10d"] = top10.to_numpy()
+    result.loc[index, "positive_net_return_10d"] = pd.array(returns.gt(0).to_numpy(), dtype="boolean")
+    result.loc[index, "severe_negative_10d"] = pd.array(severe.to_numpy(), dtype="boolean")
+    result.loc[index, "alpha_relevance_grade_10d"] = pd.array(grades.to_numpy(), dtype="Int64")
 
 
 def _normalize_date_series(values: pd.Series, source: str, *, allow_null: bool) -> pd.Series:

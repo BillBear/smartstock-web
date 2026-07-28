@@ -2,7 +2,11 @@ import unittest
 
 import pandas as pd
 
-from app.evaluation.ml_prospective_labels import ProspectiveLabelContract, build_prospective_forward_labels
+from app.evaluation.ml_prospective_labels import (
+    ProspectiveLabelContract,
+    add_prospective_alpha_labels,
+    build_prospective_forward_labels,
+)
 
 
 class MLProspectiveLabelTests(unittest.TestCase):
@@ -108,6 +112,30 @@ class MLProspectiveLabelTests(unittest.TestCase):
         self.assertTrue(row["horizon_available_10d"])
         self.assertFalse(row["entry_tradeable_10d"])
         self.assertFalse(row["eligible_for_training_10d"])
+
+    def test_alpha_uses_full_cross_section_and_industry_fallback(self):
+        rows = []
+        for index in range(31):
+            rows.append(
+                {
+                    "trade_date": "2026-01-02",
+                    "symbol": f"{index + 1:06d}",
+                    "industry_l1": "bank" if index < 30 else "tiny_industry",
+                    "eligible_for_training_10d": True,
+                    "net_return_after_cost_10d": -0.10 if index == 0 else index / 100.0,
+                    "mae_10d": -0.01,
+                    "sl_before_tp_10d": False,
+                    "future_limit_down_count_10d": 0,
+                }
+            )
+
+        scored = add_prospective_alpha_labels(pd.DataFrame(rows))
+
+        self.assertEqual(int(scored["alpha_top10_10d"].sum()), 3)
+        self.assertTrue(scored.loc[scored["symbol"].eq("000031"), "industry_fallback_to_market_10d"].item())
+        self.assertFalse(scored.loc[scored["symbol"].eq("000030"), "industry_fallback_to_market_10d"].item())
+        self.assertTrue(scored.loc[scored["symbol"].eq("000031"), "alpha_top10_10d"].item())
+        self.assertTrue(scored.loc[scored["symbol"].eq("000001"), "severe_negative_10d"].item())
 
 
 if __name__ == "__main__":
