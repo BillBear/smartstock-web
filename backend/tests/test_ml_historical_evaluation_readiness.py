@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+import json
+import tempfile
+from unittest.mock import patch
+
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from app.evaluation.ml_historical_evaluation_readiness import (
     REQUIRED_DAILY_PORTFOLIO_COLUMNS,
     REQUIRED_TOP10_EVALUATION_COLUMNS,
     assess_historical_evaluation_readiness,
+    audit_historical_evaluation_readiness,
 )
 
 
@@ -122,6 +131,102 @@ class HistoricalEvaluationReadinessTests(unittest.TestCase):
 
         self.assertIn("walk_forward_embargo_insufficient", report["blocking_codes"])
 
+    def test_blocked_audit_publishes_an_atomic_research_only_report(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            label_root = root / "labels"
+            candidate_root = root / "candidate"
+            output_dir = root / "output"
+            label_root.mkdir()
+            candidate_root.mkdir()
+            _write_json(
+                label_root / "development_split_plan.json",
+                {
+                    **_split_with_ten_session_embargo(),
+                    "future_holdout": {
+                        "status": "awaiting_model_freeze_and_future_labels",
+                        "formal_evaluation_allowed": False,
+                        "dates": [],
+                    },
+                },
+            )
+            _write_json(
+                candidate_root / "candidate_screen.json",
+                {"status": "development_research_failed_gate", "candidate_freeze_allowed": False},
+            )
+            pq.write_table(
+                pa.Table.from_pandas(pd.DataFrame(columns=sorted(REQUIRED_TOP10_EVALUATION_COLUMNS))),
+                candidate_root / "oof_predictions.parquet",
+            )
+            with patch(
+                "app.evaluation.ml_historical_evaluation_readiness.verify_recovery_inputs",
+                return_value={"input_manifest": {"dataset_id": "fixture"}},
+            ):
+                report = audit_historical_evaluation_readiness(
+                    label_root=label_root,
+                    feature_asset_root=root / "features",
+                    panel_root=root / "panel",
+                    candidate_run_root=candidate_root,
+                    output_dir=output_dir,
+                    code_commit="test",
+                )
+
+            self.assertEqual("blocked", report["status"])
+            self.assertFalse(report["production_integration_allowed"])
+            persisted = json.loads((output_dir / "historical_evaluation_readiness.json").read_text(encoding="utf-8"))
+            self.assertEqual(report, persisted)
+            self.assertEqual("complete", json.loads((output_dir / "progress.json").read_text(encoding="utf-8"))["status"])
+
+    def test_audit_failure_keeps_progress_without_publishing_output(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            label_root = root / "labels"
+            label_root.mkdir()
+            _write_json(
+                label_root / "development_split_plan.json",
+                {
+                    **_split_with_ten_session_embargo(),
+                    "future_holdout": {
+                        "status": "awaiting_model_freeze_and_future_labels",
+                        "formal_evaluation_allowed": False,
+                        "dates": [],
+                    },
+                },
+            )
+            output_dir = root / "output"
+            with patch(
+                "app.evaluation.ml_historical_evaluation_readiness.verify_recovery_inputs",
+                return_value={"input_manifest": {"dataset_id": "fixture"}},
+            ):
+                with self.assertRaisesRegex(FileNotFoundError, "candidate_screen.json"):
+                    audit_historical_evaluation_readiness(
+                        label_root=label_root,
+                        feature_asset_root=root / "features",
+                        panel_root=root / "panel",
+                        candidate_run_root=root / "candidate",
+                        output_dir=output_dir,
+                        code_commit="test",
+                    )
+
+            self.assertFalse(output_dir.exists())
+            progress = json.loads((root / ".output.running" / "progress.json").read_text(encoding="utf-8"))
+            self.assertEqual("failed", progress["status"])
+
+    def test_audit_rejects_a_candidate_path_inside_the_prospective_lockbox(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            with self.assertRaisesRegex(ValueError, "prospective lockbox"):
+                audit_historical_evaluation_readiness(
+                    label_root=root / "labels",
+                    feature_asset_root=root / "features",
+                    panel_root=root / "panel",
+                    candidate_run_root=root / "prospective-lockbox" / "candidate",
+                    output_dir=root / "output",
+                    code_commit="test",
+                )
+
+            self.assertFalse((root / "output").exists())
+
 
 def _split_with_ten_session_embargo() -> dict[str, object]:
     dates = [f"2025-01-{day:02d}" for day in range(1, 32)] + [f"2025-02-{day:02d}" for day in range(1, 29)]
@@ -136,6 +241,10 @@ def _split_with_ten_session_embargo() -> dict[str, object]:
             }
         )
     return {"development_dates": dates, "walk_forward": folds}
+
+
+def _write_json(path: Path, payload: object) -> None:
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 if __name__ == "__main__":

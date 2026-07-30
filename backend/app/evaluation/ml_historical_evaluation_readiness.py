@@ -7,7 +7,16 @@ label, so it cannot turn a missing final holdout into apparent evidence.
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import tempfile
 from typing import Any
+
+import pyarrow.parquet as pq
+
+from app.evaluation.ml_recovery_acceptance import verify_recovery_inputs
 
 
 TOP_K = 10
@@ -103,6 +112,72 @@ def assess_historical_evaluation_readiness(
     }
 
 
+def audit_historical_evaluation_readiness(
+    *,
+    label_root: str | Path,
+    feature_asset_root: str | Path,
+    panel_root: str | Path,
+    candidate_run_root: str | Path,
+    output_dir: str | Path,
+    code_commit: str,
+) -> dict[str, Any]:
+    """Bind local metadata and atomically publish a fail-closed audit report."""
+    destination = Path(output_dir).expanduser().resolve()
+    candidate_root = Path(candidate_run_root).expanduser().resolve()
+    if "prospective-lockbox" in candidate_root.parts:
+        raise ValueError("candidate run must not read from the prospective lockbox")
+    if destination.exists():
+        raise FileExistsError(f"historical evaluation output directory already exists: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.parent / f".{destination.name}.running"
+    if temporary.exists():
+        raise FileExistsError(f"incomplete historical evaluation audit requires inspection: {temporary}")
+    temporary.mkdir()
+    try:
+        _write_progress(temporary, "input-verify", status="running")
+        inputs = verify_recovery_inputs(label_root, feature_asset_root, panel_root)
+        label_path = Path(label_root).expanduser().resolve()
+        split_payload = _read_json(label_path / "development_split_plan.json")
+        candidate_screen = _read_json(candidate_root / "candidate_screen.json")
+        oof_path = candidate_root / "oof_predictions.parquet"
+        if not oof_path.is_file():
+            raise FileNotFoundError(f"oof_predictions.parquet is missing: {oof_path}")
+        oof_columns = tuple(pq.ParquetFile(oof_path).schema_arrow.names)
+
+        _write_progress(temporary, "readiness-assess", status="running")
+        readiness = assess_historical_evaluation_readiness(
+            development_split=split_payload,
+            future_holdout=_mapping_or_empty(split_payload.get("future_holdout")),
+            candidate_screen=candidate_screen,
+            oof_columns=oof_columns,
+        )
+        report = {
+            **readiness,
+            "audit_completed": True,
+            "code_commit": str(code_commit),
+            "input_manifest": dict(inputs["input_manifest"]),
+            "candidate_run_root": str(candidate_root),
+            "candidate_screen_status": str(candidate_screen.get("status", "")),
+            "oof_schema_column_count": len(oof_columns),
+            "prospective_lockbox_read": False,
+            "research_only": True,
+            "production_integration_allowed": False,
+        }
+        _write_json(temporary / "historical_evaluation_readiness.json", report)
+        _write_progress(temporary, "complete", status="complete", audit_status=report["status"])
+        os.replace(temporary, destination)
+        return report
+    except BaseException as error:
+        _write_progress(
+            temporary,
+            "failed",
+            status="failed",
+            failure_type=type(error).__name__,
+            failure_message=str(error),
+        )
+        raise
+
+
 def _assess_walk_forward_folds(development_split: Mapping[str, Any], blocking_codes: list[str]) -> dict[str, Any]:
     development_dates = _normalized_dates(development_split.get("development_dates", ()))
     date_positions = {date: index for index, date in enumerate(development_dates)}
@@ -162,3 +237,50 @@ def _normalized_dates(values: object) -> list[str]:
         return []
     result = sorted({str(value).strip() for value in values if str(value).strip()})
     return result
+
+
+def _mapping_or_empty(value: object) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise FileNotFoundError(f"{path.name} is missing: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path.name} must be a JSON object")
+    return payload
+
+
+def _write_progress(path: Path, stage: str, *, status: str, **details: Any) -> None:
+    _write_json(
+        path / "progress.json",
+        {
+            "stage": stage,
+            "status": status,
+            "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+            **details,
+        },
+    )
+
+
+def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=True, indent=2, sort_keys=True, default=_json_default)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    raise TypeError(f"cannot serialize {type(value).__name__}")
