@@ -29,7 +29,7 @@ the candidate has ranking value.
 
 ## Real Asset Run
 
-Run from `smartstock-web/backend` at code commit `1095956`:
+Run from `smartstock-web/backend` at code commit `bba6bd2`:
 
 ```bash
 PYTHONPATH=. /Users/xiong/Documents/SmartStock/.venvs/ml-py313/bin/python \
@@ -38,8 +38,8 @@ PYTHONPATH=. /Users/xiong/Documents/SmartStock/.venvs/ml-py313/bin/python \
   --feature-asset-root /Users/xiong/Documents/SmartStock/ml-assets/derivations/shsz-r1-v2-feature-asset-v2-20260720 \
   --panel-root /Users/xiong/Documents/SmartStock/ml-assets/runs/full-market-history-shsz-20260720-v2 \
   --candidate-run-root /Users/xiong/Documents/SmartStock/ml-assets/runs/ml-recovery-h1-momentum-trend-20260728-r1 \
-  --output-dir /Users/xiong/Documents/SmartStock/ml-assets/runs/ml-oof-daily-path-reconstruction-20260731-r3 \
-  --code-commit 1095956
+  --output-dir /Users/xiong/Documents/SmartStock/ml-assets/runs/ml-oof-daily-path-reconstruction-20260731-r4 \
+  --code-commit bba6bd2
 ```
 
 The command completed with report status `complete`.  Its local-only output is
@@ -98,12 +98,20 @@ The final output report records:
 - input R1/R2/panel manifest hashes; and
 - `prospective_lockbox_read=false`.
 
+The final `r4` report SHA256 is
+`d09436b54defaa7cb6175e966fc74f6e76dee4b18eeff50f9c062ea32fe5f72a`;
+its portfolio-metrics SHA256 is
+`bfcdb64340d79f5251d8a595a13a3bb5e59ff26b11d975d6d2dbbc94c106f33d`.
+
 The original `r1` run stopped before reading panel rows because PyArrow merged
 the hive-directory `trade_date` with the Parquet payload date using incompatible
 Arrow string types.  `r2` reconstructed rows but had a cohort-accounting bug
 that opened the same ten-day cohort once per daily mark; its near -100% metrics
-are invalid and must not be used.  The committed `1095956` correction creates
-each cohort once, and `r3` is the sole valid output for this task.
+are invalid and must not be used.  Commit `1095956` corrects the cohort
+accounting.  The subsequent `bba6bd2` guard additionally rejects any
+signal-date/quadrant with fewer than ten execution-eligible names instead of
+silently evaluating Top-N.  All 5,100 selections per side meet that guard;
+`r4` is the sole authoritative output for this task.
 
 Market-regime output remains unavailable because this OOF artifact has no
 separately frozen signal-time regime contract.  Future-return market-state
