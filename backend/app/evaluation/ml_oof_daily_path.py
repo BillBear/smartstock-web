@@ -429,7 +429,10 @@ def _aggregate_portfolio_paths(paths: pd.DataFrame) -> tuple[pd.DataFrame, dict[
 
 
 def _aggregate_single_portfolio(cohorts: pd.DataFrame) -> tuple[list[dict[str, object]], dict[str, float | int]]:
-    by_entry = {date: rows.copy() for date, rows in cohorts.groupby("entry_trade_date", sort=True)}
+    cohort_starts = cohorts.sort_values(["signal_trade_date", "portfolio_mark_date"], kind="stable").drop_duplicates(
+        ["signal_trade_date"], keep="first"
+    )
+    by_entry = {date: rows.copy() for date, rows in cohort_starts.groupby("entry_trade_date", sort=True)}
     by_mark = {date: rows.copy() for date, rows in cohorts.groupby("portfolio_mark_date", sort=True)}
     active: dict[str, dict[str, float | str]] = {}
     cash = 1.0

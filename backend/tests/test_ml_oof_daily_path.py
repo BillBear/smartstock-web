@@ -4,7 +4,7 @@ import unittest
 
 import pandas as pd
 
-from app.evaluation.ml_oof_daily_path import reconstruct_selected_daily_paths
+from app.evaluation.ml_oof_daily_path import _aggregate_portfolio_paths, reconstruct_selected_daily_paths
 
 
 COMMISSION = 0.0003
@@ -93,6 +93,44 @@ class MLOofDailyPathTest(unittest.TestCase):
         self.assertTrue(paths.empty)
         self.assertEqual("blocked", report["status"])
         self.assertIn("entry_tradeability_contradiction", report["rejection_codes"])
+
+    def test_portfolio_opens_each_signal_cohort_once_not_once_per_daily_mark(self):
+        paths = pd.DataFrame(
+            [
+                {
+                    "fold": 1,
+                    "quadrant": "A",
+                    "signal_trade_date": "2025-01-01",
+                    "entry_trade_date": "2025-01-02",
+                    "exit_trade_date": "2025-01-03",
+                    "symbol": "000001",
+                    "rank_no": 1,
+                    "score": 1.0,
+                    "portfolio_mark_date": "2025-01-02",
+                    "cohort_net_factor": 1.0,
+                    "daily_mark_to_market_return": 0.0,
+                },
+                {
+                    "fold": 1,
+                    "quadrant": "A",
+                    "signal_trade_date": "2025-01-01",
+                    "entry_trade_date": "2025-01-02",
+                    "exit_trade_date": "2025-01-03",
+                    "symbol": "000001",
+                    "rank_no": 1,
+                    "score": 1.0,
+                    "portfolio_mark_date": "2025-01-03",
+                    "cohort_net_factor": 1.1,
+                    "daily_mark_to_market_return": 0.1,
+                },
+            ]
+        )
+
+        marks, metrics = _aggregate_portfolio_paths(paths)
+
+        self.assertEqual(2, len(marks))
+        self.assertAlmostEqual(1.01, float(marks.iloc[-1]["equity_factor"]), places=12)
+        self.assertAlmostEqual(0.01, float(metrics["fold_1_A"]["net_portfolio_return"]), places=12)
 
 
 def _oof_rows() -> pd.DataFrame:
