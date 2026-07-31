@@ -94,14 +94,15 @@ def _oof_rows() -> pd.DataFrame:
                 "fold": 1,
                 "quadrant": "A",
                 "trade_date": "2025-01-02",
-                "symbol": "000001",
-                "model_score": 0.9,
-                "baseline_score": 0.8,
+                "symbol": f"{index:06d}",
+                "model_score": float(11 - index),
+                "baseline_score": float(11 - index),
                 "entry_tradeable": True,
                 "horizon_available_10d": True,
                 "path_ambiguous_10d": False,
                 "net_return_after_cost_10d": 0.1,
             }
+            for index in range(1, 11)
         ]
     )
 

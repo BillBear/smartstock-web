@@ -245,6 +245,13 @@ def _select_top_k(oof_rows: pd.DataFrame, *, score_column: str, top_k: int) -> p
         raise MLOofDailyPathError("OOF rows have no execution-eligible scored candidates")
     if rows.duplicated(["fold", "quadrant", "trade_date", "symbol"]).any():
         raise MLOofDailyPathError("OOF rows have duplicate fold/quadrant/trade_date/symbol keys")
+    group_sizes = rows.groupby(["fold", "quadrant", "trade_date"], sort=True).size()
+    insufficient = group_sizes.loc[group_sizes.lt(top_k)]
+    if not insufficient.empty:
+        fold, quadrant, trade_date = insufficient.index[0]
+        raise MLOofDailyPathError(
+            f"OOF group has fewer than required Top-{top_k} eligible rows: {fold}/{quadrant}/{trade_date}"
+        )
     rows = rows.sort_values(
         ["fold", "quadrant", "trade_date", "selected_score", "symbol"],
         ascending=[True, True, True, False, True],

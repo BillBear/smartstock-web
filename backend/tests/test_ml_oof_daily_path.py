@@ -4,7 +4,7 @@ import unittest
 
 import pandas as pd
 
-from app.evaluation.ml_oof_daily_path import _aggregate_portfolio_paths, reconstruct_selected_daily_paths
+from app.evaluation.ml_oof_daily_path import MLOofDailyPathError, _aggregate_portfolio_paths, reconstruct_selected_daily_paths
 
 
 COMMISSION = 0.0003
@@ -131,6 +131,15 @@ class MLOofDailyPathTest(unittest.TestCase):
         self.assertEqual(2, len(marks))
         self.assertAlmostEqual(1.01, float(marks.iloc[-1]["equity_factor"]), places=12)
         self.assertAlmostEqual(0.01, float(metrics["fold_1_A"]["net_portfolio_return"]), places=12)
+
+    def test_rejects_signal_date_without_the_required_top_k_eligible_rows(self):
+        with self.assertRaisesRegex(MLOofDailyPathError, "fewer than required Top-2"):
+            reconstruct_selected_daily_paths(
+                oof_rows=_oof_rows(),
+                panel_rows=_panel_rows(),
+                score_column="model_score",
+                top_k=2,
+            )
 
 
 def _oof_rows() -> pd.DataFrame:
