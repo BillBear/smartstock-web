@@ -8,8 +8,9 @@ import unittest
 from unittest.mock import patch
 
 import pandas as pd
+import pyarrow as pa
 
-from app.evaluation.ml_oof_daily_path import run_oof_daily_path_reconstruction
+from app.evaluation.ml_oof_daily_path import _read_selected_panel_rows, run_oof_daily_path_reconstruction
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "reconstruct_ml_oof_daily_paths.py"
@@ -47,6 +48,19 @@ class MLOofDailyPathRunnerTest(unittest.TestCase):
             self.assertTrue((output / "progress.json").is_file())
             self.assertFalse((output / "model_daily_cohorts.parquet").exists())
             self.assertFalse((output / "baseline_daily_cohorts.parquet").exists())
+
+    def test_panel_reader_uses_file_schema_without_conflicting_hive_trade_date_partition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            intermediate = root / "intermediate"
+            intermediate.mkdir()
+            dataset = _DatasetStub(_complete_panel())
+            with patch("app.evaluation.ml_oof_daily_path.ds.dataset", return_value=dataset) as build_dataset:
+                rows = _read_selected_panel_rows(root, ["000001"])
+
+            self.assertEqual(1, len(rows))
+            self.assertEqual((intermediate,), build_dataset.call_args.args)
+            self.assertEqual({"format": "parquet"}, build_dataset.call_args.kwargs)
 
 
 class MLOofDailyPathCliTest(unittest.TestCase):
@@ -107,6 +121,32 @@ def _incomplete_panel() -> pd.DataFrame:
             }
         ]
     )
+
+
+def _complete_panel() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "trade_date": "2025-01-02",
+                "symbol": "000001",
+                "next_open_date": "2025-01-03",
+                "adjusted_open": 10.0,
+                "adjusted_close": 10.0,
+                "valid_ohlc": True,
+                "is_suspended": False,
+                "at_up_limit_open": False,
+            }
+        ]
+    )
+
+
+class _DatasetStub:
+    def __init__(self, rows: pd.DataFrame):
+        self.rows = rows
+
+    def to_table(self, *, columns, filter):
+        del columns, filter
+        return pa.Table.from_pandas(self.rows, preserve_index=False)
 
 
 def _load_script():

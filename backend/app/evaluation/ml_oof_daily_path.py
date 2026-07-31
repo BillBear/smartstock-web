@@ -395,7 +395,9 @@ def _read_selected_panel_rows(panel_root: Path, symbols: list[str]) -> pd.DataFr
     intermediate = panel_root / "intermediate"
     if not intermediate.is_dir():
         raise FileNotFoundError(f"certified panel intermediate directory is missing: {intermediate}")
-    dataset = ds.dataset(intermediate, format="parquet", partitioning="hive")
+    # The Parquet payload already owns trade_date; inferring its hive partition
+    # would add a second field with an incompatible Arrow string type.
+    dataset = ds.dataset(intermediate, format="parquet")
     table = dataset.to_table(columns=sorted(_PANEL_COLUMNS), filter=ds.field("symbol").isin(symbols))
     rows = table.to_pandas()
     if rows.empty:
