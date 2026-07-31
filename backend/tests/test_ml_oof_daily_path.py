@@ -78,6 +78,22 @@ class MLOofDailyPathTest(unittest.TestCase):
         self.assertEqual(1, report["terminal_mismatch_count"])
         self.assertIn("terminal_factor_mismatch", report["rejection_codes"])
 
+    def test_missing_entry_validity_flag_is_a_closed_rejection_not_a_boolean_error(self):
+        panel = _panel_rows()
+        panel["valid_ohlc"] = panel["valid_ohlc"].astype("object")
+        panel.loc[panel["trade_date"].eq("2025-01-03"), "valid_ohlc"] = pd.NA
+
+        paths, report = reconstruct_selected_daily_paths(
+            oof_rows=_oof_rows(),
+            panel_rows=panel,
+            score_column="model_score",
+            top_k=1,
+        )
+
+        self.assertTrue(paths.empty)
+        self.assertEqual("blocked", report["status"])
+        self.assertIn("entry_tradeability_contradiction", report["rejection_codes"])
+
 
 def _oof_rows() -> pd.DataFrame:
     return pd.DataFrame(
