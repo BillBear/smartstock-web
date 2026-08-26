@@ -1,0 +1,42 @@
+{
+  "minimal_legacy_pick": {
+    "symbol": "600000",
+    "rank_no": 3,
+    "action": "watch",
+    "runtime_state": "stale"
+  },
+  "rank_one": {
+    "symbol": "000001",
+    "rank_no": 1,
+    "action": "buy",
+    "decision": {"grade": "A", "summary": "runtime only"},
+    "executable": true,
+    "score_breakdown": {"raw_total": 82.1234565, "total": 82.1234565, "risk_adjusted": 70.0},
+    "up_prob": 0.6234565,
+    "dd_prob": 0.2456784,
+    "expected_return_pct": 5.2,
+    "position_pct": 5.0,
+    "entry_range": [10.0, 10.2],
+    "take_profit": 11.4,
+    "stop_loss": 9.3,
+    "runtime_state": "stale",
+    "name": "ignored"
+  },
+  "rank_two": {
+    "symbol": "000333",
+    "rank_no": 2,
+    "action": "watch",
+    "decision": {"grade": "B"},
+    "executable": false,
+    "score_breakdown": {"raw_total": 71.5, "total": 71.5},
+    "up_prob": 0.5,
+    "dd_prob": 0.125,
+    "expected_return_pct": 1.2345675,
+    "position_pct": 2.5,
+    "entry_range": [20.1234564, 20.8765435],
+    "take_profit": 22.0,
+    "stop_loss": 19.0,
+    "runtime_state": "fresh"
+  },
+  "expected_sha256": "143df5676a4aabc9f60c74b8e35b1f1f4aef97f596ab3d378e67d39dc72f7a08"
+}
