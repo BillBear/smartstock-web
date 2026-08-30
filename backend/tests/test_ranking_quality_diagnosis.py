@@ -9,6 +9,7 @@ from app.evaluation.ranking_quality_diagnosis import (
     DuplicateSnapshotKeyError,
     build_ranking_quality_diagnosis,
     label_snapshot_rows,
+    validate_snapshot_identity,
     validate_labeled_snapshot_sample,
 )
 
@@ -41,6 +42,17 @@ class RankingQualityDiagnosisTests(unittest.TestCase):
             validate_labeled_snapshot_sample(rows)
 
         self.assertEqual(caught.exception.diagnostics["duplicate_key_checks"]["trade_date_symbol"]["status"], "failed")
+
+    def test_snapshot_identity_preflight_stops_before_history_labeling(self):
+        snapshots = [
+            {"trade_date": "2026-07-17", "symbol": "000001", "rank_no": 1},
+            {"trade_date": "2026-07-17", "symbol": "000002", "rank_no": 1},
+        ]
+
+        with self.assertRaises(DuplicateSnapshotKeyError) as caught:
+            validate_snapshot_identity(snapshots)
+
+        self.assertEqual(caught.exception.diagnostics["duplicate_key_checks"]["trade_date_rank_no"]["status"], "failed")
 
     def test_cli_is_directly_runnable_from_backend_directory(self):
         backend_dir = Path(__file__).resolve().parents[1]

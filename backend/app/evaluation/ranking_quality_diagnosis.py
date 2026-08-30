@@ -141,29 +141,11 @@ def validate_labeled_snapshot_sample(rows: Sequence[Dict[str, Any]]) -> Tuple[Li
     Snapshot dates are validated only against each candidate's persisted-history
     response.  This deliberately avoids calendar or weekday inference.
     """
-    normalized = []
-    for source in rows:
-        row = dict(source)
-        row["trade_date"] = _iso_date(row.get("trade_date"))
-        row["symbol"] = str(row.get("symbol") or "").strip()
-        row["rank_no"] = _int(row.get("rank_no"), 999999)
-        normalized.append(row)
+    normalized = _normalize_snapshot_identity_rows(rows)
+    diagnostics = validate_snapshot_identity(normalized)
 
     by_date = _by_date(normalized)
-    duplicate_checks = {
-        "trade_date_symbol": _duplicate_key_check(normalized, ("trade_date", "symbol")),
-        "trade_date_rank_no": _duplicate_key_check(normalized, ("trade_date", "rank_no")),
-    }
-    diagnostics: Dict[str, Any] = {
-        "raw_date_count": len(by_date),
-        "raw_candidate_count": len(normalized),
-        "duplicate_key_checks": duplicate_checks,
-        "daily_candidate_set_hashes": [],
-        "adjacent_date_candidate_set_comparisons": [],
-        "excluded_dates": [],
-    }
-    if any(check["status"] == "failed" for check in duplicate_checks.values()):
-        raise DuplicateSnapshotKeyError("duplicate persisted snapshot keys; evaluation stopped without deduplication", diagnostics)
+    diagnostics.update({"daily_candidate_set_hashes": [], "adjacent_date_candidate_set_comparisons": [], "excluded_dates": []})
 
     valid_rows: List[Dict[str, Any]] = []
     previous_date: Optional[str] = None
@@ -223,6 +205,23 @@ def validate_labeled_snapshot_sample(rows: Sequence[Dict[str, Any]]) -> Tuple[Li
     if rank_band_checks["status"] != "passed":
         raise SnapshotIntegrityError("rank-band count invariant failed; evaluation stopped", diagnostics)
     return valid_rows, diagnostics
+
+
+def validate_snapshot_identity(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Stop before history access when persisted snapshot keys are ambiguous."""
+    normalized = _normalize_snapshot_identity_rows(rows)
+    duplicate_checks = {
+        "trade_date_symbol": _duplicate_key_check(normalized, ("trade_date", "symbol")),
+        "trade_date_rank_no": _duplicate_key_check(normalized, ("trade_date", "rank_no")),
+    }
+    diagnostics = {
+        "raw_date_count": len(_by_date(normalized)),
+        "raw_candidate_count": len(normalized),
+        "duplicate_key_checks": duplicate_checks,
+    }
+    if any(check["status"] == "failed" for check in duplicate_checks.values()):
+        raise DuplicateSnapshotKeyError("duplicate persisted snapshot keys; evaluation stopped without deduplication", diagnostics)
+    return diagnostics
 
 
 def build_ranking_quality_diagnosis(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
@@ -576,6 +575,17 @@ def _market_state_direction(rows: List[Dict[str, Any]], factor: str, return_key:
 def _sample_row(row: Dict[str, Any]) -> Dict[str, Any]:
     keys = ("trade_date", "symbol", "name", "rank_no", "action", "decision_executable", "future_return_10d", "max_favorable_excursion", "max_adverse_excursion", "first_hit_path", "raw_total", "total", "up_prob", "dd_prob")
     return {key: row.get(key) for key in keys}
+
+
+def _normalize_snapshot_identity_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    normalized = []
+    for source in rows:
+        row = dict(source)
+        row["trade_date"] = _iso_date(row.get("trade_date"))
+        row["symbol"] = str(row.get("symbol") or "").strip()
+        row["rank_no"] = _int(row.get("rank_no"), 999999)
+        normalized.append(row)
+    return normalized
 
 
 def _duplicate_key_check(rows: Sequence[Dict[str, Any]], fields: Sequence[str]) -> Dict[str, Any]:
