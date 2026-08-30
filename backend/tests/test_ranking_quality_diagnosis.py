@@ -6,12 +6,42 @@ import sys
 import pandas as pd
 
 from app.evaluation.ranking_quality_diagnosis import (
+    DuplicateSnapshotKeyError,
     build_ranking_quality_diagnosis,
     label_snapshot_rows,
+    validate_labeled_snapshot_sample,
 )
 
 
 class RankingQualityDiagnosisTests(unittest.TestCase):
+    def test_sample_validation_excludes_non_trading_snapshot_and_keeps_prior_trading_snapshot(self):
+        rows = [
+            {"trade_date": "2026-07-17", "symbol": "000001", "rank_no": 1, "snapshot_has_same_date_bar": True},
+            {"trade_date": "2026-07-17", "symbol": "000002", "rank_no": 2, "snapshot_has_same_date_bar": True},
+            {"trade_date": "2026-07-19", "symbol": "000001", "rank_no": 1, "snapshot_has_same_date_bar": False},
+            {"trade_date": "2026-07-19", "symbol": "000002", "rank_no": 2, "snapshot_has_same_date_bar": False},
+        ]
+
+        valid_rows, sample = validate_labeled_snapshot_sample(rows)
+
+        self.assertEqual([row["trade_date"] for row in valid_rows], ["2026-07-17", "2026-07-17"])
+        self.assertEqual(sample["raw_date_count"], 2)
+        self.assertEqual(sample["valid_trading_snapshot_date_count"], 1)
+        self.assertEqual(sample["excluded_dates"][0]["reason"], "non_trading_snapshot")
+        self.assertTrue(sample["excluded_dates"][0]["same_candidate_set_as_previous_date"])
+        self.assertEqual(sample["rank_band_assertions"]["status"], "passed")
+
+    def test_sample_validation_stops_on_duplicate_snapshot_keys(self):
+        rows = [
+            {"trade_date": "2026-07-17", "symbol": "000001", "rank_no": 1, "snapshot_has_same_date_bar": True},
+            {"trade_date": "2026-07-17", "symbol": "000001", "rank_no": 2, "snapshot_has_same_date_bar": True},
+        ]
+
+        with self.assertRaises(DuplicateSnapshotKeyError) as caught:
+            validate_labeled_snapshot_sample(rows)
+
+        self.assertEqual(caught.exception.diagnostics["duplicate_key_checks"]["trade_date_symbol"]["status"], "failed")
+
     def test_cli_is_directly_runnable_from_backend_directory(self):
         backend_dir = Path(__file__).resolve().parents[1]
         result = subprocess.run(

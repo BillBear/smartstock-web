@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
+import hashlib
+import json
 import math
 from statistics import mean, median
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -40,6 +42,18 @@ DEFAULT_EXECUTION_CONFIG = {
 
 
 HistoryFetcher = Callable[[str, str, str], Any]
+
+
+class SnapshotIntegrityError(ValueError):
+    """Persisted snapshot data is ambiguous or violates evaluation invariants."""
+
+    def __init__(self, message: str, diagnostics: Dict[str, Any]):
+        super().__init__(message)
+        self.diagnostics = diagnostics
+
+
+class DuplicateSnapshotKeyError(SnapshotIntegrityError):
+    """Persisted snapshot keys are ambiguous and must not be deduplicated."""
 
 
 def label_snapshot_rows(
@@ -78,6 +92,7 @@ def label_snapshot_rows(
 
         source_counts[str(source or "unknown")] += 1
         future = _normalize_history(history)
+        row["snapshot_has_same_date_bar"] = bool(not future.empty and (future["date"] == trade_date).any())
         future = future[future["date"] > trade_date].reset_index(drop=True) if not future.empty else future
         if future.empty:
             reason = fetch_reason or "no_post_snapshot_bar"
@@ -118,6 +133,96 @@ def label_snapshot_rows(
         "missing_reason_counts": dict(sorted(missing_reasons.items())),
     }
     return labeled, coverage
+
+
+def validate_labeled_snapshot_sample(rows: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Reject ambiguous snapshots and exclude dates absent from all candidate bars.
+
+    Snapshot dates are validated only against each candidate's persisted-history
+    response.  This deliberately avoids calendar or weekday inference.
+    """
+    normalized = []
+    for source in rows:
+        row = dict(source)
+        row["trade_date"] = _iso_date(row.get("trade_date"))
+        row["symbol"] = str(row.get("symbol") or "").strip()
+        row["rank_no"] = _int(row.get("rank_no"), 999999)
+        normalized.append(row)
+
+    by_date = _by_date(normalized)
+    duplicate_checks = {
+        "trade_date_symbol": _duplicate_key_check(normalized, ("trade_date", "symbol")),
+        "trade_date_rank_no": _duplicate_key_check(normalized, ("trade_date", "rank_no")),
+    }
+    diagnostics: Dict[str, Any] = {
+        "raw_date_count": len(by_date),
+        "raw_candidate_count": len(normalized),
+        "duplicate_key_checks": duplicate_checks,
+        "daily_candidate_set_hashes": [],
+        "adjacent_date_candidate_set_comparisons": [],
+        "excluded_dates": [],
+    }
+    if any(check["status"] == "failed" for check in duplicate_checks.values()):
+        raise DuplicateSnapshotKeyError("duplicate persisted snapshot keys; evaluation stopped without deduplication", diagnostics)
+
+    valid_rows: List[Dict[str, Any]] = []
+    previous_date: Optional[str] = None
+    previous_symbols: Optional[List[str]] = None
+    for trade_date, items in by_date.items():
+        symbols = sorted(row["symbol"] for row in items)
+        candidate_set_hash = _candidate_set_hash(symbols)
+        same_as_previous = previous_symbols == symbols if previous_symbols is not None else False
+        diagnostics["daily_candidate_set_hashes"].append(
+            {"trade_date": trade_date, "candidate_count": len(items), "candidate_set_hash": candidate_set_hash}
+        )
+        if previous_date is not None:
+            diagnostics["adjacent_date_candidate_set_comparisons"].append(
+                {
+                    "previous_trade_date": previous_date,
+                    "trade_date": trade_date,
+                    "same_candidate_set": same_as_previous,
+                }
+            )
+
+        has_same_day_bar = [bool(row.get("snapshot_has_same_date_bar")) for row in items]
+        if not any(has_same_day_bar):
+            diagnostics["excluded_dates"].append(
+                {
+                    "trade_date": trade_date,
+                    "reason": "non_trading_snapshot",
+                    "candidate_count": len(items),
+                    "candidate_set_hash": candidate_set_hash,
+                    "previous_trade_date": previous_date,
+                    "same_candidate_set_as_previous_date": same_as_previous,
+                }
+            )
+        else:
+            valid_rows.extend(items)
+        previous_date = trade_date
+        previous_symbols = symbols
+
+    valid_dates = sorted({row["trade_date"] for row in valid_rows})
+    rank_1_5_count = sum(1 for row in valid_rows if 1 <= row["rank_no"] <= 5)
+    rank_1_10_count = sum(1 for row in valid_rows if 1 <= row["rank_no"] <= 10)
+    rank_band_checks = {
+        "rank_1_5_count": rank_1_5_count,
+        "rank_1_5_limit": len(valid_dates) * 5,
+        "rank_1_10_count": rank_1_10_count,
+        "rank_1_10_limit": len(valid_dates) * 10,
+        "status": "passed" if rank_1_5_count <= len(valid_dates) * 5 and rank_1_10_count <= len(valid_dates) * 10 else "failed",
+    }
+    diagnostics.update(
+        {
+            "valid_trading_snapshot_date_count": len(valid_dates),
+            "valid_trading_snapshot_dates": valid_dates,
+            "final_candidate_count": len(valid_rows),
+            "unique_symbol_count": len({row["symbol"] for row in valid_rows}),
+            "rank_band_assertions": rank_band_checks,
+        }
+    )
+    if rank_band_checks["status"] != "passed":
+        raise SnapshotIntegrityError("rank-band count invariant failed; evaluation stopped", diagnostics)
+    return valid_rows, diagnostics
 
 
 def build_ranking_quality_diagnosis(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
@@ -471,6 +576,23 @@ def _market_state_direction(rows: List[Dict[str, Any]], factor: str, return_key:
 def _sample_row(row: Dict[str, Any]) -> Dict[str, Any]:
     keys = ("trade_date", "symbol", "name", "rank_no", "action", "decision_executable", "future_return_10d", "max_favorable_excursion", "max_adverse_excursion", "first_hit_path", "raw_total", "total", "up_prob", "dd_prob")
     return {key: row.get(key) for key in keys}
+
+
+def _duplicate_key_check(rows: Sequence[Dict[str, Any]], fields: Sequence[str]) -> Dict[str, Any]:
+    counts: Counter[Tuple[str, ...]] = Counter(
+        tuple(str(row.get(field) or "") for field in fields) for row in rows
+    )
+    duplicates = [
+        {field: value for field, value in zip(fields, key)} | {"row_count": count}
+        for key, count in sorted(counts.items())
+        if count > 1
+    ]
+    return {"status": "failed" if duplicates else "passed", "duplicate_keys": duplicates}
+
+
+def _candidate_set_hash(symbols: Sequence[str]) -> str:
+    canonical = json.dumps(list(symbols), ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _by_date(rows: Iterable[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
