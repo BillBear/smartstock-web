@@ -5,7 +5,6 @@
 ## 输入与口径
 
 - 权威快照：PostgreSQL，`user_id=default`、`strategy_code=trend_breakout`、`risk_level=medium`。
-- 诊断代码提交：`aea9de8`（只读分析工具；报告由同次运行的忽略运行产物生成）。
 - 快照：312 条，12 个有候选日期；日期范围 2026-06-23 至 2026-07-20。
 - 入场：每只股票严格取选股日期之后第一根有效日 K 线开盘价；没有后续 bar 的记录排除，不使用交易日历或 weekday 推断。
 - 成本：买入和卖出各计 commission=0.0003、slippage=0.0010；收益为双边成本后的收盘净收益。
