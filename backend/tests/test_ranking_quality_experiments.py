@@ -1,6 +1,7 @@
 import unittest
 
 from app.evaluation.ranking_quality_experiments import run_ranking_experiments
+from scripts.analyze_ranking_quality import resolve_existing_dd_prob_veto_threshold
 
 
 def _row(trade_date, symbol, rank_no, dd_prob, risk_adjusted, return_10d, action="watch", source="TuShare"):
@@ -20,6 +21,15 @@ def _row(trade_date, symbol, rank_no, dd_prob, risk_adjusted, return_10d, action
 
 
 class RankingQualityExperimentTests(unittest.TestCase):
+    def test_veto_threshold_uses_only_current_medium_trend_breakout_rule(self):
+        threshold, source = resolve_existing_dd_prob_veto_threshold({}, "trend_breakout", "medium")
+        unavailable, unavailable_source = resolve_existing_dd_prob_veto_threshold({}, "pullback_rebound", "medium")
+
+        self.assertEqual(threshold, 0.30)
+        self.assertIn("CoachService", source)
+        self.assertIsNone(unavailable)
+        self.assertIsNone(unavailable_source)
+
     def test_experiment_c_applies_existing_veto_without_backfilling(self):
         rows = [
             _row("2026-07-01", "000001", 1, 0.50, 90, -12, action="buy"),
