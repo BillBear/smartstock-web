@@ -299,6 +299,67 @@ class SwingDatasetCliTests(unittest.TestCase):
         self.assertEqual(record["response_archive"]["http_status"], 500)
         self.assertIn("elapsed_seconds", record["response_archive"])
 
+    def test_reflected_secret_keys_are_redacted_in_success_and_error_archives(self):
+        import requests
+        with patch.dict(os.environ, {"TUSHARE_TOKEN": "KEY_TEST_TOKEN"}):
+            fetch = self.cli.make_fetcher(None)
+        for status in (200, 403):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as path:
+                payload = response("daily")
+                payload["extra"] = {"KEY_TEST_TOKEN": "retained value", "nested": [
+                    {"https://example.invalid?token=URL_SECRET": "retained nested value"}]}
+                reply = Mock(status_code=status)
+                reply.json.return_value = payload
+                with patch.object(requests, "post", return_value=reply):
+                    result = self.run_collector(fetcher=fetch, max_new_requests=1,
+                        output_dir=Path(path)/"out", cache_dir=Path(path)/"cache")
+                if status == 200:
+                    archive = self.cli.read_json(Path(path)/"cache"/"requests"/DAY/"daily.json.gz")
+                else:
+                    record = self.cli.read_json(Path(path)/"cache"/result["errors"][0]["error_file"])
+                    archive = record["response_archive"]
+                text = json.dumps(archive)
+                self.assertNotIn("KEY_TEST_TOKEN", text)
+                self.assertNotIn("URL_SECRET", text)
+                self.assertNotIn("https://example.invalid", text)
+                self.assertIn("retained value", text)
+                self.assertIn("retained nested value", text)
+                for item in Path(path).rglob("*"):
+                    if item.is_file():
+                        serialized = json.dumps(self.cli.read_json(item))
+                        self.assertNotIn("KEY_TEST_TOKEN", serialized)
+                        self.assertNotIn("URL_SECRET", serialized)
+
+    def test_redacted_key_collision_stops_without_silent_overwrite_or_secret(self):
+        import requests
+        with patch.dict(os.environ, {"TUSHARE_TOKEN": "KEY_TEST_TOKEN"}):
+            fetch = self.cli.make_fetcher(None)
+        collisions = [
+            {"KEY_TEST_TOKEN": "first", "[REDACTED]": "second"},
+            {"https://example.invalid?token=FIRST_SECRET": "first",
+             "https://example.invalid?token=SECOND_SECRET": "second"},
+        ]
+        for status in (200, 403):
+            for extra in collisions:
+                with self.subTest(status=status, extra=extra), tempfile.TemporaryDirectory() as path:
+                    payload = response("daily") | {"extra": extra}
+                    reply = Mock(status_code=status)
+                    reply.json.return_value = payload
+                    with patch.object(requests, "post", return_value=reply):
+                        result = self.run_collector(fetcher=fetch, max_new_requests=1,
+                            output_dir=Path(path)/"out", cache_dir=Path(path)/"cache")
+                    self.assertEqual(result["stop_reason"], "redaction_key_collision")
+                    self.assertEqual(result["new_requests"], 1)
+                    self.assertIsNone(result["dates"][DAY]["output"])
+                    record = self.cli.read_json(Path(path)/"cache"/result["errors"][0]["error_file"])
+                    self.assertEqual(record["response_archive"]["payload"], {
+                        "response_omitted": True, "reason": "redaction_key_collision"})
+                    for item in Path(path).rglob("*"):
+                        if item.is_file():
+                            serialized = json.dumps(self.cli.read_json(item))
+                            for secret in ("KEY_TEST_TOKEN", "FIRST_SECRET", "SECOND_SECRET"):
+                                self.assertNotIn(secret, serialized)
+
     def test_https_scalar_json_is_archived_as_invalid_not_uncaught(self):
         import requests
         with patch.dict(os.environ, {"TUSHARE_TOKEN": "PRIVATE_TOKEN"}):

@@ -162,7 +162,14 @@ def make_fetcher(env_file):
             if isinstance(value, list):
                 return [redact(item) for item in value]
             if isinstance(value, dict):
-                return {key: redact(item) for key, item in value.items()}
+                result = {}
+                for key, item in value.items():
+                    safe_key = redact(key)
+                    if safe_key in result:
+                        raise ProviderError("redaction_key_collision", http_status=reply.status_code,
+                            payload={"response_omitted": True, "reason": "redaction_key_collision"})
+                    result[safe_key] = redact(item)
+                return result
             return value
         payload = redact(payload)
         if reply.status_code != 200:
