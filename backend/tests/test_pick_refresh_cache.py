@@ -109,3 +109,15 @@ class PickRefreshCacheTests(unittest.TestCase):
         self.service._today_picks_cache["other-user:low:pullback_rebound"] = copy.deepcopy(unrelated)
         self.service.get_today_picks(force_refresh=True)
         self.assertEqual(self.service._today_picks_cache["other-user:low:pullback_rebound"], unrelated)
+
+    def test_failed_snapshot_save_is_visible_without_changing_candidates(self):
+        baseline = self.service.get_today_picks()
+        with patch.object(self.store, "upsert_pick_snapshots", side_effect=RuntimeError("private connection detail")):
+            result = self.service.get_today_picks(force_refresh=True)
+        self.assertEqual(result.get("snapshot_persistence", {}).get("status"), "failed")
+        self.assertNotIn("private connection detail", str(result))
+        self.assertEqual(result["picks"], baseline["picks"])
+
+    def test_successful_snapshot_save_is_reported(self):
+        result = self.service.get_today_picks()
+        self.assertEqual(result.get("snapshot_persistence", {}).get("status"), "saved")
