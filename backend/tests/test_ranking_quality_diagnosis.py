@@ -11,10 +11,41 @@ from app.evaluation.ranking_quality_diagnosis import (
     label_snapshot_rows,
     validate_snapshot_identity,
     validate_labeled_snapshot_sample,
+    quarantine_ambiguous_dates,
 )
 
 
 class RankingQualityDiagnosisTests(unittest.TestCase):
+    def test_legacy_diagnosis_does_not_refill_missing_top_candidate(self):
+        rows = [{"trade_date": "2026-07-01", "symbol": str(i), "rank_no": i,
+                 "tradable_label": "tradable", "future_return_10d": 10 if i > 1 else None}
+                for i in range(1, 7)]
+        result = build_ranking_quality_diagnosis(rows)
+        self.assertEqual(result["ranking_quality"]["evaluated_dates"], 0)
+        self.assertEqual(result["counterfactual"]["current_final_rank"]["metrics"]["evaluated_dates"], 0)
+
+    def test_quarantine_preserves_complete_bad_date_without_repairing_ranks(self):
+        rows = [
+            {"trade_date": "2026-07-01", "symbol": "000001", "rank_no": 1},
+            {"trade_date": "2026-07-01", "symbol": "000002", "rank_no": 1},
+            {"trade_date": "2026-07-02", "symbol": "000001", "rank_no": 7},
+        ]
+        kept, rejected, evidence = quarantine_ambiguous_dates(rows)
+        self.assertEqual(kept, rows[2:])
+        self.assertEqual(rejected, rows[:2])
+        self.assertEqual(evidence["excluded_dates"][0]["trade_date"], "2026-07-01")
+        self.assertEqual(evidence["excluded_dates"][0]["reason"], "ambiguous_snapshot_keys")
+        self.assertEqual(len(evidence["original_sha256"]), 64)
+
+    def test_failed_history_is_not_evidence_of_non_trading_date(self):
+        rows, _ = label_snapshot_rows(
+            [{"trade_date": "2026-07-01", "symbol": "000001", "rank_no": 1}],
+            lambda *args: (pd.DataFrame(), "unavailable", "provider_failed"),
+        )
+        kept, evidence = validate_labeled_snapshot_sample(rows)
+        self.assertEqual(kept, [])
+        self.assertEqual(evidence["excluded_dates"][0]["reason"], "history_unavailable")
+
     def test_sample_validation_excludes_non_trading_snapshot_and_keeps_prior_trading_snapshot(self):
         rows = [
             {"trade_date": "2026-07-17", "symbol": "000001", "rank_no": 1, "snapshot_has_same_date_bar": True},

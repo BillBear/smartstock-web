@@ -56,6 +56,25 @@ class DuplicateSnapshotKeyError(SnapshotIntegrityError):
     """Persisted snapshot keys are ambiguous and must not be deduplicated."""
 
 
+def quarantine_ambiguous_dates(rows: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+    """Explicit opt-in whole-date exclusion, independent of future outcomes."""
+    rejected_dates = []
+    kept, rejected = [], []
+    for trade_date, items in _by_date(rows).items():
+        try:
+            validate_snapshot_identity(items)
+        except DuplicateSnapshotKeyError as exc:
+            rejected.extend(items)
+            rejected_dates.append({"trade_date": trade_date, "reason": "ambiguous_snapshot_keys",
+                                   "candidate_count": len(items), "diagnostics": exc.diagnostics})
+        else:
+            kept.extend(items)
+    raw = json.dumps(list(rows), sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return kept, rejected, {"policy": "whole_date_no_rank_repair", "raw_candidate_count": len(rows),
+                            "raw_date_count": len(_by_date(rows)), "excluded_dates": rejected_dates,
+                            "original_sha256": hashlib.sha256(raw.encode()).hexdigest()}
+
+
 def label_snapshot_rows(
     snapshots: Sequence[Dict[str, Any]],
     history_fetcher: HistoryFetcher,
@@ -92,7 +111,7 @@ def label_snapshot_rows(
 
         source_counts[str(source or "unknown")] += 1
         future = _normalize_history(history)
-        row["snapshot_has_same_date_bar"] = bool(not future.empty and (future["date"] == trade_date).any())
+        row["snapshot_has_same_date_bar"] = bool((future["date"] == trade_date).any()) if not future.empty and not fetch_reason else None
         future = future[future["date"] > trade_date].reset_index(drop=True) if not future.empty else future
         if future.empty:
             reason = fetch_reason or "no_post_snapshot_bar"
@@ -116,7 +135,26 @@ def label_snapshot_rows(
             labeled.append(row)
             continue
 
-        label = _label_future_path(future, entry_price, config)
+        if entry["high"] == entry["low"]:
+            row.update(_empty_label("one_price_entry_execution_unknown", source=source))
+            missing_reasons[row["label_missing_reason"]] += 1
+            labeled.append(row)
+            continue
+        adjusted = future.copy()
+        if "adj_factor" in adjusted.columns:
+            factors = pd.to_numeric(adjusted["adj_factor"], errors="coerce")
+            if factors.isna().any() or (factors <= 0).any():
+                row.update(_empty_label("adjustment_factor_missing", source=source))
+                missing_reasons[row["label_missing_reason"]] += 1
+                labeled.append(row)
+                continue
+            for field in ("open", "high", "low", "close"):
+                adjusted[field] = adjusted[field] * factors / factors.iloc[0]
+            row["adjustment_basis"] = "adj_factor_entry_anchor"
+        else:
+            row["adjustment_basis"] = "caller_supplied_prices"
+        label = _label_future_path(adjusted, entry_price, config)
+        label["execution_assumption"] = "next_available_bar_open_proxy_not_verified_fill"
         label["entry_date"] = str(entry["date"])
         label["entry_price"] = round(entry_price, 6)
         label["history_source"] = source
@@ -166,12 +204,12 @@ def validate_labeled_snapshot_sample(rows: Sequence[Dict[str, Any]]) -> Tuple[Li
                 }
             )
 
-        has_same_day_bar = [bool(row.get("snapshot_has_same_date_bar")) for row in items]
+        has_same_day_bar = [row.get("snapshot_has_same_date_bar") for row in items]
         if not any(has_same_day_bar):
             diagnostics["excluded_dates"].append(
                 {
                     "trade_date": trade_date,
-                    "reason": "non_trading_snapshot",
+                    "reason": "non_trading_snapshot" if all(value is False for value in has_same_day_bar) else "history_unavailable",
                     "candidate_count": len(items),
                     "candidate_set_hash": candidate_set_hash,
                     "previous_trade_date": previous_date,
@@ -258,7 +296,7 @@ def _flatten_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "decision_executable": bool(decision.get("executable")),
         "decision_grade": decision.get("grade"),
         "decision_mode": decision.get("mode"),
-        "market_state_tag": market_state.get("state_tag") or "unknown",
+        "market_state_tag": market_state.get("state_tag") or (item.get("evidence_summary") or {}).get("state_tag") or "unknown",
         "raw_total": _number(breakdown.get("raw_total")),
         "total": _number(breakdown.get("total")),
         "up_prob": _number(item.get("up_prob")),
@@ -366,12 +404,16 @@ def _empty_label(reason: str, source: Optional[str] = None) -> Dict[str, Any]:
 
 def _ranking_quality(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     return_key = f"future_return_{PRIMARY_HORIZON}d"
-    usable = _usable_rows(rows, return_key)
+    complete_dates = {trade_date for trade_date, items in _by_date(rows).items()
+                      if len(_usable_rows(items, return_key)) == len(items)}
+    usable = [row for row in rows if row["trade_date"] in complete_dates]
     per_date = [_daily_rank_metrics(items, return_key) for _, items in _by_date(usable).items()]
     return {
         "horizon_days": PRIMARY_HORIZON,
         "labeled_tradable_rows": len(usable),
         "evaluated_dates": len(per_date),
+        "incomplete_date_count": len(_by_date(rows)) - len(complete_dates),
+        "missing_policy": "whole_daily_pool_complete_no_refill",
         "macro_daily_metrics": _average_dicts(per_date),
         "rank_groups": _rank_groups(usable, return_key),
         "spearman_rank_vs_future_return": _spearman([float(row["rank_no"]) for row in usable], [float(row[return_key]) for row in usable]),
@@ -470,14 +512,14 @@ def _counterfactual(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             "model_probability_coverage": _ratio(sum(row.get("model_probability") is not None for row in rows), len(rows)),
         },
         "raw_total_proxy_rank": {
-            "status": "proxy_only_not_no_model_counterfactual",
+            "status": "proxy_only_not_no_model_counterfactual" if len(raw_available) == len(rows) else "unavailable",
             "row_count": len(raw_available),
-            "metrics": _strategy_metrics(raw_available, lambda row: -float(row["raw_total"])),
+            "metrics": _strategy_metrics(rows, lambda row: -float(row["raw_total"])) if len(raw_available) == len(rows) else {},
         },
         "up_minus_dd_rank": {
-            "status": "available" if probability_available else "unavailable",
+            "status": "available" if rows and len(probability_available) == len(rows) else "unavailable",
             "row_count": len(probability_available),
-            "metrics": _strategy_metrics(probability_available, lambda row: -(float(row["up_prob"]) - float(row["dd_prob"]))),
+            "metrics": _strategy_metrics(rows, lambda row: -(float(row["up_prob"]) - float(row["dd_prob"]))) if len(probability_available) == len(rows) else {},
         },
         "minimum_shadow_capture": [
             "persisted pre_model_rule_score and its rank before any ML-related adjustment",
@@ -495,9 +537,7 @@ def _strategy_metrics(rows: List[Dict[str, Any]], key_fn: Callable[[Dict[str, An
             copied = dict(row)
             copied["rank_no"] = rank
             reranked.append(copied)
-    usable = _usable_rows(reranked, f"future_return_{PRIMARY_HORIZON}d")
-    per_date = [_daily_rank_metrics(items, f"future_return_{PRIMARY_HORIZON}d") for _, items in _by_date(usable).items()]
-    return {"evaluated_dates": len(per_date), "labeled_tradable_rows": len(usable), "macro_daily_metrics": _average_dicts(per_date)}
+    return _ranking_quality(reranked)
 
 
 def _funnel_assessment(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
