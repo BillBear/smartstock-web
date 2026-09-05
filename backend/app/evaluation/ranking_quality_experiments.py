@@ -14,6 +14,23 @@ TOP_KS = (3, 5, 10)
 SEVERE_LOSS_PCT = -8.0
 
 
+def compare_current_and_a(rows: Sequence[Dict[str, Any]], bootstrap_iterations: int = 10000) -> Dict[str, Any]:
+    """Forward observation only: reuse fixed-pool metrics, never select/deploy a model."""
+    masked = []
+    for item in rows:
+        row = dict(item)
+        if row.get("tradable_label") != "tradable" or row.get("history_source") != "TuShare":
+            for horizon in HORIZONS:
+                row[f"future_return_{horizon}d"] = None
+        masked.append(row)
+    baseline = _evaluate_variant(masked, "baseline_current_rank", lambda row: (float(row["rank_no"]), str(row["symbol"])))
+    trial = _evaluate_feature_variant(masked, "A_dd_prob_ascending", "dd_prob", descending=False)
+    paired = _paired_top5_comparison(baseline, trial, bootstrap_iterations, 20260830) if trial["status"] == "available" else {}
+    return {"status": "observing_not_promoted", "candidate_pool": _candidate_pool_metrics(masked),
+            "experiments": {"baseline_current_rank": baseline, "A_dd_prob_ascending": trial},
+            "paired_comparison": paired, "source_policy": "TuShare_only_no_refill", "automatic_promotion": False}
+
+
 def run_ranking_experiments(
     rows: Sequence[Dict[str, Any]],
     dd_prob_veto_threshold: Optional[float],
