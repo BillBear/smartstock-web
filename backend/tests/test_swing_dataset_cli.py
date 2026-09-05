@@ -1,4 +1,5 @@
 import copy
+from datetime import date
 import gzip
 import importlib.util
 import json
@@ -57,7 +58,8 @@ class SwingDatasetCliTests(unittest.TestCase):
     def run_collector(self, **kwargs):
         options = dict(protocol=self.protocol, output_dir=self.root / "out",
                        cache_dir=self.root / "cache", fetcher=self.fetch,
-                       sleep=lambda _: None, progress=lambda _: None)
+                       sleep=lambda _: None, progress=lambda _: None,
+                       today=lambda: date(2026, 9, 5))
         options.update(kwargs)
         return self.cli.collect(**options)
 
@@ -204,6 +206,19 @@ class SwingDatasetCliTests(unittest.TestCase):
         self.assertEqual(result["identity"]["signal_range"][-1], "2026-08-31")
         data = self.cli.read_json(self.root/"out"/result["dates"]["20260904"]["output"])
         self.assertEqual(data["role"], "label_only")
+
+    def test_uncompleted_or_future_label_dates_are_rejected(self):
+        for end in ("2026-09-05", "2026-09-06"):
+            with self.subTest(end=end), self.assertRaises(ValueError):
+                self.run_collector(label_end_date=end)
+
+    def test_manifest_records_actual_collector_and_normalizer_source_hashes(self):
+        import hashlib
+        result = self.run_collector()
+        hashes = result["identity"]["implementation_sha256"]
+        self.assertEqual(hashes["collector"], hashlib.sha256(SCRIPT.read_bytes()).hexdigest())
+        normalizer = SCRIPT.parents[1]/"app/evaluation/swing_dataset.py"
+        self.assertEqual(hashes["normalizer"], hashlib.sha256(normalizer.read_bytes()).hexdigest())
 
     def test_permission_quota_and_unknown_errors_stop_not_spray(self):
         for category in ("permission_denied", "quota_exceeded", "provider_error"):

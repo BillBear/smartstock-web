@@ -236,7 +236,8 @@ def _load_archive(path, identity_hash, endpoint, day):
 
 def collect(protocol, output_dir, cache_dir=None, env_file=None, cache_only=False,
             label_end_date=None, max_new_requests=None, requests_per_minute=120,
-            fetcher=None, sleep=time.sleep, monotonic=time.monotonic, progress=print):
+            fetcher=None, sleep=time.sleep, monotonic=time.monotonic, progress=print,
+            today=date.today):
     protocol = validate_protocol(protocol)
     if not 0 < requests_per_minute <= 120:
         raise ValueError("requests_per_minute must be in (0, 120]")
@@ -246,7 +247,13 @@ def collect(protocol, output_dir, cache_dir=None, env_file=None, cache_only=Fals
     end = label_end_date or signal_end
     if date.fromisoformat(end).isoformat() != end or end < signal_end:
         raise ValueError("label_end_date must be ISO date at or after signal end")
+    if date.fromisoformat(end) >= today():
+        raise ValueError("label_end_date must precede the current calendar date")
+    backend = Path(__file__).resolve().parents[1]
+    source_hashes = {"collector": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "normalizer": hashlib.sha256((backend / "app/evaluation/swing_dataset.py").read_bytes()).hexdigest()}
     identity = {"schema_version": "swing-collector-v1", "protocol_sha256": protocol["protocol_sha256"],
+        "implementation_sha256": source_hashes,
         "source": "tushare", "adjustment": "raw", "api_url": API_URL, "fields": FIELDS,
         "warmup_start": protocol["dates"]["warmup_start"], "signal_range": [signal_start, signal_end],
         "label_end_date": end, "response_cap": 6000, "pagination": "unverified_stop_at_cap",
