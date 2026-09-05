@@ -76,3 +76,31 @@ export function getRankPresentation(rank) {
     rankText: hasRank ? String(numericRank) : '-',
   }
 }
+
+export function getPickDataQualityPresentation(pick = {}) {
+  const degraded = pick?.analysis_status === 'degraded_timeout'
+    || pick?.probability_model?.type === 'snapshot_degraded'
+    || pick?.evidence_summary?.strategy_version === 'snapshot-degraded-watch-only'
+  return {
+    degraded,
+    label: degraded ? '分析超时 / 代理估计' : '',
+    description: degraded
+      ? '深度分析未完成。收益为公式代理估计，综合分为快照预筛映射分，不是成功率；不能作为完整策略分析或收益承诺。'
+      : '',
+  }
+}
+
+export function getRefreshFeedback(response = {}) {
+  if (response?.accepted !== true) {
+    return { type: 'warning', text: response?.calendar_context?.message || '当前不可刷新候选池' }
+  }
+  const result = response?.result || {}
+  if (result?.snapshot_persistence?.status === 'failed') {
+    return { type: 'error', text: '候选已计算，但快照保存失败；当前列表仍可能是旧快照，请检查后端日志后重试。' }
+  }
+  if ((result.picks || []).some((pick) => getPickDataQualityPresentation(pick).degraded)
+    || Number(result?.universe_meta?.analysis_timeout_count || 0) > 0) {
+    return { type: 'warning', text: '刷新返回，但深度分析有超时；请查看数据质量提示，不应当作完整分析结果。' }
+  }
+  return { type: 'success', text: '候选池刷新完成' }
+}

@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import test from 'node:test'
+import * as qualityPresentation from './smartScreenPresentation.mjs'
 import {
   getRankPresentation,
   getPickActionPresentation,
@@ -160,3 +162,22 @@ assert.deepEqual(
     rankText: '-',
   },
 )
+test('degraded estimates are explicitly labeled without changing saved fields', () => {
+  assert.equal(typeof qualityPresentation.getPickDataQualityPresentation, 'function')
+  const row = { analysis_status: 'degraded_timeout', expected_return_pct: 2.43, score_breakdown: { total: 76 } }
+  const before = JSON.stringify(row)
+  const display = qualityPresentation.getPickDataQualityPresentation(row)
+  assert.equal(display.degraded, true)
+  assert.match(display.label, /分析超时/)
+  assert.match(display.description, /代理|预筛/)
+  assert.equal(JSON.stringify(row), before)
+  assert.equal(qualityPresentation.getPickDataQualityPresentation({ probability_model: { calibrated: false } }).degraded, false)
+})
+
+test('failed persistence and degraded refresh never use a success toast', () => {
+  assert.equal(typeof qualityPresentation.getRefreshFeedback, 'function')
+  assert.equal(qualityPresentation.getRefreshFeedback({ accepted: true, result: { snapshot_persistence: { status: 'failed' } } }).type, 'error')
+  assert.equal(qualityPresentation.getRefreshFeedback({ accepted: true, result: { picks: [{ analysis_status: 'degraded_timeout' }] } }).type, 'warning')
+  assert.equal(qualityPresentation.getRefreshFeedback({ accepted: true, result: { snapshot_persistence: { status: 'saved' }, picks: [] } }).type, 'success')
+  assert.equal(qualityPresentation.getRefreshFeedback({ accepted: false }).type, 'warning')
+})
