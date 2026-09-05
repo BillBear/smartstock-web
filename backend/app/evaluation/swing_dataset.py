@@ -117,6 +117,14 @@ def _values(raw, fields):
 def _normalize_daily(row):
     code, day = _key(row)
     values = _values(row, _DAILY_FIELDS)
+    high, low = values["high"], values["low"]
+    if high is not None and low is not None and high < low:
+        raise ValueError("invalid OHLC: high is below low")
+    for field in ("open", "close"):
+        price = values[field]
+        if price is not None and ((high is not None and price > high) or
+                                  (low is not None and price < low)):
+            raise ValueError(f"invalid OHLC: {field} is outside present high/low bounds")
     missing = [field for field in _CORE_DAILY if values[field] is None]
     return {
         "schema_version": "swing-daily-input-v1", "symbol": code[:6], "ts_code": code,
@@ -248,7 +256,7 @@ def join_daily_inputs(daily: list, basics: list, factors: list, metadata: dict) 
         row["fetched_at"] = deepcopy(metadata.get("fetched_at"))
         row["available_at"] = deepcopy(metadata.get("available_at"))
         row["availability_assumption"] = deepcopy(metadata.get("availability_assumption"))
-        row["availability_status"] = "assumed" if row["availability_assumption"] else "unknown"
+        row["availability_status"] = "assumed" if row["available_at"] is not None else "unknown"
         missing = [field for field in (*_CORE_DAILY, *_BASIC_FIELDS, "adj_factor") if row[field] is None]
         row["quality_issues"] = [f"missing:{field}" for field in missing]
         row["quality_issues"] += [f"endpoint:{name}:{item['status']}" for name, item in endpoints.items()

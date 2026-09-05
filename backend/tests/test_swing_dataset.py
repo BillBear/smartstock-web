@@ -104,7 +104,8 @@ class SwingDatasetTests(unittest.TestCase):
 
     def test_corporate_action_scale_keeps_raw_prices_and_factor_separate(self):
         result = self.join(
-            daily=[daily_row(close=10), daily_row(day="20260721", close=5, pre_close=5, pct_chg=0)],
+            daily=[daily_row(close=10), daily_row(day="20260721", open=5, high=5.5, low=4.5,
+                                                close=5, pre_close=5, pct_chg=0)],
             basics=[basic_row(), basic_row(day="20260721")],
             factors=[factor_row(factor=1), factor_row(day="20260721", factor=2)],
         )
@@ -114,6 +115,30 @@ class SwingDatasetTests(unittest.TestCase):
         self.assertEqual(after["close"] * after["adj_factor"] / before["adj_factor"], 10)
         self.assertEqual(after["pre_close"], 5)
         self.assertEqual(after["pct_change"], 0)
+
+    def test_impossible_ohlc_is_rejected_by_normalization_and_join(self):
+        for changes in ({"high": 8, "low": 9}, {"close": 12}, {"open": 8},
+                        {"open": 12}, {"close": 8}, {"low": None, "close": 12},
+                        {"high": None, "open": 8}):
+            with self.subTest(changes=changes):
+                raw = daily_row(**changes)
+                with self.assertRaisesRegex(ValueError, "OHLC"):
+                    self.dataset.normalize_daily_rows([raw], "tushare", "raw")
+                result = self.join(daily=[raw], basics=[], factors=[])
+                self.assertEqual(result["rows"], [])
+                self.assertIn("OHLC", result["rejected"][0]["reason"])
+                self.assertEqual(result["rejected"][0]["raw"], raw)
+
+    def test_equal_prices_missing_bounds_and_separate_pre_close_remain_valid(self):
+        equal = self.join(daily=[daily_row(open=10, high=10, low=10, close=10, pre_close=20)])
+        self.assertEqual(equal["rows"][0]["quality_status"], "complete")
+        self.assertTrue(equal["rows"][0]["adjusted_input_usable"])
+        for changes in ({"high": None}, {"low": None}, {"open": None}, {"close": None}):
+            with self.subTest(changes=changes):
+                result = self.join(daily=[daily_row(**changes)])
+                self.assertEqual(result["rejected"], [])
+                self.assertEqual(result["rows"][0]["quality_status"], "incomplete")
+                self.assertFalse(result["rows"][0]["adjusted_input_usable"])
 
     def test_duplicate_keys_hard_fail_in_every_input_even_invalid_rows(self):
         for endpoint in ("daily", "basics", "factors"):
@@ -217,6 +242,15 @@ class SwingDatasetTests(unittest.TestCase):
         self.assertIsNone(row["available_at"])
         self.assertEqual(row["availability_status"], "unknown")
         self.assertIsNone(row["availability_assumption"])
+
+    def test_assumption_without_available_timestamp_remains_unknown(self):
+        assumption = "conservative_next_session_input_not_historically_verified"
+        for extra in ({}, {"available_at": None}):
+            with self.subTest(extra=extra):
+                row = self.join(metadata={"availability_assumption": assumption, **extra})["rows"][0]
+                self.assertIsNone(row["available_at"])
+                self.assertEqual(row["availability_status"], "unknown")
+                self.assertEqual(row["availability_assumption"], assumption)
 
     def test_explicit_availability_assumption_and_fallback_chain_are_preserved(self):
         metadata = {"source": "tushare", "fetched_at": "2026-09-05T00:00:00Z",
