@@ -2907,6 +2907,7 @@ class CoachService:
         cached_only: bool = False,
         requested_date: Optional[str] = None,
         trade_date: Optional[str] = None,
+        force_refresh: bool = False,
     ) -> Dict[str, Any]:
         if cached_only:
             return self.get_cached_today_picks(
@@ -2949,19 +2950,19 @@ class CoachService:
         cache_key = f"{trade_date}:{user_id}:{level}:{strategy_code}:{int(score_threshold)}"
         now_ts = datetime.now().timestamp()
 
-        cache_item = self._today_picks_cache.get(cache_key)
+        # Explicit refresh bypasses only this request's result cache, not calendar/risk gates.
+        cache_item = None if force_refresh else self._today_picks_cache.get(cache_key)
         if cache_item:
             cached_source = str(
                 (((cache_item.get("data") or {}).get("universe_meta") or {}).get("source") or "")
             )
             cache_age = now_ts - float(cache_item.get("ts", 0) or 0)
-            fallback_cache_still_usable = (
-                cached_source.startswith("fallback_")
+            cache_still_usable = (
+                bool(cached_source)
                 and self._today_picks_cache_ttl_seconds > 0
-                and cache_age <= self._today_picks_cache_ttl_seconds
+                and 0 <= cache_age < self._today_picks_cache_ttl_seconds
             )
-            full_cache_usable = bool(cached_source and not cached_source.startswith("fallback_"))
-            if not (full_cache_usable or fallback_cache_still_usable):
+            if not cache_still_usable:
                 cache_item = None
 
         if cache_item:
