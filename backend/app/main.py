@@ -1161,6 +1161,7 @@ async def coach_picks_refresh(
             max_count=max_count,
             user_id=user_id,
             risk_level=risk_level,
+            force_refresh=True,
         )
         data = clean_nan_values(data)
         return ApiResponse(
