@@ -1,6 +1,11 @@
+import copy
+import math
 import unittest
 
-from app.evaluation.ranking_quality_experiments import run_ranking_experiments
+from app.evaluation.ranking_quality_experiments import (
+    _bootstrap_ci, _paired_top5_comparison, _shadow_selection,
+    run_ranking_experiments,
+)
 from scripts.analyze_ranking_quality import resolve_existing_dd_prob_veto_threshold
 
 
@@ -21,6 +26,192 @@ def _row(trade_date, symbol, rank_no, dd_prob, risk_adjusted, return_10d, action
 
 
 class RankingQualityExperimentTests(unittest.TestCase):
+    def test_qualification_sensitivity_uses_same_full_pool_dates(self):
+        rows = [_row(date, str(i), i, .2, 10-i, i)
+                for date in ("2026-07-01", "2026-07-02") for i in range(1, 7)]
+        rows[-1]["future_return_10d"] = None
+        paired = self._experiments(rows)["A_dd_prob_ascending"]["paired_comparison"]
+        self.assertEqual(paired["matched_date_count"], 2)
+        self.assertEqual(paired["qualification"]["matched_dates"], ["2026-07-01"])
+        self.assertEqual(list(paired["qualification"]["leave_one_contributor_out"]["day_removed_mean_deltas"]), ["2026-07-01"])
+
+    def _experiments(self, rows, source="all_sources"):
+        return run_ranking_experiments(rows, 0.30, "existing_rule", 100, 7)["segments"][source]["all_candidates"]["experiments"]
+
+    def test_veto_preserves_slots_and_original_pool(self):
+        rows = [_row("2026-07-01", str(i), i, .5 if i == 1 else .2, i, i) for i in range(1, 12)]
+        experiments = self._experiments(rows)
+        baseline = experiments["baseline_current_rank"]
+        veto = experiments["C_dd_prob_veto"]
+        top5 = veto["metrics"]["10"]["top_k"]["5"]
+        self.assertEqual(top5["avg_return"], (0 + 2 + 3 + 4 + 5) / 5)
+        self.assertEqual(top5["candidate_count"], 4)
+        self.assertEqual(top5["relative_candidate_pool_excess_return"], -3.2)
+        self.assertEqual(veto["slot_selection_by_date"]["2026-07-01"][:6], [None, "2", "3", "4", "5", "6"])
+        self.assertLess(veto["metrics"]["10"]["ndcg_at_10"], baseline["metrics"]["10"]["ndcg_at_10"])
+        dcg = sum(value / math.log2(index + 2) for index, value in enumerate([0] + list(range(2, 11))))
+        ideal = sum(value / math.log2(index + 2) for index, value in enumerate(range(11, 1, -1)))
+        self.assertEqual(veto["metrics"]["10"]["ndcg_at_10"], round(dcg / ideal, 6))
+
+    def test_all_veto_day_remains_zero_cash_return(self):
+        rows = [_row("2026-07-01", str(i), i, .5, i, -i) for i in range(1, 7)]
+        veto = self._experiments(rows)["C_dd_prob_veto"]
+        self.assertEqual(veto["_daily_top5_returns"], {"2026-07-01": 0.0})
+        self.assertEqual(veto["metrics"]["10"]["top_k"]["5"]["avg_return"], 0.0)
+        self.assertEqual(veto["paired_comparison"]["matched_date_count"], 1)
+
+    def test_missing_label_does_not_promote_rank_six(self):
+        rows = [_row("2026-07-01", str(i), i, .2, 10-i, i) for i in range(1, 7)]
+        rows[0]["future_return_10d"] = None
+        baseline = self._experiments(rows)["baseline_current_rank"]
+        top5 = baseline["metrics"]["10"]["top_k"]["5"]
+        self.assertIsNone(top5["avg_return"])
+        self.assertEqual(top5["complete_date_count"], 0)
+        self.assertEqual(top5["incomplete_date_count"], 1)
+        self.assertEqual(baseline["_daily_top5_returns"], {})
+        self.assertEqual(baseline["selection_by_date"]["2026-07-01"], [str(i) for i in range(1, 7)])
+
+    def test_missing_pool_label_disables_pool_metrics_not_complete_top5(self):
+        rows = [_row("2026-07-01", str(i), i, .2, i, i) for i in range(1, 7)]
+        rows[-1]["future_return_10d"] = None
+        baseline = self._experiments(rows)["baseline_current_rank"]
+        metrics = baseline["metrics"]["10"]
+        self.assertEqual(metrics["top_k"]["5"]["avg_return"], 3.0)
+        self.assertIsNone(metrics["top_k"]["5"]["relative_candidate_pool_excess_return"])
+        self.assertIsNone(metrics["ndcg_at_10"])
+
+    def test_pairing_excludes_missing_top_slot_even_when_trial_is_complete(self):
+        rows = [_row(date, str(i), i, .2, i, i) for date in ("2026-07-01", "2026-07-02") for i in range(1, 7)]
+        rows[0]["future_return_10d"] = None
+        experiment = self._experiments(rows)["B_risk_adjusted_descending"]
+        paired = experiment["paired_comparison"]
+        self.assertEqual(paired["matched_dates"], ["2026-07-02"])
+        self.assertEqual(paired["experiment_only_date_count"], 1)
+        self.assertEqual(paired["paired_primary_metrics"]["matched_dates"], ["2026-07-02"])
+
+    def test_rank_variants_cannot_invent_missing_sort_features(self):
+        for feature, variant in (("dd_prob", "A_dd_prob_ascending"), ("risk_adjusted", "B_risk_adjusted_descending")):
+            rows = [_row("2026-07-01", str(i), i, .2, i, i) for i in range(1, 7)]
+            rows[0][feature] = None
+            result = self._experiments(rows)[variant]
+            self.assertEqual(result["status"], "unavailable", feature)
+            self.assertIn(feature, result["reason"])
+
+    def test_return_contributions_keep_original_slot_weights_under_veto(self):
+        rows = [_row("2026-07-01", str(i), i, .5 if i == 1 else .2, i, i) for i in range(1, 7)]
+        experiments = self._experiments(rows)
+        veto = experiments["C_dd_prob_veto"]
+        self.assertEqual(veto["_daily_top5_contributions"]["2026-07-01"], {"2": .4, "3": .6, "4": .8, "5": 1.0})
+        self.assertEqual(veto["paired_comparison"]["leave_one_contributor_out"]["symbol_removed_mean_deltas"]["1"], 0.0)
+
+    def test_empty_sample_is_insufficient_not_a_zero_return_result(self):
+        result = run_ranking_experiments([], .3, "existing", 100, 7)
+        self.assertEqual(result["shadow_selection"]["status"], "insufficient_evidence")
+        baseline = result["segments"]["all_sources"]["all_candidates"]["experiments"]["baseline_current_rank"]
+        self.assertIsNone(baseline["metrics"]["10"]["top_k"]["5"]["avg_return"])
+
+    def test_paired_primary_criteria_ignore_unmatched_high_return_day(self):
+        rows = [_row(date, str(i), i, .2, i, i) for date in ("2026-07-01", "2026-07-02") for i in range(1, 7)]
+        rows[0]["future_return_10d"] = None
+        rows[5]["future_return_10d"] = 10000
+        trial = self._experiments(rows)["B_risk_adjusted_descending"]
+        paired_metrics = trial["paired_comparison"]["paired_primary_metrics"]
+        self.assertEqual(paired_metrics["baseline"]["top5_median"], 3.0)
+        self.assertEqual(paired_metrics["experiment"]["top5_median"], 4.0)
+
+    def test_source_sensitivity_masks_labels_without_reordering(self):
+        rows = [_row("2026-07-01", str(i), i, .2, i, i) for i in range(1, 7)]
+        rows[0]["history_source"] = "AKShare"
+        original = copy.deepcopy(rows)
+        full = self._experiments(rows)
+        tushare = self._experiments(rows, "tushare_only")
+        for name in full:
+            self.assertEqual(full[name]["selection_by_date"], tushare[name]["selection_by_date"])
+        self.assertIsNone(tushare["baseline_current_rank"]["metrics"]["10"]["top_k"]["5"]["avg_return"])
+        self.assertEqual(rows, original)
+
+    def test_unknown_tradability_and_dd_prob_are_not_cash(self):
+        rows = [_row("2026-07-01", str(i), i, .2, i, i) for i in range(1, 7)]
+        rows[0]["tradable_label"] = "unavailable"
+        rows[0]["dd_prob"] = None
+        experiments = self._experiments(rows)
+        self.assertIsNone(experiments["baseline_current_rank"]["metrics"]["10"]["top_k"]["5"]["avg_return"])
+        self.assertIsNone(experiments["C_dd_prob_veto"]["metrics"]["10"]["top_k"]["5"]["avg_return"])
+
+    def test_bootstrap_requires_horizon_sized_blocks(self):
+        short = _bootstrap_ci([1.0] * 20, 100, 7)
+        self.assertEqual(short["status"], "insufficient_blocks")
+        self.assertIsNone(short["lower"])
+        enough = _bootstrap_ci([1.0] * 30, 100, 7)
+        self.assertEqual(enough["block_length_dates"], 10)
+        self.assertEqual(enough["lower"], 1.0)
+        self.assertEqual(enough, _bootstrap_ci([1.0] * 30, 100, 7))
+
+    def test_block_bootstrap_preserves_clustered_daily_dependence(self):
+        result = _bootstrap_ci([-1.0] * 10 + [0.0] * 10 + [1.0] * 10, 1000, 7)
+        self.assertLess(result["lower"], -.4)
+        self.assertGreater(result["upper"], .4)
+
+    def test_no_tushare_complete_day_is_explicit_insufficient_evidence(self):
+        rows = [_row("2026-07-01", str(i), i, .2, i, i, source="AKShare") for i in range(1, 7)]
+        result = run_ranking_experiments(rows, .3, "existing", 100, 7)
+        source = result["segments"]["tushare_only"]["all_candidates"]
+        self.assertEqual(source["candidate_pool"]["10"]["incomplete_date_count"], 1)
+        self.assertEqual(source["candidate_pool"]["10"]["evaluated_date_count"], 0)
+        self.assertEqual(result["shadow_selection"]["status"], "insufficient_evidence")
+
+    def test_single_stock_gain_rejected_by_actual_contribution_removal(self):
+        baseline = {"_daily_top5_returns": {"d1": 0, "d2": 0}, "_daily_top5_contributions": {"d1": {"driver": 0, "other": 0}, "d2": {"driver": 0, "other": 0}}}
+        trial = {"_daily_top5_returns": {"d1": 2, "d2": 3}, "_daily_top5_contributions": {"d1": {"driver": 2, "other": 0}, "d2": {"driver": 3, "other": 0}}}
+        paired = _paired_top5_comparison(baseline, trial, 100, 7)
+        sensitivity = paired["leave_one_contributor_out"]
+        self.assertEqual(sensitivity["symbol_removed_mean_deltas"]["driver"], 0.0)
+        self.assertFalse(sensitivity["positive_after_every_symbol_removal"])
+
+    def test_single_day_gain_rejected_with_fixed_denominator(self):
+        baseline = {"_daily_top5_returns": {"d1": 0, "d2": 0}, "_daily_top5_contributions": {"d1": {}, "d2": {}}}
+        trial = {"_daily_top5_returns": {"d1": 2, "d2": -1}, "_daily_top5_contributions": {"d1": {"a": 2}, "d2": {"b": -1}}}
+        sensitivity = _paired_top5_comparison(baseline, trial, 100, 7)["leave_one_contributor_out"]
+        self.assertEqual(sensitivity["day_removed_mean_deltas"]["d1"], -0.5)
+        self.assertFalse(sensitivity["positive_after_every_day_removal"])
+
+    def _selection_segments(self):
+        base = {"top5_median": 1, "top5_severe_loss": .2, "top5_excess": 0, "ndcg_at_10": .3}
+        better = {"top5_median": 2, "top5_severe_loss": .1, "top5_excess": 1, "ndcg_at_10": .5}
+        experiment = {
+            "status": "available",
+            "paired_comparison": {
+                "mean_daily_top5_return_difference": 1.0,
+                "bootstrap_95pct_ci": {"status": "evaluated", "lower": .1, "upper": 2},
+                "paired_primary_metrics": {"matched_date_count": 30, "baseline": base, "experiment": better},
+                "leave_one_contributor_out": {"status": "evaluated", "positive_after_every_day_removal": True, "positive_after_every_symbol_removal": True},
+            },
+        }
+        experiments = {name: copy.deepcopy(experiment) for name in ("baseline_current_rank", "A_dd_prob_ascending", "B_risk_adjusted_descending", "C_dd_prob_veto")}
+        return {source: {"all_candidates": {"experiments": copy.deepcopy(experiments)}} for source in ("all_sources", "tushare_only")}
+
+    def test_shadow_selection_checks_all_tushare_criteria(self):
+        for metric, bad in (("top5_median", 0), ("top5_severe_loss", .3), ("top5_excess", -1), ("ndcg_at_10", .1)):
+            segments = self._selection_segments()
+            for experiment in segments["tushare_only"]["all_candidates"]["experiments"].values():
+                experiment["paired_comparison"]["paired_primary_metrics"]["experiment"][metric] = bad
+            result = _shadow_selection(segments)
+            self.assertEqual(result["selected"], [], metric)
+            self.assertFalse(result["candidates"]["A_dd_prob_ascending"]["criteria"]["tushare_only_direction_consistent"], metric)
+
+    def test_shadow_selection_selects_at_most_one_deterministically(self):
+        result = _shadow_selection(self._selection_segments())
+        self.assertEqual(result["selected"], ["A_dd_prob_ascending"])
+        self.assertEqual(result["candidates"]["B_risk_adjusted_descending"]["status"], "qualified_not_selected")
+
+    def test_shadow_selection_refuses_inference_on_insufficient_blocks(self):
+        segments = self._selection_segments()
+        for experiment in segments["all_sources"]["all_candidates"]["experiments"].values():
+            experiment["paired_comparison"]["bootstrap_95pct_ci"] = {"status": "insufficient_blocks", "lower": None, "upper": None}
+        result = _shadow_selection(segments)
+        self.assertEqual(result["status"], "insufficient_evidence")
+        self.assertEqual(result["selected"], [])
+
     def test_veto_threshold_uses_only_current_medium_trend_breakout_rule(self):
         threshold, source = resolve_existing_dd_prob_veto_threshold({}, "trend_breakout", "medium")
         unavailable, unavailable_source = resolve_existing_dd_prob_veto_threshold({}, "pullback_rebound", "medium")
