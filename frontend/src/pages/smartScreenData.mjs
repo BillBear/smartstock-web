@@ -1,3 +1,5 @@
+import { getPickDataQualityPresentation } from './smartScreenPresentation.mjs'
+
 export function shouldRefreshCurrentTradingPicks({
   calendarContext = {},
   canRefresh = true,
@@ -38,8 +40,10 @@ export function getDisplayOrderedPicks(picks = []) {
 export function getCalendarDisplayContext(calendarContext = {}, tradePlan = {}) {
   const mode = calendarContext?.mode || 'trading'
   const requestedDate = calendarContext?.requested_date || '-'
-  const candidateDate = calendarContext?.effective_trade_date || calendarContext?.snapshot_trade_date || '-'
-  const signalAge = calendarContext?.signal_age_days
+  const candidateDate = calendarContext?.snapshot_trade_date || calendarContext?.effective_trade_date || '-'
+  const signalAge = calendarContext?.snapshot_trade_date
+    ? calendarContext?.snapshot_age_days
+    : calendarContext?.signal_age_days
   const isPreparationMode = mode === 'preparation'
   const isHistoricalMode = mode === 'historical'
   const isObservationMode = isPreparationMode || isHistoricalMode
@@ -65,6 +69,7 @@ export function getCalendarDisplayContext(calendarContext = {}, tradePlan = {}) 
     alertMessage = calendarContext?.message || `展示 ${candidateDate} 历史候选池，仅供复盘观察。`
     refreshDisabledReason = '历史快照只读复盘，不生成新的交易计划。'
   } else if (calendarContext?.snapshot_trade_date) {
+    dateMetricTitle = '候选池快照日期'
     refreshDisabledReason = ''
   }
 
@@ -98,13 +103,14 @@ export function getSmartScreenDiagnostic(result = {}) {
   const analysisTimeoutCount = Number(universeMeta.analysis_timeout_count || 0)
   const analysisDegradedCount = Number(universeMeta.analysis_degraded_count || 0)
   const analysisStatus = universeMeta.analysis_status || ''
+  const savedDegradedCount = picks.filter((pick) => getPickDataQualityPresentation(pick).degraded).length
   const coverageStatus = universeMeta.data_coverage_status || ''
   let coverageLevel = 'info'
   let coverageText = ''
 
-  if (analysisTimeoutCount > 0 || ['degraded_timeout', 'partial_timeout'].includes(analysisStatus)) {
+  if (savedDegradedCount > 0 || analysisTimeoutCount > 0 || ['degraded_timeout', 'partial_timeout'].includes(analysisStatus)) {
     coverageLevel = 'warning'
-    coverageText = `全量池正常：全A ${totalUniverse || '-'} 只，预筛 ${prefilterCount || '-'} 只，策略目标 ${candidateCount || '-'} 只；深度分析超时 ${analysisTimeoutCount || '-'} 只，已降级展示 ${analysisDegradedCount || picks.length || '-'} 只今日快照观察候选。`
+    coverageText = `快照日期 ${result.trade_date || '-'}：市场覆盖 ${totalUniverse || '-'} 只；深度分析超时 ${analysisTimeoutCount || savedDegradedCount || '-'} 只，降级观察 ${analysisDegradedCount || savedDegradedCount || '-'} 只。市场覆盖不代表分析完成，代理估计不可作为完整策略证据。`
   } else if (coverageStatus === 'full_snapshot_available' && totalUniverse > 0) {
     coverageLevel = 'success'
     const candidateLabel = universeMeta.source === 'pick_snapshots' ? '快照候选' : '策略目标'
@@ -126,7 +132,9 @@ export function getSmartScreenDiagnostic(result = {}) {
   const watchCount = Number(tradePlan.watch_count || 0)
   let decisionText = ''
   if (picks.length > 0 && coreCount + trialCount === 0 && watchCount > 0) {
-    decisionText = '当前有候选但 A/B 级为 0，说明买入候选被策略准入、回撤概率或回测证据门槛拦截，不代表股票池缺失。'
+    decisionText = savedDegradedCount > 0 || analysisTimeoutCount > 0
+      ? '当前有候选但深度分析未完成，A/B 级为 0 不能简单归因于策略门槛；先排查数据与分析链路。'
+      : '当前有候选但 A/B 级为 0，说明买入候选被策略准入、回撤概率或回测证据门槛拦截，不代表股票池缺失。'
   }
 
   return {

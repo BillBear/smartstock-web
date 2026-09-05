@@ -1,6 +1,7 @@
 import React from 'react'
 import { Card, Collapse, Progress, Row, Col, Tooltip } from 'antd'
 import { InfoCircleOutlined } from '@ant-design/icons'
+import { getMarketFactorPresentation } from './marketFactorPresentation.mjs'
 
 const FACTOR_META = {
   trend_score: {
@@ -57,11 +58,11 @@ const MarketFactorExplain = ({ drivers, loadedAt, mode = 'dashboard' }) => {
     >
       <Row gutter={[12, 12]}>
         {Object.entries(FACTOR_META).map(([key, meta]) => {
-          const value = Number(drivers?.[key] || 0)
+          const factor = getMarketFactorPresentation(drivers?.[key])
           return (
             <Col xs={24} md={12} key={key}>
-              <div style={{ fontWeight: 600, marginBottom: 6 }}>{meta.label}评分: {value.toFixed(2)}</div>
-              <Progress percent={value} size="small" strokeColor={scoreColor(value)} />
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>{meta.label}评分: {factor.text}</div>
+              {factor.available && <Progress percent={factor.value} size="small" strokeColor={scoreColor(factor.value)} />}
               <div style={{ color: 'rgba(255,255,255,0.85)', marginTop: 6 }}>{meta.meaning}</div>
               <div style={{ color: 'rgba(255,255,255,0.55)', fontSize: 12, marginTop: 4 }}>{meta.formula}</div>
             </Col>
@@ -81,7 +82,7 @@ const MarketFactorExplain = ({ drivers, loadedAt, mode = 'dashboard' }) => {
                 <div>avg_change：样本平均涨跌幅；up_ratio：样本上涨占比</div>
                 <div>综合评分：state_score = 0.28*趋势 + 0.22*宽度 + 0.16*资金 + 0.16*风险 + 0.18*资讯</div>
                 <div>{tips}</div>
-                <div>本次页面数据时间：{loadedAt || '-'}</div>
+                <div>本次页面读取时间（非行情时间）：{loadedAt || '-'}</div>
               </div>
             ),
           },

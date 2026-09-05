@@ -34,6 +34,8 @@ import {
   getPickDecisionActionPresentation,
   getProbabilityModelPresentation,
   getRankPresentation,
+  getPickDataQualityPresentation,
+  getRefreshFeedback,
 } from './smartScreenPresentation.mjs'
 import './SmartScreen.css'
 
@@ -224,12 +226,20 @@ const SmartScreen = () => {
           user_id: 'default',
           max_count: SMART_SCREEN_CACHED_PICK_LIMIT,
           risk_level: effectiveRisk,
-        }).then(() => {
+        }).then((response) => {
           if (mountedRef.current && reqId === latestLoadReqRef.current) {
+            const feedback = getRefreshFeedback(response)
+            if (feedback.type === 'error') {
+              setError(feedback.text)
+              return
+            }
             loadPicks(effectiveRisk, null)
           }
         }).catch((refreshErr) => {
           console.warn('自动刷新当前交易日候选池失败', refreshErr)
+          if (mountedRef.current && reqId === latestLoadReqRef.current) {
+            setError('自动刷新失败，当前仍显示已保存快照；请检查数据源后手动重试。')
+          }
         })
       }
       const nextRisk = data?.risk_profile?.risk_level
@@ -360,7 +370,12 @@ const SmartScreen = () => {
         }))
         return
       }
-      message.success('后台刷新完成')
+      const feedback = getRefreshFeedback(response)
+      message[feedback.type](feedback.text)
+      if (feedback.type === 'error') {
+        setError(feedback.text)
+        return
+      }
       setSelectedSnapshotDate(null)
       await loadPicks(riskLevel, null)
     } catch (err) {
@@ -450,6 +465,11 @@ const SmartScreen = () => {
         <div className="stock-cell">
           <div className="stock-name">{row.name}</div>
           <div className="stock-code">{row.symbol}</div>
+          {getPickDataQualityPresentation(row).degraded && (
+            <Tooltip title={getPickDataQualityPresentation(row).description}>
+              <Tag color="orange">{getPickDataQualityPresentation(row).label}</Tag>
+            </Tooltip>
+          )}
         </div>
       ),
     },
@@ -785,7 +805,7 @@ const SmartScreen = () => {
           {result?.universe_meta?.incremental_refresh_at && (
             <Tag color="magenta">增量刷新：{result.universe_meta.incremental_refresh_at}</Tag>
           )}
-          <Tag color="blue">当前数据时间：{loadedAt || '-'}</Tag>
+          <Tag color="blue">页面读取时间：{loadedAt || '-'}</Tag>
           <Tag color={result?.market_state?.news_context?.risk_bias === 'positive' ? 'green' : result?.market_state?.news_context?.risk_bias === 'negative' ? 'red' : 'blue'}>
             资讯温度：{Number(result?.market_state?.news_context?.policy_score || 50).toFixed(1)}
           </Tag>
@@ -902,6 +922,14 @@ const SmartScreen = () => {
           <h3>完整候选池</h3>
           <span>当前列表 {displayPickList.length} 只，按策略综合分倒序展示；A/B 级 {tradePlanCandidateCount} 只进入模拟验证口径，C 级 {watchCandidateCount} 只用于观察学习。</span>
         </div>
+        <Space wrap style={{ marginBottom: 12 }}>
+          <Tag>快照日期：{candidateDate}</Tag>
+          <Tag>距当前：{signalAgeText}</Tag>
+          <span>综合分不是成功率；降级候选的收益为代理估计。</span>
+        </Space>
+        {diagnostic.coverageLevel === 'warning' && diagnostic.coverageText && (
+          <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={diagnostic.coverageText} />
+        )}
         {result?.no_trade ? (
           <Alert
             type="warning"

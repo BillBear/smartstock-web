@@ -95,6 +95,37 @@ test('calendar display context separates current non-trading date from candidate
   assert.doesNotMatch(display.refreshDisabledReason, /2026-07-03 非交易日/)
 })
 
+test('calendar displays the actual stored date during trading-day refresh', () => {
+  const display = getCalendarDisplayContext({
+    mode: 'trading', requested_date: '2026-09-04', effective_trade_date: '2026-09-04',
+    snapshot_trade_date: '2026-07-20', signal_age_days: 0, snapshot_age_days: 46,
+  })
+  assert.equal(display.dateMetricValue, '2026-07-20')
+  assert.equal(display.dateMetricTitle, '候选池快照日期')
+  assert.equal(display.signalAgeText, '46 天')
+})
+
+test('cached row-level timeouts cannot be presented as complete successful analysis', () => {
+  const input = {
+    trade_date: '2026-07-20',
+    universe_meta: { source: 'pick_snapshots', data_coverage_status: 'full_snapshot_available', total_universe_count: 5200 },
+    trade_plan: { core_count: 0, trial_count: 0, watch_count: 2 },
+    picks: [
+      { symbol: '601988', analysis_status: 'degraded_timeout' },
+      { symbol: '601857', probability_model: { type: 'snapshot_degraded' } },
+    ],
+  }
+  const before = JSON.stringify(input)
+  const diagnostic = getSmartScreenDiagnostic(input)
+  assert.equal(diagnostic.coverageLevel, 'warning')
+  assert.match(diagnostic.coverageText, /2026-07-20/)
+  assert.match(diagnostic.coverageText, /2/)
+  assert.match(diagnostic.coverageText, /深度分析超时/)
+  assert.doesNotMatch(diagnostic.coverageText, /全量池正常|今日快照/)
+  assert.match(diagnostic.decisionText, /分析未完成/)
+  assert.equal(JSON.stringify(input), before)
+})
+
 test('diagnostic separates full universe coverage from risk-gated no-buy state', () => {
   const diagnostic = getSmartScreenDiagnostic({
     universe_meta: {
