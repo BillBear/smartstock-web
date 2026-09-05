@@ -1,0 +1,114 @@
+{
+  "schema_version": "swing-quality-v1",
+  "identity": {"user_id": "default", "strategy_code": "trend_breakout", "risk_level": "medium"},
+  "sources": {
+    "production_baseline_sha": "704a5e5429f01395214fcb769c2747d6f637f308",
+    "application_head_sha": "836145b8c201fba331cc198e401360e064cb4e4c",
+    "research_head_sha": "29f62bf2a62b978cfa5f18f9952ac1d65dc04ca6",
+    "model_version": null,
+    "model_policy": "existing_only_no_retraining_or_promotion"
+  },
+  "primary_horizon": 10,
+  "auxiliary_horizons": [5, 20],
+  "primary_k": 5,
+  "auxiliary_ks": [3, 10],
+  "dates": {
+    "research": ["2024-09-01", "2026-08-31"],
+    "warmup_start": "2024-01-01",
+    "max_warmup_bars": 120,
+    "development": ["2024-09-01", "2025-08-31"],
+    "validation": ["2025-09-01", "2026-02-28"],
+    "walk_forward": ["2026-03-01", "2026-08-31"],
+    "walk_forward_frequency": "monthly_prior_information_only",
+    "historical_status": "retrospective_not_independent_unseen",
+    "tuning_segment": "development_only",
+    "purge_embargo": "actual_label_end_overlap_20_valid_bars",
+    "calendar_policy": "same_date_daily_bar_no_trade_cal_or_weekday_inference"
+  },
+  "previously_examined_intervals": [
+    {
+      "start": "2026-06-23",
+      "end": "2026-09-04",
+      "status": "previously_examined",
+      "basis": "conservative_v1_2_cached_response_envelope_including_future_label_windows",
+      "source": "ranking-quality-v1-2/history"
+    }
+  ],
+  "claimed_unseen_intervals": [],
+  "ranking": {
+    "backend_rank_field": "rank_no",
+    "ui_rank_field": "ui_rank_no",
+    "ui_order_policy": "record_separately_never_substitute_backend_rank",
+    "tie_breakers": ["rank_no", "symbol"],
+    "baseline_kinds": ["observed_production", "reconstructed_research", "same_input_parity"],
+    "baseline_comparison": "within_kind_only"
+  },
+  "labels": {
+    "entry": "next_valid_bar_open_after_signal_inputs_available",
+    "exit": "hth_valid_bar_close_entry_is_bar_1",
+    "immature": null,
+    "adjustment": "future_factors_labels_only_entry_scale",
+    "uncertain_fills": "flag_not_assumed_tradable",
+    "late_input": "exclude_if_available_after_entry",
+    "missing_outcomes": "disclose_delays_and_conservative_sensitivity_no_promotion_if_unbounded"
+  },
+  "missing_labels": {
+    "value": null,
+    "refill": false,
+    "count_as_loss": false,
+    "count_as_cash": false,
+    "denominator": "min_k_original_daily_candidate_count",
+    "report": ["observed", "planned_slots", "evaluable_dates", "coverage"],
+    "duplicate_dates": "quarantine_not_silent_deduplication"
+  },
+  "costs": {
+    "commission": 0.0003,
+    "slippage": 0.001,
+    "config_sha256": "b3d23625da863ffe2c64f1f64679b75b79c547c7b1d426006eebe24d7cb9e31d",
+    "source": "ranking-quality-v1-2/observations/12d6275ff3c50983b65fc0b145f92bbac1554ecb86495e1a8716adcaf5d85da4.json",
+    "provenance": "current_saved_profile_not_proven_historical_asof",
+    "ranking_cost_model": "same_frozen_two_sided_commission_and_slippage",
+    "execution_cost_model": "separate_date_effective_tax_minimum_commission_same_notional",
+    "historical_actual_fees_verified": false
+  },
+  "metrics": {
+    "positive_label": "horizon_net_return_gt_zero",
+    "ndcg": "v1_2_gain_max_zero_net_return_discount_log2_rank_plus_1_ideal_original_pool",
+    "ndcg_k": 10,
+    "zero_ideal_ndcg": 0,
+    "severe_loss_pct": -8.0,
+    "daily_aggregation": "equal_weight_dates",
+    "lift": "daily_topk_positive_rate_divided_by_daily_pool_positive_rate_then_date_mean",
+    "zero_pool_positive_rate_lift": null,
+    "comparison": "same_pool_dates_labels_costs_horizon",
+    "cash_veto": "preserve_slots_no_refill_report_invested_and_cash_separately"
+  },
+  "experiments": [
+    {"id": "E1", "variable": "same_source_dd_prob_ascending", "requires": "homogeneous_probability_provenance", "tie_breakers": ["rank_no", "symbol"]},
+    {"id": "E2", "variable": "proxy_turnover_to_same_day_turnover_rate", "requires": "proxy_was_used_coverage_and_same_input_parity"},
+    {"id": "E3", "variable": "recorded_fused_vs_prefusion_rule_same_input_postprocessing", "requires": "complete_prefusion_trace_or_strict_asof_model", "missing_trace": "unavailable_never_invert_raw_total"}
+  ],
+  "qualification": {
+    "minimum_signal_dates": 120,
+    "minimum_paired_dates": 60,
+    "minimum_required_data_coverage": 0.99,
+    "minimum_optional_field_coverage": 0.95,
+    "minimum_market_states": 2,
+    "required_improvements": ["top5_10d_median", "ndcg_at_10", "top5_pool_excess"],
+    "absolute_net_mean_gt": 0,
+    "severe_loss_must_not_increase": true,
+    "source_direction": "all_sources_and_tushare_only_consistent_same_pool",
+    "market_state_direction": "no_material_reversal_report_unknown_and_sample_counts",
+    "sensitivity": "remove_any_one_date_or_symbol_gain_stays_positive",
+    "auxiliary_reversal": "explain_and_do_not_promote",
+    "bootstrap": {"unit": "contiguous_valid_trading_date_blocks", "block_bars_by_horizon": {"5": 5, "10": 10, "20": 20}, "iterations": 10000, "seed": 20260830, "confidence": 0.95, "ci_lower_bound_gt": 0},
+    "multiple_testing": {"p_value": "paired_date_block_permutation", "correction": "holm", "family": ["E1", "E2", "E3"], "alpha": 0.05},
+    "execution": "same_capital_positions_exits_is_oos_walk_forward_drawdown_not_worse_return_drawdown_not_lower",
+    "slippage_stress_multipliers": [1, 2],
+    "block_evidence": "report_block_count_continuity_overlap_and_permutation_assumptions_no_strong_small_sample_claims",
+    "max_shadow_candidates": 1,
+    "production_gates": "preserve_live_gate_rules_separate_human_approval",
+    "automatic_promotion": false,
+    "outcomes": ["shadow_candidate", "no_shadow_candidate", "insufficient_evidence", "data_blocked"]
+  }
+}
