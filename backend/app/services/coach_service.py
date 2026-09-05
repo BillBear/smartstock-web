@@ -5,13 +5,15 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from statistics import mean, pstdev
-from threading import RLock
+from threading import Condition, RLock
+from time import monotonic
 
 import pandas as pd
 
@@ -222,7 +224,15 @@ class CoachService:
         self._pick_history: Dict[str, List[Dict[str, Any]]] = {}
         self._daily_snapshots: Dict[str, Dict[str, Any]] = {}
         self._backtest_runs: Dict[str, Dict[str, Any]] = {}
-        self._today_picks_cache: Dict[str, Dict[str, Any]] = {}
+        self._today_picks_cache: Dict[tuple, Dict[str, Any]] = {}
+        self._pick_request_lock = RLock()
+        self._pick_flights: Dict[tuple, Dict[str, Any]] = {}
+        self._pick_generation = 0
+        self._pick_latest_generation: Dict[tuple, int] = {}
+        self._pick_latest_day_generation: Dict[str, int] = {}
+        self._pick_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="pick-analysis")
+        self._pick_analysis_condition = Condition(RLock())
+        self._pick_analysis_futures = set()
         self._today_picks_cache_ttl_seconds = max(0, int(today_picks_cache_ttl_seconds or 0))
         self._universe_refresh_seconds = max(60, int(universe_refresh_seconds or 1200))
         self._universe_intraday_refresh_seconds = max(15, int(universe_intraday_refresh_seconds or 90))
@@ -256,10 +266,16 @@ class CoachService:
         return ""
 
     def _invalidate_user_cache(self, user_id: str) -> None:
-        prefix = f":{user_id}:"
-        keys = [key for key in self._today_picks_cache.keys() if prefix in key]
-        for key in keys:
-            self._today_picks_cache.pop(key, None)
+        with self._pick_request_lock:
+            keys = [key for key in self._today_picks_cache if isinstance(key, tuple) and key[1] == user_id]
+            for key in keys:
+                self._today_picks_cache.pop(key, None)
+            for key in list(self._pick_flights):
+                if key[1] == user_id:
+                    self._pick_generation += 1
+                    self._pick_latest_generation[key[:4]] = self._pick_generation
+                    self._pick_latest_day_generation[key[0]] = self._pick_generation
+                    self._pick_flights.pop(key)
 
     @staticmethod
     def _now_ts() -> float:
@@ -2909,6 +2925,16 @@ class CoachService:
         trade_date: Optional[str] = None,
         force_refresh: bool = False,
     ) -> Dict[str, Any]:
+        try:
+            return self._get_today_picks_request(
+                max_count, user_id, risk_level, cached_only, requested_date, trade_date, force_refresh,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"pick_request_failed:{type(exc).__name__}") from None
+
+    def _get_today_picks_request(
+        self, max_count, user_id, risk_level, cached_only, requested_date, trade_date, force_refresh,
+    ):
         if cached_only:
             return self.get_cached_today_picks(
                 max_count=max_count,
@@ -2947,44 +2973,202 @@ class CoachService:
         trade_date = datetime.now().strftime("%Y-%m-%d")
         level = risk_profile.get("risk_level", "medium")
         score_threshold = self._safe_float(strategy_config.get("score_threshold"), 0)
-        cache_key = f"{trade_date}:{user_id}:{level}:{strategy_code}:{int(score_threshold)}"
+        identity = (trade_date, user_id, strategy_code, level)
+        cache_key = identity + (json.dumps({
+            "config": strategy_config, "risk_profile": risk_profile,
+            "profile_key": strategy_profile_key, "max_count": max_count,
+        }, sort_keys=True, separators=(",", ":")),)
         now_ts = datetime.now().timestamp()
+        cached_data = None
+        with self._pick_request_lock:
+            flight = self._pick_flights.get(cache_key)
+            if flight and flight["generation"] != self._pick_latest_generation.get(identity):
+                flight = None
+            cache_item = None if force_refresh or flight else self._today_picks_cache.get(cache_key)
+            if cache_item:
+                source = (((cache_item.get("data") or {}).get("universe_meta") or {}).get("source"))
+                age = now_ts - float(cache_item.get("ts", 0) or 0)
+                if source and 0 <= age < self._today_picks_cache_ttl_seconds:
+                    cached_data = copy.deepcopy(cache_item["data"])
+            owner = not flight and cached_data is None
+            if owner:
+                self._pick_generation += 1
+                flight = {"future": Future(), "generation": self._pick_generation}
+                self._pick_flights[cache_key] = flight
+                self._pick_latest_generation[identity] = flight["generation"]
+                self._pick_latest_day_generation[trade_date] = flight["generation"]
 
-        # Explicit refresh bypasses only this request's result cache, not calendar/risk gates.
-        cache_item = None if force_refresh else self._today_picks_cache.get(cache_key)
-        if cache_item:
-            cached_source = str(
-                (((cache_item.get("data") or {}).get("universe_meta") or {}).get("source") or "")
+        if cached_data is not None:
+            return self._copy_pick_request_result(cached_data, max_count, user_id)
+        if not owner:
+            # Never wait with the publication lock held. Each caller gets fresh action state.
+            return self._copy_pick_request_result(flight["future"].result(), max_count, user_id)
+        try:
+            full_result, history_picks = self._compute_today_picks(
+                max_count, user_id, trade_date, strategy_code, strategy_profile_key,
+                strategy_config, risk_profile, score_threshold,
             )
-            cache_age = now_ts - float(cache_item.get("ts", 0) or 0)
-            cache_still_usable = (
-                bool(cached_source)
-                and self._today_picks_cache_ttl_seconds > 0
-                and 0 <= cache_age < self._today_picks_cache_ttl_seconds
-            )
-            if not cache_still_usable:
-                cache_item = None
+            full_result["request_diagnostics"]["generation"] = flight["generation"]
+            with self._pick_request_lock:
+                if flight["generation"] != self._pick_latest_generation.get(identity):
+                    full_result["snapshot_persistence"] = {"status": "failed", "reason": "superseded_request"}
+                elif not self._pick_snapshot_batch_is_valid(full_result["picks"], trade_date, strategy_code, level):
+                    full_result["snapshot_persistence"] = {"status": "failed", "reason": "invalid_snapshot_batch"}
+                else:
+                    save_started = monotonic()
+                    full_result["snapshot_persistence"] = {"status": "saved"}
+                    try:
+                        self.store.upsert_pick_snapshots(
+                            user_id=user_id, trade_date=trade_date, strategy_code=strategy_code,
+                            risk_level=level, picks=full_result["picks"],
+                        )
+                    except Exception as exc:
+                        full_result["snapshot_persistence"] = {"status": "failed", "reason": "snapshot_save_failed"}
+                        full_result["request_diagnostics"]["errors"].append({"stage": "save", "type": type(exc).__name__})
+                        logger.error("Candidate snapshot save failed (%s)", type(exc).__name__)
+                    full_result["request_diagnostics"]["timings"]["save_ms"] = (monotonic() - save_started) * 1000
+                    if flight["generation"] == self._pick_latest_day_generation.get(trade_date):
+                        self._pick_history[trade_date] = copy.deepcopy(history_picks)
+                        self._daily_snapshots[trade_date] = copy.deepcopy(full_result)
+                    if self._today_picks_cache_ttl_seconds > 0:
+                        self._today_picks_cache[cache_key] = {
+                            "ts": datetime.now().timestamp(), "data": copy.deepcopy(full_result),
+                        }
+                flight["future"].set_result(copy.deepcopy(full_result))
+        except BaseException as exc:
+            flight["future"].set_exception(exc)
+            raise
+        finally:
+            with self._pick_request_lock:
+                if self._pick_flights.get(cache_key) is flight:
+                    self._pick_flights.pop(cache_key, None)
+        return self._copy_pick_request_result(full_result, max_count, user_id)
 
-        if cache_item:
-            cached_result = copy.deepcopy(cache_item["data"])
-            all_cached_picks = cached_result.get("picks", [])
-            cached_result["picks"] = all_cached_picks[:max_count]
-            cached_result["no_trade"] = len(cached_result["picks"]) == 0
-            cached_result["no_trade_reason"] = (
-                "当前市场与策略条件不足，建议今日不交易"
-                if len(cached_result["picks"]) == 0
-                else None
-            )
-            if "trade_plan" not in cached_result:
-                cached_result["trade_plan"] = self._attach_trade_plan(
-                    all_cached_picks,
-                    strategy_health=cached_result.get("strategy_health") or {},
-                    market_state=cached_result.get("market_state") or {},
-                    risk_profile=cached_result.get("risk_profile") or {},
-                )
-            self._attach_user_actions(cached_result["picks"], user_id)
-            return cached_result
+    def _pick_snapshot_batch_is_valid(self, picks, trade_date, strategy_code, risk_level):
+        seen = {"pick_id": set(), "symbol": set(), "rank_no": set()}
+        for pick in picks:
+            for field, values in seen.items():
+                value = pick.get(field)
+                if field == "rank_no":
+                    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                        return False
+                else:
+                    value = str(value or "").strip()
+                    if not value:
+                        return False
+                if value in values:
+                    return False
+                values.add(value)
+            for field, expected in [("trade_date", trade_date), ("strategy_code", strategy_code), ("risk_level", risk_level)]:
+                value = pick.get(field)
+                if value is None or value == "":
+                    continue
+                actual = self._normalize_trade_date(value) if field == "trade_date" else str(value).strip().lower()
+                if actual != expected:
+                    return False
+        return True
 
+    def _copy_pick_request_result(self, full_result, max_count, user_id):
+        result = copy.deepcopy(full_result)
+        result["picks"] = result["picks"][:max_count]
+        self._attach_user_actions(result["picks"], user_id)
+        return result
+
+    def _run_pick_analysis(self, candidate_rows, risk_profile, market_state, strategy_code):
+        started = monotonic()
+        rows = [row for row in candidate_rows if row.get("symbol")]
+        diagnostics = {
+            "timings": {"queue_ms": 0.0, "analysis_ms": 0.0, "compute_ms": 0.0,
+                        "save_ms": None, "history_ms": None, "fallback_ms": None},
+            "provider_substage_status": "unavailable", "source_asof": None,
+            "analysis_completed_count": 0, "analysis_error_count": 0,
+            "analysis_running_timeout_count": 0, "analysis_queue_timeout_count": 0,
+            "errors": [], "rows": [],
+        }
+        condition = self._pick_analysis_condition
+        futures = {}
+
+        def finished(future):
+            with condition:
+                self._pick_analysis_futures.discard(future)
+                condition.notify_all()
+
+        def analyze(row, timing):
+            with condition:
+                timing["queue_ms"] = (monotonic() - started) * 1000
+                timing["status"] = "running"
+            compute_started = monotonic()
+            try:
+                return self._build_pick(row["symbol"], risk_profile, market_state, row, strategy_code)
+            finally:
+                with condition:
+                    timing["compute_ms"] = (monotonic() - compute_started) * 1000
+
+        # A timed-out Python thread cannot be killed. Keep one pool, and do not enqueue
+        # another batch until its old workers finish; admission shares the 12-second budget.
+        with condition:
+            admitted = condition.wait_for(lambda: not self._pick_analysis_futures, timeout=12)
+            diagnostics["timings"]["queue_ms"] = (monotonic() - started) * 1000
+            if not admitted:
+                diagnostics["analysis_queue_timeout_count"] = len(rows)
+                diagnostics["rows"] = [
+                    {"symbol": row["symbol"], "status": "queue_timeout",
+                     "queue_ms": diagnostics["timings"]["queue_ms"], "compute_ms": None}
+                    for row in rows
+                ]
+                return [], rows, diagnostics
+            analysis_started = monotonic()
+            try:
+                for row in rows:
+                    timing = {"symbol": row["symbol"], "status": "queued", "queue_ms": None, "compute_ms": None}
+                    future = self._pick_executor.submit(analyze, row, timing)
+                    futures[future] = (row, timing)
+                    self._pick_analysis_futures.add(future)
+                    future.add_done_callback(finished)
+            except BaseException:
+                for future in futures:
+                    future.cancel()
+                raise
+        completed, pending = wait(futures, timeout=max(0, 12 - (monotonic() - started)))
+        picks = []
+        diagnostics["analysis_completed_count"] = len(completed)
+        for future in completed:
+            timing = futures[future][1]
+            try:
+                pick = future.result()
+                timing["status"] = "completed"
+                if pick:
+                    picks.append(pick)
+            except Exception as exc:
+                timing["status"] = "error"
+                timing["error_type"] = type(exc).__name__
+                diagnostics["analysis_error_count"] += 1
+                error = {"stage": "analysis", "type": type(exc).__name__}
+                if error not in diagnostics["errors"]:
+                    diagnostics["errors"].append(error)
+        pending_rows = []
+        with condition:
+            for future in pending:
+                row, timing = futures[future]
+                pending_rows.append(row)
+                if future.cancel():
+                    timing["status"] = "queue_timeout"
+                    timing["queue_ms"] = (monotonic() - started) * 1000
+                    diagnostics["analysis_queue_timeout_count"] += 1
+                else:
+                    timing["status"] = "running_timeout"
+                    diagnostics["analysis_running_timeout_count"] += 1
+            # Late workers may finish locally, but cannot mutate published diagnostics.
+            diagnostics["rows"] = copy.deepcopy([timing for _, timing in futures.values()])
+        diagnostics["timings"]["analysis_ms"] = (monotonic() - analysis_started) * 1000
+        return picks, pending_rows, diagnostics
+
+    def _compute_today_picks(
+        self, max_count, user_id, trade_date, strategy_code, strategy_profile_key,
+        strategy_config, risk_profile, score_threshold,
+    ):
+        compute_started = monotonic()
+        level = risk_profile.get("risk_level", "medium")
         market_state = self.get_market_state_today()
         picks: List[Dict[str, Any]] = []
         target_universe_size = int(self._safe_float(strategy_config.get("universe_size"), 120))
@@ -3013,46 +3197,15 @@ class CoachService:
             universe_meta["analysis_budget"] = analyze_budget
             universe_meta["analysis_cap"] = analyze_cap
 
-        max_workers = min(6, max(1, len(candidate_rows)))
-        futures = []
-        future_rows: Dict[Any, Dict[str, Any]] = {}
-        pending_rows: List[Dict[str, Any]] = []
-        executor = ThreadPoolExecutor(max_workers=max_workers)
-        try:
-            for row in candidate_rows:
-                if not row.get("symbol"):
-                    continue
-                future = executor.submit(
-                    self._build_pick,
-                    row.get("symbol"),
-                    risk_profile,
-                    market_state,
-                    row,
-                    strategy_code,
-                )
-                futures.append(future)
-                future_rows[future] = row
-            completed, pending = wait(futures, timeout=12)
-            if isinstance(universe_meta, dict):
-                universe_meta["analysis_completed_count"] = len(completed)
-                universe_meta["analysis_timeout_count"] = len(pending)
-                if pending:
-                    universe_meta["analysis_status"] = "degraded_timeout" if not completed else "partial_timeout"
-            for future in completed:
-                try:
-                    pick = future.result()
-                    if pick:
-                        picks.append(pick)
-                except Exception:
-                    # 单票失败不影响整体结果（容错）
-                    continue
-            for future in pending:
-                row = future_rows.get(future)
-                if row:
-                    pending_rows.append(row)
-                future.cancel()
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+        picks, pending_rows, request_diagnostics = self._run_pick_analysis(
+            candidate_rows, risk_profile, market_state, strategy_code,
+        )
+        if isinstance(universe_meta, dict):
+            completed_count = request_diagnostics["analysis_completed_count"]
+            universe_meta["analysis_completed_count"] = completed_count
+            universe_meta["analysis_timeout_count"] = len(pending_rows)
+            if pending_rows:
+                universe_meta["analysis_status"] = "degraded_timeout" if not completed_count else "partial_timeout"
 
         picks = self._apply_risk_specific_selection(picks, level)
 
@@ -3147,7 +3300,7 @@ class CoachService:
         for i, item in enumerate(all_picks, start=1):
             item["rank_no"] = i
 
-        self._pick_history[trade_date] = copy.deepcopy(all_picks)
+        history_picks = copy.deepcopy(all_picks)
         strategy_health = {
             "status": "unverified",
             "summary": "尚未找到该策略的最近回测，请先在策略回测页跑一次全A样本回测。",
@@ -3193,23 +3346,12 @@ class CoachService:
             market_state=market_state,
             risk_profile=risk_profile,
         )
-        snapshot_persistence = {"status": "saved"}
-        try:
-            self.store.upsert_pick_snapshots(
-                user_id=user_id,
-                trade_date=trade_date,
-                strategy_code=strategy_code,
-                risk_level=level,
-                picks=all_picks,
-            )
-        except Exception as exc:
-            # Preserve the computed result, but never report a durable refresh as successful.
-            snapshot_persistence = {"status": "failed", "reason": "snapshot_save_failed"}
-            logger.error("Candidate snapshot save failed (%s)", type(exc).__name__)
-
+        request_diagnostics["timings"]["compute_ms"] = (
+            (monotonic() - compute_started) * 1000 - request_diagnostics["timings"]["queue_ms"]
+        )
         full_result = {
             "trade_date": trade_date,
-            "snapshot_persistence": snapshot_persistence,
+            "request_diagnostics": request_diagnostics,
             "market_state": market_state,
             "risk_profile": risk_profile,
             "universe_meta": universe_meta,
@@ -3231,17 +3373,7 @@ class CoachService:
             "no_trade_reason": "当前市场与策略条件不足，建议今日不交易" if len(all_picks) == 0 else None,
         }
 
-        self._daily_snapshots[trade_date] = copy.deepcopy(full_result)
-        if self._today_picks_cache_ttl_seconds > 0:
-            self._today_picks_cache[cache_key] = {
-                "ts": now_ts,
-                "data": copy.deepcopy(full_result),
-            }
-
-        result = copy.deepcopy(full_result)
-        result["picks"] = result["picks"][:max_count]
-        self._attach_user_actions(result["picks"], user_id)
-        return result
+        return full_result, history_picks
 
     def get_pick_detail(self, pick_id: str, user_id: str = "default", risk_level: Optional[str] = None) -> Optional[Dict[str, Any]]:
         # 优先从 pick_id 对应日期查找
