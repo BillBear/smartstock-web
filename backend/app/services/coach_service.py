@@ -3193,6 +3193,7 @@ class CoachService:
             market_state=market_state,
             risk_profile=risk_profile,
         )
+        snapshot_persistence = {"status": "saved"}
         try:
             self.store.upsert_pick_snapshots(
                 user_id=user_id,
@@ -3201,12 +3202,14 @@ class CoachService:
                 risk_level=level,
                 picks=all_picks,
             )
-        except Exception:
-            # 推荐快照落库失败不能阻断页面，但后续会在验证阶段暴露。
-            pass
+        except Exception as exc:
+            # Preserve the computed result, but never report a durable refresh as successful.
+            snapshot_persistence = {"status": "failed", "reason": "snapshot_save_failed"}
+            logger.error("Candidate snapshot save failed (%s)", type(exc).__name__)
 
         full_result = {
             "trade_date": trade_date,
+            "snapshot_persistence": snapshot_persistence,
             "market_state": market_state,
             "risk_profile": risk_profile,
             "universe_meta": universe_meta,
