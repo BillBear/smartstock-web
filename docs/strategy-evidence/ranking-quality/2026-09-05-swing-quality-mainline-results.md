@@ -359,3 +359,101 @@ python -u scripts/run_swing_benchmark.py --protocol "$PROTOCOL" --dataset "$DATA
 - 既有CoachStore全局`ON CONFLICT(pick_id)`可能跨用户覆盖。当前服务批次校验不能修复该存储键；不扩大本轮为迁移，也不声称多用户持久化已安全。该问题阻止无条件生产采用，但不阻止default身份只读研究。
 - 数据契约只支持已核验的TuShare raw；其他来源仍不可直接混用。当前选择暂缓跨源研究，不能将其宣称为全数据源修复。
 - 历史采集、基线、实验及执行诊断都已离线重复核验；无新Shadow候选，无新增策略准入证明。计划内研究已经给出裁决，下一轮变量和本地运行版本的采用须另行确认，不以“继续”绕过已冻结的生产接入边界。
+
+## 2026-09-06 Provider field contract check
+
+This is a bounded data-contract observation, not a ranking experiment and not
+a production repair. It did not call the application, PostgreSQL, candidate
+generation, model inference or backtest. It did not change the production
+source order, score, ranking, action, risk gate, position, stop loss or take
+profit.
+
+### Scope and reproducibility
+
+The probe queried TuShare `daily`, `daily_basic` and `adj_factor` once each for
+`20260720` and `20260831`, filtering the saved response to
+`000651.SZ`/`601988.SH`/`000001.SZ`. That is exactly six TuShare calls. It also
+made one Tencent batch quote request for the three plain symbols and one
+isolated AKShare spot request. Tencent and AKShare observations are current
+time only and are not used as historical comparisons.
+
+TuShare returned all three selected rows for every one of the six calls;
+Tencent returned all three quotes; the single AKShare spot call was
+`unavailable`. The overall live command therefore returned exit `2`/`partial`:
+an unavailable fallback stays visible and is not treated as a successful
+fallback. The raw output contains neither a token nor request headers. A
+literal token/config-name scan of the JSON output found no match.
+
+TuShare documents `daily_basic` as the source for turnover rate, free-float
+turnover, volume ratio and circulating market value, and defines `circ_mv` in
+ten-thousand yuan. It documents `adj_factor` as a separate daily field. Those
+units and endpoint boundaries are the basis of this check; no new factor was
+added to the strategy. [daily_basic](https://tushare.pro/document/2?doc_id=32)
+[adj_factor](https://tushare.pro/document/2?doc_id=28)
+
+The first live artifact exposed a test-harness defect: its fake `daily` method
+returned every symbol for each adapter call. It was not used for conclusions.
+A red regression test fixed the fake to filter `ts_code`; the final result is a
+transport-free replay from the hash-verified raw endpoint files, not a second
+provider request.
+
+| Final replay source | Result |
+|---|---:|
+| Raw manifest SHA-256 | `840c541628e88821ca8398ad2cd74b11f6b84d36472d83fab82b163557b24eb4` |
+| Replay manifest SHA-256 | `68305e68a82b00c8ddaa92a42d874af370329146a6f94475bbb16a471452bf86` |
+| Replayed stage-diff SHA-256 | `87fcac62af572c7430fbd0727f299e7b913da937add916e6c0fc4ff101372ca0` |
+| Replayed coverage SHA-256 | `0adb700e2470929dd71f0bff3380ba1cdde88f710c44bd45b77f36cff6bba85b` |
+| Cache-only command | exit `0`; no transport |
+
+External, gitignored evidence is retained under
+`/Users/xiong/Documents/SmartStock/runtime/strategy-quality/swing-quality-v1/provider-contract-check-20260906-231500/`.
+The corrected derived replay is in the sibling
+`provider-contract-check-20260906-231500-derived-replay/` directory. The
+replay validates every raw-file SHA before reading it and refuses an existing
+output directory or a tampered raw file.
+
+### Observed field path
+
+The raw-to-adapter-to-normalizer comparison uses full symbol/date identity,
+preserves null separately from zero, applies declared unit conversion only once
+and treats date-less records as `not_comparable`. The six selected
+symbol/date rows show:
+
+| Endpoint group | Comparable field observations | Retained (including one declared unit conversion) | Result |
+|---|---:|---:|---|
+| TuShare `daily` | 36 | 36 | OHLC, volume and amount are preserved; volume and amount are converted from provider units once. |
+| TuShare `daily_basic` | 24 | 0 | No basic-field observation survives the current real-time chain intact. |
+| TuShare `adj_factor` | 6 | 0 | The factor is absent from the current real-time chain. |
+
+The `daily_basic` result is specific and reproducible:
+
+- `turnover_rate`: raw values are present (for example `0.8077%` and
+  `0.4683%` for 000001 on the two dates), but the existing TuShare real-time
+  adapter reads only `daily` and emits `0.0`; this is classified `invalid`, not
+  an actual zero.
+- `turnover_rate_f` and `volume_ratio`: raw values are present but are dropped
+  before the adapter result.
+- `circ_mv`: raw values are present, the adapter emits `0.0`, and the common
+  real-time normalizer drops it entirely.
+- `adj_factor`: raw values are present but are outside the real-time quote
+  contract and are dropped. This is expected for a current quote, but means it
+  must not be silently claimed as an available real-time strategy input.
+
+The relevant production behavior is now locked by read-only characterization
+tests: `TuShareService.get_realtime_quote` asks `daily` but not `daily_basic`,
+then defaults unavailable basic fields to zero; and
+`DataSourceManager._normalize_realtime_quote` retains `turnover_rate` but
+does not map `turnover_rate_f`, `volume_ratio` or `circ_mv`. The new diagnostic
+code only observes that behavior. It is not a license to immediately add all
+provider fields to the ranking model.
+
+### Consequence for the selection-quality mainline
+
+This closes a prerequisite for a later, isolated data-semantic repair: the
+current turnover proxy cannot be called a real turnover field, and the current
+ranking experiments must continue to label it as a proxy. The evidence does
+**not** show that adding any missing field improves swing selection; it does
+not alter the existing `no_shadow_candidate` result. A future strategy-impact
+task must first repair source semantics in its own branch, freeze a new
+baseline, and run the same fixed ranking evaluation before any field becomes a
+live feature.
