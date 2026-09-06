@@ -449,17 +449,201 @@ def run_baseline(protocol, dataset, observation, output_dir, progress=None):
     return result
 
 
+def _execution_artifacts(directory, schema, protocol):
+    root = Path(directory); manifest = read_json(root/'manifest.json')
+    values = {}
+    for name, expected in manifest['artifacts'].items():
+        if Path(name).name != name or (root/name).resolve().parent != root.resolve():
+            raise ValueError('execution artifact path escape')
+        values[name] = read_json(root/name)
+        if digest(values[name]) != expected:
+            raise ValueError('execution artifact hash mismatch: '+name)
+    identity = values['identity.json']
+    if identity != manifest['identity'] or identity['schema_version'] != schema:
+        raise ValueError('execution artifact identity mismatch')
+    if values['protocol.json'] != protocol or identity['protocol_sha256'] != protocol['protocol_sha256']:
+        raise ValueError('execution artifact protocol mismatch')
+    return manifest, values
+
+
+def _execution_bundle(rows, daily, config, protocol):
+    from app.evaluation.swing_replay import replay_execution
+    from app.evaluation.ranking_quality_experiments import swing_segments
+    segments = swing_segments(rows,protocol)
+    result = dict(scenarios={},fixed_horizon_labels=_evaluate_variant(rows,'saved_label_diagnostics',
+        lambda r:(r.get('_execution_order',r['rank_no']),r['symbol']))['metrics'],
+        fixed_horizon_scope='saved_5_10_20_valid_bar_labels_with_ranking_costs_not_cash_equity_or_actual_holding_clock')
+    intervals = dict(protocol['dates'])
+    for month in range(3,9):
+        import calendar
+        intervals[f'walk_forward_2026-{month:02d}'] = [f'2026-{month:02d}-01',
+            f'2026-{month:02d}-{calendar.monthrange(2026,month)[1]}']
+    for multiplier in (1,2):
+        overall = replay_execution(rows,daily,config,slippage_multiplier=multiplier)
+        output = dict(overall=overall,segments={})
+        for name, segment in segments.items():
+            dates = set(segment['dates']); start,end = intervals[name]
+            output['segments'][name] = dict(**segment, capital_policy='fresh_identical_notional_no_position_carry',
+                execution=replay_execution([r for r in rows if r['trade_date'] in dates],
+                    ((day,value) for day,value in daily if start<=day<=end),config,slippage_multiplier=multiplier))
+        result['scenarios'][f'slippage_{multiplier}x'] = output
+    return result
+
+
+def _execution_challenger(rows, experiment_values):
+    from app.evaluation.ranking_quality_experiments import validate_swing_pair
+    research = experiment_values['metrics.json']['reconstructed_research']
+    experiments = research['experiments']
+    if set(experiments) != {'E1','E2','E3'}:
+        raise ValueError('execution refuses new experiment variants')
+    qualified = [name for name in ('E1','E2','E3') if experiments[name].get('provisional_ranking_candidate') is True]
+    if not qualified:
+        return None, [], [], dict(status='unavailable',reason='no_provisional_ranking_candidate',
+                                 ranking_decision=research['decision'])
+    name = qualified[0]; result = experiments[name]
+    qualification = result.get('qualification') or {}
+    if (result['status'] != 'available' or not qualification.get('checks') or
+        not all(qualification['checks'].values()) or not qualification.get('evidence_available') or
+        not all(qualification['evidence_available'].values()) or name == 'E3'):
+        raise ValueError('unverifiable execution challenger qualification')
+    dates = set(result['paired']['matched_dates'])
+    if not dates:
+        raise ValueError('execution challenger has no qualified matched dates')
+    reference = [r for r in rows if r['trade_date'] in dates]
+    if {r['trade_date'] for r in reference} != dates:
+        raise ValueError('execution challenger dates absent from baseline')
+    trial_source = reference if name == 'E1' else experiment_values['turnover_trial.json']
+    trial = [r for r in trial_source if r['trade_date'] in dates]
+    if any(r.get('config_sha256',reference[0]['config_sha256']) != reference[0]['config_sha256'] for r in trial):
+        raise ValueError('execution challenger config mismatch')
+    validate_swing_pair(reference,trial)
+    selection = result['metrics']['slot_selection_by_date']
+    orders = {}
+    for day in dates:
+        symbols = selection[day]
+        if len(set(symbols)) != len(symbols) or set(symbols) != {r['symbol'] for r in reference if r['trade_date']==day}:
+            raise ValueError('execution challenger frozen selection pool mismatch')
+        orders.update({(day,symbol):rank for rank,symbol in enumerate(symbols,1)})
+    trial = [dict(r,_execution_order=orders[r['trade_date'],r['symbol']],
+                  config_sha256=reference[0]['config_sha256']) for r in trial]
+    return name,reference,trial,dict(status='ranking_provisional_only',name=name,
+        selection_rule='first_frozen_E1_E2_E3_priority_max_one_no_return_search',
+        other_provisional_candidates=qualified[1:],dates=sorted(dates))
+
+
+def _execution_comparison(reference, trial):
+    comparisons = {}
+    for scenario, base in reference['scenarios'].items():
+        other = trial['scenarios'][scenario]; checks = {}
+        pairs = [('overall',base['overall'],other['overall'])] + [(name,value['execution'],
+            other['segments'][name]['execution']) for name,value in base['segments'].items()]
+        for name,left,right in pairs:
+            a,b = left['summary'],right['summary']
+            checks[name] = dict(reference=a,challenger=b,
+                lower_drawdown=b['raw_mark_max_drawdown_pct']<=a['raw_mark_max_drawdown_pct'],
+                no_lower_return_drawdown=all(x['raw_mark_return_drawdown_ratio'] is not None for x in (a,b)) and
+                    b['raw_mark_return_drawdown_ratio']>=a['raw_mark_return_drawdown_ratio'],
+                positive_increment=b['raw_mark_return_pct']>max(0,a['raw_mark_return_pct']),
+                evidence_bounded=left['promotable'] and right['promotable'])
+        comparisons[scenario] = checks
+    return dict(status='insufficient_evidence',comparisons=comparisons,
+                reason='historical_fill_risk_metadata_and_unresolved_exposure_preclude_strong_execution_PASS')
+
+
+def run_execution(protocol, dataset, observation, baseline, experiments, output_dir, progress=None):
+    from app.evaluation.paper_trade_review import audit_paper_execution
+    progress = progress or (lambda message:print(message,file=sys.stderr,flush=True))
+    protocol = validate_protocol(protocol); root = Path(dataset); output = Path(output_dir)
+    if output.exists() and any(output.iterdir()):
+        raise ValueError('execution output must be fresh')
+    manifest = dataset_index(root,protocol)
+    baseline_manifest,base = _execution_artifacts(baseline,'swing-baseline-v1',protocol)
+    experiment_manifest,trial = _execution_artifacts(experiments,'swing-experiments-v1',protocol)
+    observed = read_json(observation); config = observed['strategy_config']; identity = base['identity.json']
+    validate_config(config,observed['identity'],protocol)
+    if (Path(observation).stem != digest(observed) or identity['observation_sha256'] != digest(observed) or
+        observed['config_sha256'] != digest(config) or identity['config_sha256'] != digest(config)):
+        raise ValueError('execution observation or config hash mismatch')
+    for key in ('dataset_sha256','coverage_sha256'):
+        if identity[key] != manifest[key]:
+            raise ValueError('execution baseline dataset hash mismatch')
+    if identity['dataset_identity_sha256'] != manifest['identity_sha256']:
+        raise ValueError('execution dataset identity hash mismatch')
+    experiment_identity = trial['identity.json']
+    if (experiment_identity['baseline_manifest_sha256'] != digest(baseline_manifest) or
+        experiment_identity['dataset_sha256'] != manifest['dataset_sha256'] or
+        experiment_identity['config_sha256'] != digest(config)):
+        raise ValueError('execution experiment baseline lineage mismatch')
+    backend = Path(__file__).resolve().parents[1]
+    for name,sha in identity['implementation_sha256'].items():
+        if name.startswith('app/services/') or name == 'app/evaluation/swing_protocol.py':
+            if hashlib.sha256((backend/name).read_bytes()).hexdigest() != sha:
+                raise ValueError('execution frozen production source mismatch: '+name)
+    for name in ('app/evaluation/ranking_quality_experiments.py','app/evaluation/ranking_quality_diagnosis.py'):
+        if hashlib.sha256((backend/name).read_bytes()).hexdigest() != experiment_identity['implementation_sha256'][name]:
+            raise ValueError('execution frozen evaluator source mismatch: '+name)
+    frozen_rows = base['reconstructed_research.json']
+    rows = []
+    for row in frozen_rows:
+        if any(row.get(k) != v for k,v in protocol['identity'].items()):
+            raise ValueError('execution candidate identity mismatch')
+        if row.get('config_sha256',digest(config)) != digest(config):
+            raise ValueError('execution candidate config mismatch')
+        # Task 5 binds config at artifact identity, not on every candidate row.
+        rows.append(dict(row,config_sha256=digest(config)))
+    name,reference,challenger,selection = _execution_challenger(rows,trial)
+    symbols = {r['symbol'] for r in rows}; daily = []
+    for day,value in date_files(root,manifest):
+        if day >= protocol['dates']['research'][0] and value['rows']:
+            daily.append((day,dict(rows=[{k:r.get(k) for k in BAR_FIELDS} for r in value['rows'] if r['symbol'] in symbols])))
+    progress(f'phase=execution frozen_signal_rows={len(rows)} dates={len(daily)}')
+    baseline_result = _execution_bundle(rows,daily,config,protocol)
+    challenger_result = dict(**selection)
+    if name:
+        same_reference = _execution_bundle(reference,daily,config,protocol)
+        same_trial = _execution_bundle(challenger,daily,config,protocol)
+        challenger_result.update(reference=same_reference,trial=same_trial,
+            evaluation=_execution_comparison(same_reference,same_trial))
+    ranking_decision = trial['metrics.json']['reconstructed_research']['decision']
+    decision = 'insufficient_evidence' if name or ranking_decision != 'no_shadow_candidate' else 'no_shadow_candidate'
+    execution = dict(baseline=baseline_result,challenger=challenger_result,
+        manual=audit_paper_execution(observed.get('manual_paper_trades',[]),config,protocol['identity']['user_id']),
+        decision=decision,formal_shadow_candidate=None,production_authorized=False,
+        observed_production='saved snapshots retained in baseline; no invented missing executable/position/score fields',
+        comparison_policy='same_frozen_signals_pool_dates_capital_positions_exits_no_regeneration',
+        signal_config_binding='verified_baseline_artifact_config_attached_to_execution_envelope_not_historical_asof_proof',
+        limitations='research_raw_mark_diagnostics_not_verified_market_execution_or_full_A_share_strategy_validity')
+    run_identity = dict(schema_version='swing-execution-v1',mode='execution',protocol_sha256=protocol['protocol_sha256'],
+        baseline_manifest_sha256=digest(baseline_manifest),experiment_manifest_sha256=digest(experiment_manifest),
+        dataset_sha256=manifest['dataset_sha256'],config_sha256=digest(config),observation_sha256=digest(observed),
+        implementation_sha256={name:hashlib.sha256((backend/name).read_bytes()).hexdigest() for name in
+            ('app/evaluation/swing_replay.py','app/evaluation/paper_trade_review.py','scripts/run_swing_benchmark.py')})
+    values = {'protocol.json':protocol,'identity.json':run_identity,'execution.json':execution}
+    result = dict(identity=run_identity,status=decision,formal_shadow_candidate=None,execution_run=True,
+        counts=dict(reference_rows=len(rows),execution_dates=len(daily),manual_flows=len(observed.get('manual_paper_trades',[]))),
+        artifacts={name:digest(value) for name,value in values.items()})
+    output.mkdir(parents=True,exist_ok=True)
+    for key,value in values.items(): write_json(output/key,value)
+    write_json(output/'manifest.json',result)
+    return result
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--protocol', required=True)
     parser.add_argument('--dataset', required=True)
     parser.add_argument('--observation', required=True, help='Frozen content-addressed observation JSON; never DB')
-    parser.add_argument('--mode', choices=['baseline','experiments'], default='baseline')
+    parser.add_argument('--mode', choices=['baseline','experiments','execution'], default='baseline')
     parser.add_argument('--baseline', help='Frozen Task 5 output directory; required for experiments')
+    parser.add_argument('--experiments', help='Frozen Task 6 output directory; required for execution')
     parser.add_argument('--output-dir', required=True)
     args = parser.parse_args(argv)
     try:
-        if args.mode == 'experiments':
+        if args.mode == 'execution':
+            if not args.baseline or not args.experiments:
+                raise ValueError('--baseline and --experiments required for execution')
+            result = run_execution(read_json(args.protocol),args.dataset,args.observation,args.baseline,args.experiments,args.output_dir)
+        elif args.mode == 'experiments':
             if not args.baseline: raise ValueError('--baseline required for experiments')
             result = run_experiments(read_json(args.protocol),args.dataset,args.observation,args.baseline,args.output_dir)
         else:

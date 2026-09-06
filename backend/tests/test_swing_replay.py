@@ -38,6 +38,176 @@ def fixture(count=80, bearish=False):
                 identity=dict(user_id='default', strategy_code='trend_breakout', risk_level='medium'))
 
 
+class SwingExecutionTests(unittest.TestCase):
+    def setUp(self):
+        self.module = importlib.import_module('app.evaluation.swing_replay')
+
+    def inputs(self, prices=None):
+        prices = prices or [(10,10), (10,8), (7,7.5), (8,8)]
+        bars = [dict(symbol='000001', trade_date=f'2026-07-{i+1:02d}', source='tushare',
+                     adjustment='raw', open=o, close=c, high=max(o,c)+.1, low=min(o,c)-.1,
+                     volume=100000, amount=1000000, adj_factor=1, available_at=None)
+                for i,(o,c) in enumerate(prices)]
+        signal = dict(symbol='000001', trade_date=bars[0]['trade_date'], rank_no=1,
+                      user_id='default', strategy_code='trend_breakout', risk_level='medium',
+                      baseline_kind='reconstructed_research', config_sha256=self.module.digest(CONFIG),
+                      action='buy', decision_executable=True, position_pct=10, total=80)
+        daily = [(r['trade_date'], dict(rows=[r])) for r in bars]
+        return [signal], daily
+
+    def run_replay(self, signals, daily, **kwargs):
+        self.assertTrue(hasattr(self.module, 'replay_execution'), 'execution ledger missing')
+        return self.module.replay_execution(signals, daily, CONFIG, **kwargs)
+
+    def test_entry_day_touch_is_not_exit_and_gap_uses_next_open(self):
+        signals, daily = self.inputs()
+        r = self.run_replay(signals, daily)
+        self.assertEqual([(f['side'],f['trade_date']) for f in r['fills']],
+                         [('buy','2026-07-02'),('sell','2026-07-03')])
+        self.assertAlmostEqual(r['fills'][1]['price'], 7*.999, places=4)
+        self.assertEqual(r['closed_episodes'][0]['exit_reason'], 'stop_loss_close')
+        self.assertEqual(r['closed_episodes'][0]['trigger_date'], '2026-07-02')
+        self.assertGreater(r['diagnostics']['entry_day_exit_deferred_t1'], 0)
+        self.assertEqual(r['policy']['holding_clock'], 'calendar_days')
+
+    def test_intraday_both_touches_are_diagnostic_not_new_exit_policy(self):
+        signals, daily = self.inputs([(10,10),(10,10),(10,10)])
+        daily[1][1]['rows'][0].update(high=12, low=8)
+        r = self.run_replay(signals,daily)
+        self.assertEqual(len(r['fills']),1)
+        self.assertEqual(len(r['open_positions']),1)
+        self.assertEqual(r['diagnostics']['intraday_both_touch_count'],1)
+        self.assertIsNone(r['summary']['realized_net_pnl'])
+
+    def test_suspended_exit_defers_until_resume_and_no_terminal_liquidation(self):
+        signals,daily = self.inputs()
+        daily[2][1]['rows'] = []
+        r = self.run_replay(signals,daily)
+        self.assertEqual(r['fills'][-1]['trade_date'],'2026-07-04')
+        self.assertIn('missing_bar', [x['reason'] for x in r['deferred_orders']])
+        truncated = self.run_replay(signals,daily[:3])
+        self.assertEqual(len(truncated['fills']),1)
+        self.assertTrue(truncated['open_positions'])
+        self.assertTrue(truncated['unresolved_exposure'])
+
+    def test_one_price_filters_are_posthoc_uncertainty_not_open_known_signal(self):
+        signals,daily = self.inputs([(10,10),(10,10),(10,8),(7,7)])
+        daily[1][1]['rows'][0].update(high=10,low=10)
+        daily[3][1]['rows'][0].update(high=7,low=7)
+        r = self.run_replay(signals,daily)
+        self.assertEqual(r['fills'][0]['trade_date'],'2026-07-03')
+        self.assertEqual(len(r['fills']),1)
+        self.assertEqual(sum(x['reason']=='one_price_uncertain' for x in r['deferred_orders']),2)
+        self.assertIn('posthoc',r['policy']['bar_filter'])
+        self.assertFalse(r['promotable'])
+
+    def test_cash_lots_caps_and_fees_not_double_counted(self):
+        signals,daily = self.inputs()
+        r = self.run_replay(signals,daily)
+        for fill in r['fills']:
+            self.assertEqual(fill['qty']%100,0)
+            self.assertAlmostEqual(fill['fee'],sum(fill['fees'].values()),places=6)
+        buy,sell = r['fills']
+        self.assertLessEqual(buy['amount']+buy['fee'],10000)
+        self.assertGreaterEqual(min(x['cash'] for x in r['equity_curve']),0)
+        self.assertAlmostEqual(r['ending_cash'],100000-buy['amount']-buy['fee']+sell['amount']-sell['fee'],places=4)
+        self.assertEqual(buy['fees']['stamp_tax'],0)
+        self.assertAlmostEqual(sell['fees']['stamp_tax'],sell['amount']*.0005,places=4)
+        self.assertEqual(buy['fees']['commission'],5)
+
+    def test_score_exit_uses_saved_same_date_not_future_and_calendar_holding(self):
+        signals,daily = self.inputs([(10,10)]*4)
+        signals.append(dict(signals[0],trade_date='2026-07-03',total=59,action='watch'))
+        r = self.run_replay(signals,daily)
+        self.assertEqual(r['fills'][-1]['trade_date'],'2026-07-04')
+        self.assertEqual(r['closed_episodes'][0]['exit_reason'],'score_below_60')
+        self.assertGreater(r['diagnostics']['missing_score_count'],0)
+        signals,daily = self.inputs([(10,10)]*3)
+        daily[2] = ('2026-07-12',dict(rows=[dict(daily[2][1]['rows'][0],trade_date='2026-07-12')]))
+        r = self.run_replay(signals,daily)
+        self.assertEqual(r['open_positions'][0]['exit_order']['reason'],'holding_calendar_days')
+
+    def test_factor_change_freezes_exposure_without_fake_share_or_cash_changes(self):
+        signals,daily = self.inputs()
+        daily[2][1]['rows'][0]['adj_factor'] = 2
+        r = self.run_replay(signals,daily)
+        self.assertEqual(len(r['fills']),1)
+        self.assertEqual(r['open_positions'][0]['qty'],r['fills'][0]['qty'])
+        self.assertTrue(r['open_positions'][0]['corporate_action_uncertain'])
+        self.assertFalse(r['promotable'])
+
+    def test_saved_gates_identity_config_and_variants_fail_closed(self):
+        signals,daily = self.inputs()
+        for field,value in [('position_pct',0),('action','watch'),('decision_executable',False),('total',71)]:
+            r = self.run_replay([dict(signals[0],**{field:value})],daily)
+            self.assertFalse(r['fills'])
+        for field,value in [('risk_level','high'),('config_sha256','changed')]:
+            with self.assertRaises(ValueError): self.run_replay([dict(signals[0],**{field:value})],daily)
+        with self.assertRaises(ValueError):
+            self.run_replay(signals+[dict(signals[0],trade_date='2026-07-02',user_id='other')],daily)
+        with self.assertRaises(ValueError): self.run_replay(signals,daily,slippage_multiplier=3)
+        self.assertEqual(self.run_replay(signals,daily),self.run_replay(signals,copy.deepcopy(daily)))
+
+    def test_late_saved_score_cannot_trigger_a_close_exit(self):
+        signals,daily = self.inputs([(10,10)]*4)
+        signals.append(dict(signals[0],trade_date='2026-07-03',total=59,action='watch',
+                            available_at='2026-07-04T18:00:00+08:00'))
+        r = self.run_replay(signals,daily)
+        self.assertEqual(len(r['fills']),1)
+        self.assertTrue(r['open_positions'])
+
+    def test_nonfinite_saved_gate_cannot_authorize_a_buy(self):
+        signals,daily = self.inputs()
+        for field in ('total','position_pct'):
+            r = self.run_replay([dict(signals[0],**{field:float('nan')})],daily)
+            self.assertFalse(r['fills'])
+
+    def test_maximum_positions_and_future_labels_do_not_change_cash_decisions(self):
+        signals,daily = self.inputs([(10,10)]*3)
+        original = signals[0]
+        signals = [dict(original,symbol=f'{i:06d}',rank_no=i) for i in range(1,8)]
+        for _,value in daily:
+            bar = value['rows'][0]
+            value['rows'] = [dict(bar,symbol=r['symbol']) for r in signals]
+        first = self.run_replay(signals,daily)
+        self.assertEqual(len(first['fills']),5)
+        self.assertGreaterEqual(first['ending_cash'],50000)
+        changed = [dict(r,future_return_10d=999999,tradable_label='untradable') for r in signals]
+        second = self.run_replay(changed,daily)
+        self.assertEqual(first['fills'],second['fills'])
+        self.assertEqual(first['equity_curve'],second['equity_curve'])
+
+    def test_fixed_labels_are_postrun_diagnostics_only_for_matching_entry_dates(self):
+        signals,daily = self.inputs()
+        signals[0].update(entry_date='2026-07-02',future_return_5d=3,future_return_10d=6,future_return_20d=9)
+        first = self.run_replay(signals,daily)
+        self.assertIn('fixed_horizon_comparison',first)
+        match = first['fixed_horizon_comparison'][0]
+        self.assertTrue(match['same_entry_date'])
+        self.assertEqual(match['saved_label_net_returns_pct'],{'5':3,'10':6,'20':9})
+        daily[1][1]['rows'] = []
+        delayed = self.run_replay(signals,daily)['fixed_horizon_comparison'][0]
+        self.assertFalse(delayed['same_entry_date'])
+        self.assertTrue(all(v is None for v in delayed['saved_label_net_returns_pct'].values()))
+
+    def test_closed_episode_keeps_same_close_vs_next_open_constraint_delta(self):
+        signals,daily = self.inputs()
+        r = self.run_replay(signals,daily)
+        episode = r['closed_episodes'][0]
+        self.assertIn('constraint_delta',episode)
+        self.assertEqual(episode['constraint_delta']['legacy_same_close_price_diagnostic'],7.992)
+        self.assertEqual(episode['constraint_delta']['execution_price'],6.993)
+        self.assertEqual(episode['constraint_delta']['calendar_delay_days'],1)
+        self.assertAlmostEqual(episode['constraint_delta']['price_difference'],-.999)
+
+    def test_missing_factor_is_uncertainty_not_confirmed_corporate_action(self):
+        signals,daily = self.inputs()
+        daily[2][1]['rows'][0]['adj_factor'] = None
+        r = self.run_replay(signals,daily)
+        self.assertEqual(r['diagnostics'].get('factor_change_or_missing_uncertainty_events'),1)
+        self.assertNotIn('corporate_action_events',r['diagnostics'])
+
+
 class SwingReplayTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(importlib.util.find_spec('app.evaluation.swing_replay'),

@@ -3,6 +3,38 @@ from collections import defaultdict
 import math
 
 
+def audit_paper_execution(trades, config, user_id):
+    """Audit every saved flow, without inventing opening cash or entry snapshots."""
+    from app.evaluation.swing_replay import execution_fees, EXECUTION_FEE_SOURCES
+    if any(r.get('user_id', user_id) != user_id for r in trades):
+        raise ValueError('manual trade user identity mismatch')
+    recorded = summarize_paper_trades(trades, config['commission'], config['slippage'])
+    estimates, comparisons, cash_flow = [], [], []
+    balance = 0.0
+    for row in sorted(trades, key=lambda r:(str(r['created_at']),int(r['id']))):
+        amount = float(row['qty'])*float(row['price'])
+        day = str(row['created_at'])[:10]
+        adjusted_price = float(row['price'])*(1+config['slippage']*(1 if row['side']=='buy' else -1))
+        fees = execution_fees(day,row['side'],float(row['qty'])*adjusted_price,config['commission'])
+        estimates.append(dict(row,price=adjusted_price,fee=sum(fees.values())))
+        comparisons.append(dict(trade_id=row['id'],recorded_fee=float(row.get('fee') or 0),
+            estimated_research_fees=fees,estimated_slippage_amount=abs(adjusted_price-float(row['price']))*float(row['qty'])))
+        balance += amount*(1 if row['side']=='sell' else -1)-float(row.get('fee') or 0)
+        cash_flow.append(dict(trade_id=row['id'],created_at=str(row['created_at']),net_cash_movement=round(balance,6)))
+    estimated = summarize_paper_trades(estimates,0,0)
+    return dict(status='available' if trades else 'empty',recorded=recorded,
+        recorded_cash_movement=round(balance,6),cash_flow=cash_flow,
+        estimated_research_fee_net_realized_pnl=round(sum(r['recorded_fee_net_pnl'] for r in estimated['sale_events']),6)
+            if estimated['sale_events'] else None,
+        fee_comparison=comparisons,account_equity=None,strategy_attributable=False,
+        opening_cash='unknown_not_inferred_from_backtest_notional',fee_sources=EXECUTION_FEE_SOURCES,
+        limitations=['manual_selection_not_new_strategy_evidence',
+            'no_verified_entry_snapshot_attribution_even_if_pick_id_present',
+            'recorded_fees_and_research_estimates_separate_not_double_counted',
+            'unmatched_sales_imply_unknown_opening_inventory_not_free_trading_capital',
+            'cash_movement_is_not_account_balance_open_positions_at_cost_only'])
+
+
 def summarize_paper_trades(trades, commission=0.0003, slippage=0.001):
     """Reconcile all recorded buys/sells with weighted cost; never invent fills."""
     positions = defaultdict(lambda: {"qty": 0.0, "cost": 0.0, "buy_fees": 0.0})

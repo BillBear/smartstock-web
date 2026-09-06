@@ -14,6 +14,67 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/run_swing_benchmark.py'
 
 
 class SwingBenchmarkTests(unittest.TestCase):
+    def test_execution_consumes_verified_artifacts_without_replay_or_new_variants(self):
+        from unittest.mock import patch
+        self.assertTrue(hasattr(self.cli,'run_execution'), 'execution CLI missing')
+        dataset,observation = self.dataset()
+        base = self.root/'execution-base'; experiments = self.root/'execution-experiments'
+        self.cli.run_baseline(self.protocol,dataset,observation,base,progress=lambda _:None)
+        self.cli.run_experiments(self.protocol,dataset,observation,base,experiments,progress=lambda _:None)
+        with patch.object(self.cli,'run_experiments',side_effect=AssertionError('must not regenerate experiments')), \
+             patch.object(self.cli,'replay_day',side_effect=AssertionError('must not generate signals')):
+            first = self.cli.run_execution(self.protocol,dataset,observation,base,experiments,self.root/'x1',progress=lambda _:None)
+            second = self.cli.run_execution(self.protocol,dataset,observation,base,experiments,self.root/'x2',progress=lambda _:None)
+        self.assertEqual(first,second)
+        self.assertIsNone(first['formal_shadow_candidate'])
+        result = self.cli.read_json(self.root/'x1'/'execution.json')
+        self.assertEqual(set(result['baseline']['scenarios']),{'slippage_1x','slippage_2x'})
+        self.assertEqual(result['challenger']['status'],'unavailable')
+        self.assertEqual(result['manual']['status'],'empty')
+        self.assertIn('validation',result['baseline']['scenarios']['slippage_1x']['segments'])
+        with self.assertRaisesRegex(ValueError,'fresh'):
+            self.cli.run_execution(self.protocol,dataset,observation,base,experiments,self.root/'x1')
+        frozen = self.cli.read_json(experiments/'manifest.json')
+        identity = self.cli.read_json(experiments/'identity.json')
+        identity['baseline_manifest_sha256'] = 'wrong_baseline'
+        (experiments/'identity.json').write_text(json.dumps(identity))
+        frozen['identity'] = identity; frozen['artifacts']['identity.json'] = self.cli.digest(identity)
+        (experiments/'manifest.json').write_text(json.dumps(frozen))
+        with self.assertRaisesRegex(ValueError,'lineage'):
+            self.cli.run_execution(self.protocol,dataset,observation,base,experiments,self.root/'bad-lineage')
+
+    def test_execution_requires_experiment_artifact_argument(self):
+        self.assertTrue(hasattr(self.cli,'run_execution'))
+        result = self.cli.main(['--protocol',str(PROTOCOL),'--dataset','unused','--observation','unused',
+                               '--baseline','unused','--mode','execution','--output-dir','unused'])
+        self.assertEqual(result,1)
+
+    def test_execution_challenger_reuses_saved_orders_and_rejects_empty_or_changed_pool(self):
+        import copy
+        from tests.test_swing_replay import SwingExecutionTests
+        helper = SwingExecutionTests(); helper.setUp()
+        rows,_ = helper.inputs()
+        rows.append(dict(rows[0],symbol='000002',rank_no=2))
+        values = {'metrics.json':{'reconstructed_research':{'decision':'insufficient_evidence','experiments':{
+            'E1':dict(status='available',provisional_ranking_candidate=True,
+                      qualification=dict(checks={'fixture_gate':True},evidence_available={'fixture_evidence':True}),
+                      paired={'matched_dates':['2026-07-01']},metrics={'slot_selection_by_date':{'2026-07-01':['000002','000001']}}),
+            'E2':dict(status='unavailable'),'E3':dict(status='unavailable')}}}}
+        name,base,trial,_ = self.cli._execution_challenger(rows,values)
+        self.assertEqual(name,'E1')
+        self.assertEqual(base,rows)
+        self.assertEqual([r['symbol'] for r in sorted(trial,key=lambda r:r['_execution_order'])],['000002','000001'])
+        self.assertEqual([r['total'] for r in trial],[r['total'] for r in rows])
+        invalid = copy.deepcopy(values)
+        invalid['metrics.json']['reconstructed_research']['experiments']['E1']['paired']['matched_dates'] = []
+        with self.assertRaises(ValueError): self.cli._execution_challenger(rows,invalid)
+        invalid = copy.deepcopy(values)
+        invalid['metrics.json']['reconstructed_research']['experiments']['E1']['metrics']['slot_selection_by_date']['2026-07-01'] = ['000001']
+        with self.assertRaises(ValueError): self.cli._execution_challenger(rows,invalid)
+        invalid = copy.deepcopy(values)
+        invalid['metrics.json']['reconstructed_research']['experiments']['E4'] = {}
+        with self.assertRaises(ValueError): self.cli._execution_challenger(rows,invalid)
+
     def test_turnover_uses_fixed_pool_and_preserves_removed_gate_slots(self):
         from app.evaluation.swing_replay import replay_day,prepare_inputs,digest,decision_projection,label_candidates
         from unittest.mock import patch

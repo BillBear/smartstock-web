@@ -379,3 +379,273 @@ def label_candidates(candidates, histories, config):
             row['tradable_label'] = 'untradable'
         output.append(row)
     return output
+
+
+EXECUTION_FEE_SOURCES = {
+    'stamp_tax': 'https://shanxi.chinatax.gov.cn/web/detail/sx-11400-545-1780448',
+    'commission': 'https://www.chinatax.gov.cn/n810341/n810765/n812203/n813164/c1209808/content.html',
+    'transfer_and_current_tax': 'https://one.sse.com.cn/onething/gptz/',
+}
+
+
+def execution_fees(day, side, amount, commission):
+    """Narrow research-period fee recipe, not a broker's verified account tariff."""
+    if iso_day(day) < '2023-08-28' or side not in ('buy', 'sell'):
+        raise ValueError('unsupported execution fee date or side')
+    if not all(math.isfinite(v) for v in (amount, commission)) or amount <= 0 or commission < 0:
+        raise ValueError('invalid execution fee input')
+    return dict(commission=round(max(5.0, amount * commission), 4),
+                stamp_tax=round(amount * .0005, 4) if side == 'sell' else 0.0,
+                transfer=round(amount * .00001, 4))
+
+
+def _execution_signal_groups(signals, config):
+    validate_snapshot_identity(signals)
+    identities, kinds, groups = set(), set(), {}
+    for row in signals:
+        identity = tuple(row.get(k) for k in ('user_id', 'strategy_code', 'risk_level'))
+        if any(v is None for v in identity) or identity[-1] != config['risk_level']:
+            raise ValueError('execution signal identity mismatch')
+        if row.get('config_sha256') != digest(config):
+            raise ValueError('execution signal config hash mismatch')
+        identities.add(identity); kinds.add(row.get('baseline_kind'))
+        groups.setdefault(iso_day(row['trade_date']), []).append(row)
+    if len(identities) > 1 or len(kinds) > 1 or (kinds and kinds != {'reconstructed_research'}):
+        raise ValueError('execution mixed identity or unsupported baseline kind')
+    return {day: sorted(items, key=lambda r:(r.get('_execution_order', r['rank_no']), r['symbol']))
+            for day, items in groups.items()}
+
+
+def _execution_bar_reason(bar):
+    # These full-day observations define a posthoc conservative fill filter,
+    # not information a live order algorithm could know at the opening auction.
+    if bar is None:
+        return 'missing_bar'
+    if not _usable(bar) or any(bar[k] <= 0 for k in ('open','high','low','close','volume','amount')):
+        return 'unusable_or_suspended_bar'
+    if bar['high'] == bar['low']:
+        return 'one_price_uncertain'
+    return None
+
+
+def _execution_number(value):
+    return type(value) in (int,float) and math.isfinite(value)
+
+
+def _execution_signal_on_time(signal, day):
+    known = [datetime.fromisoformat(signal[k].replace('Z','+00:00')) for k in
+             ('available_at','effective_available_at') if signal.get(k)]
+    if any(stamp.tzinfo is None for stamp in known):
+        raise ValueError('execution signal availability requires timezone')
+    return not known or max(known) <= _decision_time(day)
+
+
+def _execution_exit_reason(position, bar, score, day, config):
+    if bar['close'] <= position['stop_loss_price']:
+        return 'stop_loss_close'
+    if bar['close'] >= position['take_profit_price']:
+        return 'take_profit_close'
+    if (datetime.fromisoformat(day) - datetime.fromisoformat(position['entry_date'])).days >= config['holding_days']:
+        return 'holding_calendar_days'
+    if score is not None and score < max(45, config['score_threshold'] - 12):
+        return f'score_below_{max(45, config["score_threshold"] - 12):g}'
+    return None
+
+
+def _execution_fill(day, side, symbol, qty, price, config):
+    amount = round(qty * price, 4)
+    fees = execution_fees(day, side, amount, config['commission'])
+    return dict(trade_date=day, side=side, symbol=symbol, qty=qty, price=price,
+                amount=amount, fees=fees, fee=round(sum(fees.values()), 4),
+                fill_status='research_open_proxy_not_verified_market_fill')
+
+
+def _execution_label_comparison(signals, fills, episodes):
+    saved = {(iso_day(r['trade_date']),r['symbol']):r for r in signals}
+    closed = {(r['entry_date'],r['symbol']):r for r in episodes}
+    output = []
+    for fill in fills:
+        if fill['side'] != 'buy':
+            continue
+        row = saved[fill['signal_date'],fill['symbol']]
+        same_entry = row.get('entry_date') == fill['trade_date']
+        episode = closed.get((fill['trade_date'],fill['symbol']))
+        output.append(dict(symbol=fill['symbol'],signal_date=fill['signal_date'],
+            execution_entry_date=fill['trade_date'],saved_label_entry_date=row.get('entry_date'),same_entry_date=same_entry,
+            saved_label_net_returns_pct={str(h):row.get(f'future_return_{h}d') if same_entry and
+                _execution_number(row.get(f'future_return_{h}d')) else None for h in (5,10,20)},
+            existing_policy_net_return_pct=episode['net_pnl']/episode['entry_cost']*100 if episode else None,
+            scope='postrun_only_saved_label_costs_vs_ledger_fees_no_direct_portfolio_equivalence',
+            missing_reason=None if same_entry else 'entry_delayed_or_saved_entry_unknown_no_relabeling'))
+    return output
+
+
+def replay_execution(signals, daily, config, *, slippage_multiplier=1):
+    """One chronological cash ledger; saved signals only, no service calls.
+
+    Existing close-trigger policy is retained but executed at a later valid open.
+    Corporate actions freeze uncertain exposure; raw marks are diagnostic only.
+    """
+    if slippage_multiplier not in (1, 2):
+        raise ValueError('only original and 2x slippage scenarios are frozen')
+    keys = ('commission','slippage','holding_days','max_positions','max_position_pct',
+            'score_threshold','stop_profit_pct','stop_loss_pct')
+    if any(type(config.get(k)) not in (int,float) or not math.isfinite(config[k]) for k in keys):
+        raise ValueError('invalid execution config')
+    if (not 0 <= config['commission'] <= .01 or not 0 <= config['slippage'] <= .01 or
+        not 1 <= config['max_positions'] <= 20 or int(config['max_positions']) != config['max_positions'] or
+        not 2 <= config['max_position_pct'] <= 30 or not 3 <= config['holding_days'] <= 90 or
+        not 50 <= config['score_threshold'] <= 95 or not 2 <= config['stop_loss_pct'] <= 25 or
+        not 5 <= config['stop_profit_pct'] <= 40):
+        raise ValueError('execution config outside existing policy bounds')
+    groups = _execution_signal_groups(signals, config)
+    initial = max(10000.0, float(config.get('initial_capital', 100000)))
+    if not math.isfinite(initial):
+        raise ValueError('invalid initial capital')
+    cash, peak, max_drawdown = initial, initial, 0.0
+    positions, pending = {}, {}
+    fills, episodes, deferred, rejected, curve = [], [], [], [], []
+    diagnostics = dict(entry_day_exit_deferred_t1=0, intraday_both_touch_count=0,
+                       missing_score_count=0, factor_change_or_missing_uncertainty_events=0, stale_valuation_days=0)
+    previous = None; seen_dates = set()
+    for raw_day, value in daily:
+        day = iso_day(raw_day)
+        if previous is not None and day <= previous:
+            raise ValueError('execution daily dates must be unique and ascending')
+        previous = day; seen_dates.add(day)
+        bars = checked_bars(value['rows'])
+        if any(b['trade_date'] != day for b in bars):
+            raise ValueError('execution wrong-date bar')
+        today = {b['symbol']:b for b in bars}
+        if groups and day < min(groups):
+            continue
+        for symbol, pos in list(positions.items()):
+            bar = today.get(symbol)
+            if bar and bar.get('adj_factor') != pos['entry_factor'] and not pos['corporate_action_uncertain']:
+                pos['corporate_action_uncertain'] = True
+                diagnostics['factor_change_or_missing_uncertainty_events'] += 1
+            order = pos['exit_order']
+            if order is None or day <= order['trigger_date']:
+                continue
+            reason = ('corporate_action_uncertain' if pos['corporate_action_uncertain'] else
+                      't_plus_one' if day <= pos['entry_date'] else _execution_bar_reason(bar))
+            if reason:
+                deferred.append(dict(trade_date=day, symbol=symbol, side='sell', reason=reason))
+                continue
+            fill = _execution_fill(day,'sell',symbol,pos['qty'],round(bar['open']*(1-config['slippage']*slippage_multiplier),4),config)
+            cash = round(cash + fill['amount'] - fill['fee'], 4); fills.append(fill)
+            episodes.append(dict(symbol=symbol, entry_date=pos['entry_date'], exit_date=day,
+                trigger_date=order['trigger_date'], exit_reason=order['reason'], qty=pos['qty'],
+                entry_cost=pos['entry_cost'], proceeds_net=fill['amount']-fill['fee'],
+                net_pnl=round(fill['amount']-fill['fee']-pos['entry_cost'],4),
+                constraint_delta=dict(legacy_same_close_price_diagnostic=order['legacy_same_close_price_diagnostic'],
+                    execution_price=fill['price'],price_difference=round(fill['price']-order['legacy_same_close_price_diagnostic'],4),
+                    calendar_delay_days=(datetime.fromisoformat(day)-datetime.fromisoformat(order['trigger_date'])).days,
+                    scope='price_timing_diagnostic_not_a_separate_legacy_portfolio_return'),
+                holding_calendar_days=(datetime.fromisoformat(day)-datetime.fromisoformat(pos['entry_date'])).days,
+                holding_observed_bars=pos['observed_bars']))
+            del positions[symbol]
+        for symbol, signal in list(pending.items()):
+            if day <= iso_day(signal['trade_date']):
+                continue
+            bar = today.get(symbol); reason = _execution_bar_reason(bar)
+            if reason:
+                deferred.append(dict(trade_date=day, symbol=symbol, side='buy', reason=reason)); continue
+            if len(positions) >= config['max_positions']:
+                rejected.append(dict(trade_date=day,symbol=symbol,reason='position_limit')); del pending[symbol]; continue
+            price = round(bar['open']*(1+config['slippage']*slippage_multiplier),4)
+            cap = initial * min(config['max_position_pct'], signal['position_pct'])/100
+            budget = min(cap, cash / max(1, config['max_positions']-len(positions)))
+            qty = int(budget / price / 100)*100
+            while qty >= 100:
+                fill = _execution_fill(day,'buy',symbol,qty,price,config)
+                if fill['amount'] + fill['fee'] <= budget:
+                    break
+                qty -= 100
+            del pending[symbol]
+            if qty < 100:
+                rejected.append(dict(trade_date=day,symbol=symbol,reason='cash_cap_or_minimum_lot')); continue
+            fill['signal_date'] = iso_day(signal['trade_date'])
+            cash = round(cash-fill['amount']-fill['fee'],4); fills.append(fill)
+            positions[symbol] = dict(symbol=symbol,qty=qty,entry_price=price,entry_date=day,
+                entry_score=signal['total'],entry_cost=fill['amount']+fill['fee'],entry_factor=bar['adj_factor'],
+                last_price=price,last_mark_date=day,observed_bars=0,corporate_action_uncertain=False,
+                take_profit_price=round(price*(1+config['stop_profit_pct']/100),4),
+                stop_loss_price=round(price*(1-config['stop_loss_pct']/100),4),exit_order=None)
+        saved = {s['symbol']:s for s in groups.get(day,[]) if _execution_signal_on_time(s,day)}
+        for symbol,pos in positions.items():
+            bar = today.get(symbol)
+            if bar is None or not _usable(bar):
+                diagnostics['stale_valuation_days'] += 1; continue
+            pos['last_price'] = bar['close']; pos['last_mark_date'] = day; pos['observed_bars'] += 1
+            if pos['corporate_action_uncertain']:
+                continue
+            if bar['high'] >= pos['take_profit_price'] and bar['low'] <= pos['stop_loss_price']:
+                diagnostics['intraday_both_touch_count'] += 1
+            score = (saved.get(symbol) or {}).get('total')
+            if not _execution_number(score):
+                diagnostics['missing_score_count'] += 1
+                score = pos['entry_score']
+            reason = _execution_exit_reason(pos,bar,score,day,config)
+            if reason and pos['exit_order'] is None:
+                pos['exit_order'] = dict(trigger_date=day,reason=reason,
+                    legacy_same_close_price_diagnostic=round(bar['close']*(1-config['slippage']*slippage_multiplier),4))
+                if day == pos['entry_date']:
+                    diagnostics['entry_day_exit_deferred_t1'] += 1
+        for signal in groups.get(day,[]):
+            symbol = signal['symbol']
+            reason = ('late_signal_input' if not _execution_signal_on_time(signal,day) else
+                'saved_entry_gate' if signal.get('action') != 'buy' or signal.get('decision_executable') is not True or
+                    not _execution_number(signal.get('total')) or signal['total'] < config['score_threshold'] or
+                    not _execution_number(signal.get('position_pct')) or signal['position_pct'] <= 0 else None)
+            if reason:
+                rejected.append(dict(trade_date=day,symbol=symbol,reason=reason)); continue
+            if symbol in positions or symbol in pending:
+                continue
+            if len(positions)+len(pending) >= config['max_positions']:
+                rejected.append(dict(trade_date=day,symbol=symbol,reason='position_limit')); continue
+            pending[symbol] = signal
+        market_value = sum(pos['qty']*pos['last_price'] for pos in positions.values())
+        equity = cash + market_value; peak = max(peak,equity)
+        drawdown = (peak-equity)/peak*100; max_drawdown = max(max_drawdown,drawdown)
+        if cash < -.0001 or len(positions) > config['max_positions']:
+            raise RuntimeError('execution cash/position invariant failed')
+        curve.append(dict(trade_date=day,cash=cash,raw_mark_market_value=round(market_value,4),
+            raw_mark_equity=round(equity,4),raw_mark_drawdown_pct=round(drawdown,6),
+            open_positions=len(positions),valuation_uncertain=any(p['corporate_action_uncertain'] or
+                p['last_mark_date'] != day for p in positions.values())))
+    if set(groups)-seen_dates:
+        raise ValueError('execution signal date absent from daily index')
+    ending = curve[-1]['raw_mark_equity'] if curve else initial
+    net_return = (ending/initial-1)*100
+    return dict(initial_capital=initial,ending_cash=cash,equity_curve=curve,fills=fills,closed_episodes=episodes,
+        fixed_horizon_comparison=_execution_label_comparison(signals,fills,episodes),
+        open_positions=[positions[k] for k in sorted(positions)],
+        pending_entries=[dict(symbol=k,signal_date=pending[k]['trade_date']) for k in sorted(pending)],
+        deferred_orders=deferred,rejected_orders=rejected,diagnostics=diagnostics,
+        unresolved_exposure=bool(positions),promotable=False,
+        summary=dict(raw_mark_return_pct=round(net_return,6),raw_mark_max_drawdown_pct=round(max_drawdown,6),
+            raw_mark_return_drawdown_ratio=round(net_return/max_drawdown,6) if max_drawdown else None,
+            realized_net_pnl=round(sum(p['net_pnl'] for p in episodes),4) if episodes else None,
+            closed_episode_count=len(episodes),fill_count=len(fills),
+            win_rate=sum(p['net_pnl']>0 for p in episodes)/len(episodes) if episodes else None,
+            turnover=sum(f['amount'] for f in fills)/initial,
+            mean_holding_calendar_days=sum(p['holding_calendar_days'] for p in episodes)/len(episodes) if episodes else None,
+            terminal_zero_recovery_bound_pct=(cash/initial-1)*100 if positions else None),
+        policy=dict(notional_source='current_backtest_default_100000_floor10000_not_account_balance',
+            holding_clock='calendar_days',holding_days=config['holding_days'],score_exit_threshold=max(45,config['score_threshold']-12),
+            trigger_order=['stop_loss_close','take_profit_close','holding_calendar_days','saved_score_deterioration'],
+            execution='signal_after_close_then_first_later_valid_open_proxy_sells_before_buys_T1',
+            bar_filter='posthoc_conservative_OHLCV_and_one_price_filter_not_open_known_strategy',
+            missing_score='legacy_entry_score_fallback_no_new_score_or_signal',
+            intraday_touch='diagnostic_only_both_touch_has_no_primary_execution_effect',
+            corporate_action='freeze_uncertain_exposure_no_synthetic_shares_dividends_or_cash',
+            slippage_multiplier=slippage_multiplier,fees_sources=EXECUTION_FEE_SOURCES,
+            fee_scope='sell_stamp_0.0005_since20230828_transfer_both_0.00001_mincommission5_no_duplicate_regulatory_fees',
+            transfer_effective_date='2022_change_original_notice_not_verified_current_SSE_rate_research_assumption'),
+        limitations=['historical_risk_status_limits_board_lot_exceptions_and_auction_liquidity_unknown',
+            'daily_bar_proxy_not_verified_executable_market_fill_no_live_authorization',
+            'no_forced_terminal_liquidation_raw_marks_not_recoverable_cash',
+            'corporate_action_or_terminal_missing_exposure_blocks_promotion',
+            'saved_score_coverage_not_full_historical_universe_scoring',
+            'fixed_horizon_labels_are_separate_not_this_cash_ledger'])
