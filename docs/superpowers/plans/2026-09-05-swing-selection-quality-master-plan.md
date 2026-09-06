@@ -10,7 +10,7 @@
 
 **Spec:** 本文第 1 至 7 节是设计及验收约定，第 8 节是实施任务。用户目标为 A 股波段选股质量优先、必要基础修复、历史验证、不扩大项目。本文是这一主线的唯一执行入口，不另建 Gate、Phase 或架构审计方案。
 
-**Status:** 待用户审核。2026-09-05 编写；文档提交不代表批准执行、策略通过或允许上线。
+**Status:** 主线已获用户批准并完成首轮研究；2026-09-06 的 T1 端到端结果为 `no_shadow_candidate`，未批准生产接入。当前接续任务见第 10 节，由用户手动切换执行模型后实施。早期复选框保留设计记录，不作为当前进度清单；实际成果以结果报告和提交为准。
 
 ## Global Constraints
 
@@ -370,4 +370,89 @@ Git 产物限定：必要脚本及测试、小型脱敏固定 fixture、研究�
 - [ ] 推荐相关变更是否有 baseline、IS/OOS/walk-forward、成本/滑点、最大回撤、收益回撤比、Precision@K/NDCG@K 和回滚证据？
 - [ ] 实际执行的测试命令/关键输出、提交 SHA、运行版本、剩余风险是否齐全？
 
-本轮只规划上述工作。文档审核后，默认从 Task 1 接续，不继续原来的逐点修补，也不越过历史比较直接训练模型或上线新排名。
+上述是首次批准的执行顺序。接续时不得重新从 Task 1 跑一遍，也不得越过历史比较直接训练模型或上线新排名；当前进度与唯一下一项任务见第 10 节。
+
+## 10. 当前交接：Task 3 补充，主要接口字段链路验收
+
+### 10.1 已完成与本轮目标
+
+截至代码 `53211c0c994a119a3adce65ac0b768479bc50515`，历史采集、baseline、限定排序实验、执行诊断及展示真实性修复已交付研究结果，见[主线结果](../../strategy-evidence/ranking-quality/2026-09-05-swing-quality-mainline-results.md)。随后 T1 真实换手率对照完成，见[T1 结果](../../strategy-evidence/ranking-quality/2026-09-06-true-turnover-end-to-end.md)。T1 的 Top5 10 日均值从 0.409425% 到 0.542271%，但严重亏损率升高、NDCG 降低，裁决仍为 `no_shadow_candidate`。这些是既有证据，不是本次重新测试，更不是已部署效果。
+
+用户要求在下一轮策略变量之前优先验证主要接口、字段完整性和调用链。**本任务只交付一个可复用的只读字段链路验收器和真实小样本结果，不扩大为全系统审计。** 要回答：数据源有没有返回；现有适配有没有读错或丢字段；统一层有没有再丢失；策略实际取用的是实际值、代理还是缺失。先确定可用输入，再决定怎样使用，不能把新增字段数当作准确率提升。
+
+协作方式为单智能体：GPT-6 已完成本交接；用户手动切换模型实施；完成后切回 GPT-6 核对 diff、日志与保留行为。不派生智能体，不改变模型、权限、MCP 或登录，不重跑模型对照。
+
+### 10.2 起点、范围与复用
+
+- 使用现有物理 worktree `/Users/xiong/Documents/SmartStock/.worktrees/swing-selection-master-plan`，不新建 worktree。确认当前为已提交本交接的 `docs/provider-field-next-task` 且干净，然后创建任务分支 `evaluation/provider-field-contract-check`；同名分支已存在时先核对，不移动或覆盖。
+- 生产代码参考保持 `53211c0`，不得修改 `backend/app/services/`、`backend/app/main.py`、前端、数据库、策略参数或已冻结协议。本交接之后的提交只能是文档；检查通过后记录完整起点 SHA。
+- 复用 `swing_dataset.py` 的 `compact_trade_date`、`join_daily_inputs` 和现有缓存读取/哈希工具。复用原任务配置和已下载历史数据，不再次下载两年全市场，不运行候选、模型、回测、trade_cal，不启动应用或实例化 CoachStore。
+- 只读服务源码：`tushare_service.py`、`tencent_service.py`、`akshare_service.py`、`data_source_manager.py`，以及 CoachService 的字段读取位置。读取现有测试，避免重复造框架。
+- 字段范围固定为日期/股票身份、OHLC、成交量、成交额、涨跌幅、`turnover_rate`、`turnover_rate_f`、`volume_ratio`、`circ_mv`、复权因子。PE/PB/总市值只记现有链路事实，不新增财务抓取或评分；资金流只标注现有实际/代理来源，不新增资金流实验。
+- 准许新增：`backend/app/evaluation/quote_field_diagnostics.py`、`backend/tests/test_quote_field_diagnostics.py`、`backend/app/evaluation/provider_contract_check.py`、`backend/scripts/check_provider_field_contracts.py`、`backend/tests/test_provider_contract_check.py`。
+- 前两个文件优先从已验收的 `7ffddf653028414d89e6132181b12af8433ef549` 读取复用，不重写、不引入另一组实现；明确标注既有测试已通过，不伪造这部分新红灯。只读取该提交的两个文件并用 apply_patch 引入，不合并整条实验分支或携带实验配置。
+- 结果仅追加至已有 `docs/strategy-evidence/ranking-quality/2026-09-05-swing-quality-mainline-results.md` 的“接口字段链路补充”章节。大响应、逐行差分、日志保存于项目外部 runtime 的 `strategy-quality/swing-quality-v1/provider-contract-check-<实际日期时间>/`，原目录不覆盖。
+
+### 10.3 接口和输出契约
+
+纯函数 `compare_field_stages(raw_rows, adapted_rows, normalized_rows, field_map)` 按 `(symbol, trade_date)` 关联，返回 `rows, coverage, issues`。三个列表均使用记录封装 `{"symbol": "000651", "trade_date": "20260720", "values": {...}}`，值本身不预先补零或变更单位；行情日期未知时为 null 并进入 not_comparable，不猜测。`field_map` 明确原字段、内部字段、单位、倍率和来源，不按位置拼接，不猜腾讯位置字段语义。每一层按字段输出 missing/invalid/zero/valid 的独立计数、缺失率和样本分母；字段不存在和数值 0 必须分开。源级无响应/无可比记录时分母为 0、比率为 null，不能把通用空列表函数的 0.0 当成“没有缺失”。
+
+每个差分记录包含股票、行情日期、字段、原始值、适配值、统一值、单位、实际来源、原始响应 hash，以及以下状态之一：`retained`、`unit_converted`、`field_dropped`、`missing_coerced_to_zero`、`invalid`、`unmatched_identity`、`not_comparable`。日期或单位无法证实时不得宣称跨源价格/字段不一致；采集时间不冒充行情时间。重复身份必须显式失败；缺失数据不填 0，不用 fallback 的值覆盖原源缺失证据。
+
+CLI 必须分开两个模式：
+
+```bash
+# 只获取本任务限定样本，不产生正式候选或运营数据库写入。
+"$PY" scripts/check_provider_field_contracts.py --mode probe \
+  --env-file "$ENV_FILE" --output-dir "$PROBE_OUT"
+# 只读取前次响应；网络被禁止，输出到新的目录。
+"$PY" scripts/check_provider_field_contracts.py --mode cache-only \
+  --input-dir "$PROBE_OUT" --output-dir "$REPLAY_OUT"
+```
+
+`$PY` 使用已验证项目环境 `smartstock-web/backend/venv/bin/python` 的绝对路径，先核验版本和所需包，不安装/升级依赖。`$ENV_FILE` 只读应用实际使用的配置文件，由当前启动脚本确认路径；不得打印内容或 token。`$PROBE_OUT/$REPLAY_OUT` 是上述 runtime 下两个不存在的新目录，不使用隐式 today 选历史数据。脚本不得接收数据库连接参数。
+
+成功输出 `raw/`、`request-manifest.json`、`field-contracts.json`、`stage-diff.json`、`coverage.json`。manifest 记录 SDK 版本、参数（无 token）、所请求及实际返回字段、行情日期、抓取时间、行数、耗时、source/adjustment/units、响应 hash、异常类别、真实请求次数；不要保存含密钥的请求正文、请求头或未脱敏异常文本。原始非有限数字以显式标记封装，不因 JSON 序列化把 invalid 偷换成 missing。
+
+### 10.4 五步实施与停止条件
+
+**第一步：离线失败测试，先复现已见路径。**
+
+- 用固定 raw daily 与 daily_basic 响应，隔离调用现有 TuShare 解析路径：证明 daily 没有换手率时当前输出如何变 0，而同日 daily_basic 有真实值。这个测试断言诊断器捕获问题，不断言生产问题已修复。
+- 用固定已适配 quote 调用 `_normalize_realtime_quote`，证明 `volume_ratio/circ_mv` 当前是否消失；保留实际调用结果，不复制一套旧公式代替调用源码。测试通过对象的 `__new__`/mock transport 隔离初始化，禁止应用/数据库/真实网络副作用。
+- 腾讯测试覆盖过短 payload、缺少行情时间、零值、空值、成交量/金额单位未确认；AKShare 测试覆盖空列、非有限值、未报告历史日期。修复候选仅放研究输出中，不改变生产适配器的默认返回。
+- 新增测试覆盖重复身份拒绝、跨日不拼接、倍率只应用一次、所有请求失败的缺失率不为 0、部分失败不伪称全通过、token 不进入文件/异常、cache-only 不能发请求、篡改 raw hash 拒绝、拒绝覆盖输出目录。
+- 运行下述 focused 命令，确认新增诊断模块/契约缺失导致预期失败，再最小实现。既有模块的通过测试不必重造失败。
+
+```bash
+cd /Users/xiong/Documents/SmartStock/.worktrees/swing-selection-master-plan/backend
+PY=/Users/xiong/Documents/SmartStock/smartstock-web/backend/venv/bin/python
+"$PY" -m unittest tests.test_quote_field_diagnostics tests.test_provider_contract_check tests.test_swing_dataset tests.test_data_sources -v
+```
+
+**第二步：有界真实样本，验证接口而不是等待收益。**
+
+- 固定核对股票 `000651.SZ/601988.SH/000001.SZ`。TuShare 固定历史日期 `20260720/20260831`，分别调用 daily/daily_basic/adj_factor，最多 6 次请求，无自动重试；日期格式必须 compact。可按日批量返回后筛出这三股，达到已知行数上限则标记截断，不能称完整。
+- 先从官方接口文档核验字段、单位、权限与请求参数。腾讯没有可核验的字段说明时，不能凭索引猜值；标记未证实并保留原 payload。
+- 腾讯使用现有 quote URL 做一次三股批量请求；保留响应原始行情时间。与固定历史样本日期不同则分别报告，不强行跨日做价格一致性比较。
+- AKShare 最多调用一次当前路径使用的 `stock_zh_a_spot_em`，保留三股及实际列名。SDK 入口可能含多个内部 HTTP 请求，不谎称只有一个网络请求；在独立进程中硬限制 60 秒，到时终止本次探测子进程，不重试、不更换 provider/代理。禁止 AKShare 初始化逻辑改变主进程或用户的代理环境。
+- TuShare/腾讯单请求 timeout 最多 15 秒，整个采集阶段最多 180 秒。超时/权限/网络不可用记 `unavailable` 并停止该源；继续保存其他来源的已有结果，不扩展网络/环境修复。最终部分失败返回 exit 2；全部要求核验完成返回 exit 0；文件/契约错误返回 exit 1。失败不能伪装成交易日闭市或 100% 覆盖。
+- 只验证本任务列出的接口和字段，不获取额外新闻、财务、全市场资金流，不触发选股刷新。
+
+**第三步：研究旁路纠正与原行为保留。**
+
+用已验证的 raw 日线与同日 daily_basic/adj_factor，经现有 `join_daily_inputs` 产生正确单位、显式 null 和真实字段的旁路记录；这是拟修正输入，不是生产推荐。按字段与原路径输出差分。无法核验腾讯/AKShare单位的字段不加入“已修正”记录。不得为了通过断言改生产服务、候选或旧证据；不得把旁路值自动传入评分。
+
+**第四步：离线复算和有限回归。**
+
+断网/禁止 transport 的 cache-only 模式复算，`field-contracts/stage-diff/coverage` 的 canonical hash 与采集后的分析一致；抓取时间等运行字段不参与数值一致性比较。复跑上述 focused 命令。全量 unittest 使用该研究分支现有隔离方式，先确认不会连真实 PostgreSQL/行情或初始化应用；不能保证时停止全量命令，报告缺口而不启动服务。
+
+运行 `git diff --check` 及 `git diff --exit-code 53211c0 -- backend/app/services backend/app/main.py frontend backend/tests/fixtures/swing_quality/protocol.json`，后者必须无差异。不运行新收益实验、排名实验、真实模型推理或部署来充数；纯 mock 模型单测可随已确认隔离的全量回归执行。
+
+**第五步：交付并停止。**
+
+代码与测试一个独立提交、结果追加一个文档提交，只暂存第 10.2 节实际产生的文件，禁止 `git add .`。每次提交后 `git status --short` 应为空。回滚只停用/撤回本任务研究提交，保留原采集证据，不删除历史目录。
+
+交付表必须列出：每个源是否真的调用成功；字段真实返回率和三个阶段的缺失率；已复现的解析/遗失问题；旁路修正前后具体值、单位、日期；每个异常及限额；测试命令/退出码；源码和响应 hash；完整提交 SHA。把“接口有字段”“程序保留字段”“策略采用字段”“改善收益”作为四个不同结论。
+
+**本任务的完成不代表线上数据问题已修好。** 用户切回 GPT-6 后先验收；只有证据明确后才冻结下一项最小生产解析修复及固定输入/策略影响对照。继续执行的授权不包含改权重、阈值、训练、新增策略变量或切换本地运行版本。
