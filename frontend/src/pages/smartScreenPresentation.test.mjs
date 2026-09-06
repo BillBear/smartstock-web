@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import * as qualityPresentation from './smartScreenPresentation.mjs'
+import { getDisplayOrderedPicks } from './smartScreenData.mjs'
 import {
   getRankPresentation,
   getPickActionPresentation,
@@ -180,4 +181,45 @@ test('failed persistence and degraded refresh never use a success toast', () => 
   assert.equal(qualityPresentation.getRefreshFeedback({ accepted: true, result: { picks: [{ analysis_status: 'degraded_timeout' }] } }).type, 'warning')
   assert.equal(qualityPresentation.getRefreshFeedback({ accepted: true, result: { snapshot_persistence: { status: 'saved' }, picks: [] } }).type, 'success')
   assert.equal(qualityPresentation.getRefreshFeedback({ accepted: false }).type, 'warning')
+})
+
+test('evidence labels preserve display order and original backend ranks', () => {
+  assert.equal(typeof qualityPresentation.getPickEvidencePresentation, 'function')
+  const rows = [
+    { symbol: '000001', rank_no: 1, score_breakdown: { total: 60 }, expected_return_pct: 2.43 },
+    { symbol: '000002', rank_no: 2, score_breakdown: { total: 76 }, expected_return_pct: 0 },
+  ]
+  const before = JSON.stringify(rows)
+  const ordered = getDisplayOrderedPicks(rows)
+  assert.deepEqual(ordered.map((row) => row.symbol), ['000002', '000001'])
+  assert.deepEqual(ordered.map((row) => row.rank_no), [2, 1])
+  const display = qualityPresentation.getPickEvidencePresentation(ordered[0])
+  assert.equal(display.backendRankText, '2')
+  assert.equal(display.scoreText, '76.00 分')
+  assert.equal(display.estimateText, '0.00%（估计）')
+  assert.equal(display.sourceLabel, '来源未标记')
+  assert.match(display.description, /不是实证收益或成功率/)
+  assert.equal(JSON.stringify(rows), before)
+})
+
+test('missing evidence stays unavailable and source kinds never claim verification', () => {
+  assert.equal(typeof qualityPresentation.getPickEvidencePresentation, 'function')
+  for (const value of [null, undefined, '', ' ', false, NaN]) {
+    const display = qualityPresentation.getPickEvidencePresentation({
+      expected_return_pct: value, score_breakdown: { total: value }, rank_no: value,
+    })
+    assert.equal(display.scoreText, '未记录')
+    assert.equal(display.estimateText, '未记录')
+    assert.equal(display.backendRankText, '-')
+  }
+  for (const [kind, label] of [
+    ['observed_production', '已保存策略快照'],
+    ['reconstructed_research', '历史规则重建'],
+    ['shadow', '前向旁路观察'],
+  ]) {
+    const display = qualityPresentation.getPickEvidencePresentation({ baseline_kind: kind, verified: true })
+    assert.equal(display.sourceLabel, label)
+    assert.match(display.description, /不代表策略已验证/)
+    assert.equal(display.runId, null)
+  }
 })

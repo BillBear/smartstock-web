@@ -90,6 +90,32 @@ export function getPickDataQualityPresentation(pick = {}) {
   }
 }
 
+function displayNumber(value) {
+  if (typeof value !== 'number' && (typeof value !== 'string' || value.trim() === '')) return null
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
+export function getPickEvidencePresentation(pick = {}) {
+  const score = displayNumber(pick?.score_breakdown?.total)
+  const estimate = displayNumber(pick?.expected_return_pct)
+  const sourceLabel = {
+    observed_production: '已保存策略快照',
+    reconstructed_research: '历史规则重建',
+    shadow: '前向旁路观察',
+  }[pick?.baseline_kind] || '来源未标记'
+  const runId = typeof pick?.run_id === 'string' && pick.run_id.trim() ? pick.run_id : null
+  return {
+    backendRankText: getRankPresentation(displayNumber(pick?.rank_no)).rankText,
+    score,
+    scoreText: score === null ? '未记录' : `${score.toFixed(2)} 分`,
+    estimateText: estimate === null ? '未记录' : `${estimate.toFixed(2)}%（估计）`,
+    sourceLabel,
+    runId,
+    description: `${sourceLabel}。分数和估计收益不是实证收益或成功率，来源类别也不代表策略已验证。${runId ? `证据运行 ID：${runId}` : '未绑定可核验的证据运行 ID。'}`,
+  }
+}
+
 export function getRefreshFeedback(response = {}) {
   if (response?.accepted !== true) {
     return { type: 'warning', text: response?.calendar_context?.message || '当前不可刷新候选池' }
