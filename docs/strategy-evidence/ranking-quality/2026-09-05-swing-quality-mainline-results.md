@@ -406,7 +406,7 @@ provider request.
 | Cache-only command | exit `0`; no transport |
 
 External, gitignored evidence is retained under
-`/Users/xiong/Documents/SmartStock/runtime/strategy-quality/swing-quality-v1/provider-contract-check-20260906-231500/`.
+`$SMARTSTOCK_RUNTIME_ROOT/strategy-quality/swing-quality-v1/provider-contract-check-20260906-231500/`.
 The corrected derived replay is in the sibling
 `provider-contract-check-20260906-231500-derived-replay/` directory. The
 replay validates every raw-file SHA before reading it and refuses an existing
