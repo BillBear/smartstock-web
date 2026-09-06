@@ -14,6 +14,231 @@ TOP_KS = (3, 5, 10)
 SEVERE_LOSS_PCT = -8.0
 
 
+def validate_swing_pair(baseline, trial):
+    """Reject changed identities, labels or original denominators before sorting."""
+    from app.evaluation.ranking_quality_diagnosis import validate_snapshot_identity
+    for rows in (baseline, trial):
+        validate_snapshot_identity(rows)
+    fields = ('baseline_kind', 'user_id', 'strategy_code', 'risk_level',
+              'label_end_dates', 'horizon_paths', 'entry_date', 'entry_price',
+              'history_source', 'probability_source') + tuple(f'future_return_{h}d' for h in HORIZONS)
+    def projection(rows):
+        return {(r['trade_date'], r['symbol']): {k:r.get(k) for k in fields} for r in rows}
+    if projection(baseline) != projection(trial):
+        raise ValueError('changed frozen pool, label, source or baseline identity')
+
+
+def swing_holm(p_values):
+    family = ('E1', 'E2', 'E3')
+    values = {key:1.0 if p_values.get(key) is None else p_values[key] for key in family}
+    adjusted, previous = {}, 0.0
+    for i, key in enumerate(sorted(family, key=lambda k:(values[k], k))):
+        previous = max(previous, min(1.0, (len(family)-i)*values[key]))
+        adjusted[key] = dict(p_value=values[key], adjusted_p=previous, reject=previous <= .05,
+                             family=list(family), unavailable_or_insufficient=p_values.get(key) is None)
+    return adjusted
+
+
+def swing_block_inference(deltas, trading_dates, horizon):
+    """Paired cluster bootstrap and independent block sign randomization under H0."""
+    index = {day:i for i,day in enumerate(trading_dates)}
+    if len(index) != len(trading_dates) or list(trading_dates) != sorted(trading_dates):
+        raise ValueError('actual trading-date index must be unique and sorted')
+    runs = []
+    for day in sorted(deltas):
+        if day not in index:
+            raise ValueError('evaluation date absent from dataset actual-date index')
+        if not runs or index[day] != index[runs[-1][-1]]+1:
+            runs.append([])
+        runs[-1].append(day)
+    blocks = [run[i:i+horizon] for run in runs for i in range(0,len(run),horizon)]
+    count = sum(len(block) == horizon for block in blocks)
+    result = dict(status='insufficient_blocks', p_value=None, ci=dict(lower=None,upper=None),
+        run_lengths=list(map(len,runs)), block_count=count, blocks=blocks, block_length=horizon,
+        residual_block_count=sum(len(b)<horizon for b in blocks), iterations=10000, seed=20260830,
+        method='nonoverlapping_contiguous_observed_date_cluster_bootstrap',
+        null_method='paired_block_sign_randomization_one_sided_improvement',
+        assumptions='exchangeable symmetric block effects under null; dependence within holding blocks; '
+                    'adjacent block dependence may remain; at least three full blocks required',
+        overlap='forward labels overlap within blocks; stock rows never resampled independently')
+    if count < 3:
+        return result
+    generator = random.Random(20260830)
+    summaries = [(sum(deltas[d] for d in b),len(b)) for b in blocks]
+    observed = sum(deltas.values())/len(deltas)
+    samples, extreme = [], 0
+    for _ in range(10000):
+        selected = [summaries[generator.randrange(len(summaries))] for _ in summaries]
+        samples.append(sum(x for x,n in selected)/sum(n for x,n in selected))
+    # A separate RNG stream and a null-centered sign test, not a bootstrap tail.
+    null_rng = random.Random(20260830)
+    for _ in range(10000):
+        null = sum(x*(1 if null_rng.getrandbits(1) else -1) for x,n in summaries)/len(deltas)
+        extreme += null >= observed-1e-12
+    samples.sort()
+    result.update(status='evaluated', p_value=(extreme+1)/10001,
+                  ci=dict(lower=samples[249],upper=samples[9749]))
+    return result
+
+
+def _swing_pair_metrics(rows, trial, trading_dates, infer=True):
+    validate_swing_pair(rows, trial)
+    current = _evaluate_variant(rows, 'backend_rank', lambda r:(r['rank_no'],r['symbol']))
+    variant = _evaluate_variant(trial, 'trial', lambda r:(r.get('_trial_order',r['rank_no']),r['symbol']), rows)
+    dates = sorted(day for day in current['_daily_primary_metrics']
+                   if _daily_primary_complete(current['_daily_primary_metrics'][day]) and
+                   _daily_primary_complete(variant['_daily_primary_metrics'][day]))
+    narrowed = [{**v, '_daily_top5_returns':{d:v['_daily_top5_returns'][d] for d in dates}}
+                for v in (current,variant)]
+    paired = _paired_top5_comparison(*narrowed, 0, 20260830)
+    paired.pop('bootstrap_95pct_ci',None); paired.pop('qualification',None)
+    paired['lost_dates'] = sorted(set(_by_date(rows))-set(dates))
+    paired['statistics_by_horizon'] = {}
+    paired['auxiliary_same_date_metrics'] = {}
+    pools = _by_date(rows)
+    for horizon in HORIZONS:
+        daily, distributions = [], []
+        for source in (rows, trial):
+            ordered = {d:sorted(items,key=lambda r:(r.get('_trial_order',r['rank_no']),r['symbol']))
+                       for d,items in _by_date(source).items()}
+            daily.append(_daily_top_k(ordered,horizon,5))
+            distributions.append({d:_daily_metrics(items,f'future_return_{horizon}d',pools[d]) for d,items in ordered.items()})
+        paired['auxiliary_same_date_metrics'][str(horizon)] = {}
+        for k in TOP_KS:
+            accepted=[d for d in dates if all(v[d]['pool_complete'] and v[d]['top_k'][str(k)]['complete'] for v in distributions)]
+            summaries=[_aggregate_top_k([v[d] for d in accepted],k) for v in distributions]
+            paired['auxiliary_same_date_metrics'][str(horizon)][str(k)]=dict(dates=accepted,
+                baseline=summaries[0],experiment=summaries[1],
+                no_reversal=bool(accepted) and _not_greater(summaries[0]['avg_return'],summaries[1]['avg_return']) and
+                    _not_greater(summaries[1]['severe_loss_rate'],summaries[0]['severe_loss_rate']))
+        eligible = [d for d in dates if all(v[d]['avg_return'] is not None for v in daily)]
+        deltas = {d:daily[1][d]['avg_return']-daily[0][d]['avg_return'] for d in eligible}
+        paired['statistics_by_horizon'][str(horizon)] = (swing_block_inference(deltas,trading_dates,horizon)
+            if infer else dict(status='descriptive_only',p_value=None,ci=dict(lower=None,upper=None)))
+        paired['statistics_by_horizon'][str(horizon)]['daily_deltas'] = deltas
+    return dict(baseline=current, metrics=variant, paired=paired,
+                sensitivity=paired['leave_one_contributor_out'])
+
+
+def swing_segments(rows, protocol):
+    intervals = {name:protocol['dates'][name] for name in ('development','validation','walk_forward')}
+    import calendar
+    for month in range(3,9):
+        intervals[f'walk_forward_2026-{month:02d}'] = [f'2026-{month:02d}-01',
+            f'2026-{month:02d}-{calendar.monthrange(2026,month)[1]}']
+    result = {}
+    for name,(start,end) in intervals.items():
+        items = [r for r in rows if start <= r['trade_date'] <= end]
+        excluded = {r['trade_date'] for r in items if not (r.get('label_end_dates') or {}).get('20') or
+                    r['label_end_dates']['20'] > end}
+        result[name] = dict(dates=sorted({r['trade_date'] for r in items}-excluded),
+            excluded_dates=sorted(excluded), purge='whole_date_actual_20bar_end_no_refill')
+    return result
+
+
+def evaluate_swing_experiments(rows, protocol, trading_dates, e2_rows=None, e2_evidence=None,
+                               required_coverage=None):
+    """Only the three frozen hypotheses; no strategy registration or promotion."""
+    from app.evaluation.swing_protocol import validate_protocol
+    protocol = validate_protocol(protocol)
+    kinds = {r.get('baseline_kind') for r in rows}
+    if len(kinds)>1:
+        raise ValueError('observed and reconstructed baselines must not mix')
+    experiments = {}
+    provenance = {r.get('probability_source') for r in rows}
+    e1_reasons = []
+    if not rows: e1_reasons.append('empty_reference_pool')
+    if len(provenance)!=1 or None in provenance or any('unknown' in str(x) for x in provenance):
+        e1_reasons.append('homogeneous_known_probability_provenance_required')
+    if any(_as_float(r.get('dd_prob')) is None for r in rows):
+        e1_reasons.append('missing_dd_prob')
+    e1 = []
+    for items in _by_date(rows).values():
+        e1.extend(dict(r,_trial_order=i) for i,r in enumerate(sorted(items,
+            key=lambda r:(_number_or_inf(r.get('dd_prob')),r['rank_no'],r['symbol'])),1))
+    e2_evidence = e2_evidence or {}
+    variants = {'E1':(e1,e1_reasons), 'E2':(e2_rows,e2_evidence.get('unavailable_reasons',
+        [] if e2_rows is not None else ['fixed_pool_turnover_replay_not_supplied'])),
+        'E3':(None,['complete_historical_prefusion_trace_unavailable_no_model_execution'])}
+    for name,(trial,reasons) in variants.items():
+        if reasons or trial is None:
+            experiments[name] = dict(status='unavailable',unavailable_reasons=reasons,metrics=None,
+                paired=None,sensitivity=None,decision='insufficient_evidence')
+            continue
+        result = _swing_pair_metrics(rows,trial,trading_dates)
+        result.update(status='available',unavailable_reasons=[],segments={},groups={})
+        for segment, meta in swing_segments(rows,protocol).items():
+            accepted = set(meta['dates'])
+            result['segments'][segment] = dict(**meta, **_swing_pair_metrics(
+                [r for r in rows if r['trade_date'] in accepted],
+                [r for r in trial if r['trade_date'] in accepted],trading_dates,False))
+        dimensions = {'action':lambda r:r.get('action') or 'unknown',
+            'analysis':lambda r:'full' if r.get('feature_bar_count',0)>=60 and r.get('analysis_status')!='degraded' else 'proxy_or_unknown',
+            'probability_source':lambda r:r.get('probability_source') or 'unknown',
+            'market_state':lambda r:r.get('market_state_tag') or 'unknown',
+            'source':lambda r:'tushare_only' if str(r.get('history_source')).lower()=='tushare' else 'other'}
+        for dimension,key in dimensions.items():
+            # Group by baseline attributes, never trial gate outcomes: same pool.
+            names = set(map(key,rows)) | ({'buy','watch'} if dimension=='action' else set())
+            result['groups'][dimension] = {}
+            for group in sorted(names):
+                base = [r for r in rows if key(r)==group]
+                ids = {(r['trade_date'],r['symbol']) for r in base}
+                result['groups'][dimension][group] = _swing_pair_metrics(base,
+                    [r for r in trial if (r['trade_date'],r['symbol']) in ids],trading_dates,False)
+        experiments[name] = result
+    holm = swing_holm({name:(r['paired']['statistics_by_horizon']['10']['p_value']
+        if r['status']=='available' else None) for name,r in experiments.items()})
+    for name,result in experiments.items():
+        result['holm'] = holm[name]
+        if result['status']!='available': continue
+        paired = result['paired']; primary = paired['paired_primary_metrics']
+        base,trial = primary['baseline'],primary['experiment']
+        ci = paired['statistics_by_horizon']['10']['ci']
+        q = protocol['qualification']; sensitivity = result['sensitivity']
+        known_states = {key:value for key,value in result['groups']['market_state'].items() if key!='unknown'}
+        state_counts = {key:value['paired']['matched_date_count'] for key,value in known_states.items()}
+        # No state-specific sample minimum was frozen; never invent a passing one.
+        checks = dict(signal_dates=len(set(r['trade_date'] for r in rows))>=q['minimum_signal_dates'],
+            paired_dates=paired['matched_date_count']>=q['minimum_paired_dates'],
+            required_coverage=required_coverage is not None and required_coverage>=q['minimum_required_data_coverage'],
+            optional_coverage=name!='E2' or e2_evidence.get('field_coverage',0)>=q['minimum_optional_field_coverage'],
+            median=_greater(trial['top5_median'],base['top5_median']),
+            ndcg=_greater(trial['ndcg_at_10'],base['ndcg_at_10']),
+            excess=_greater(trial['top5_excess'],base['top5_excess']),
+            severe_loss=_not_greater(trial['top5_severe_loss'],base['top5_severe_loss']),
+            absolute_positive=bool(paired['matched_dates']) and mean(result['metrics']['_daily_top5_returns'][d]
+                for d in paired['matched_dates'])>0,
+            ci_positive=ci['lower'] is not None and ci['lower']>0, holm=holm[name]['reject'],
+            leave_date=sensitivity['positive_after_every_day_removal'],
+            leave_symbol=sensitivity['positive_after_every_symbol_removal'])
+        source = result['groups']['source'].get('tushare_only')
+        checks['source_direction'] = bool(source) and _greater(
+            source['paired']['mean_daily_top5_return_difference'],0) and _greater(paired['mean_daily_top5_return_difference'],0)
+        checks['market_state_coverage'] = len(state_counts)>=q['minimum_market_states'] and all(n>=q['minimum_paired_dates'] for n in state_counts.values())
+        checks['market_state_direction'] = bool(known_states) and all(_not_greater(0,
+            v['paired']['mean_daily_top5_return_difference']) for v in known_states.values())
+        checks['auxiliary_no_reversal'] = all(paired['auxiliary_same_date_metrics'][str(h)][str(k)]['no_reversal']
+            for h in HORIZONS for k in TOP_KS if (h,k)!=(10,5))
+        result['qualification'] = dict(checks=checks,market_state_paired_counts=state_counts,
+            adequate_state_basis='conservative_use_existing_minimum_paired_dates_per_state_not_new_tuning',
+            execution='pending_task_7', historical_production_parity='unavailable',
+            source_independence='all_sources_and_tushare_only_are_not_independent_when_identical')
+        result['provisional_ranking_candidate'] = all(checks.values())
+        enough = all(checks[k] for k in ('signal_dates','paired_dates','required_coverage','optional_coverage','market_state_coverage'))
+        result['decision'] = 'insufficient_evidence' if not enough or all(checks.values()) else 'no_shadow_candidate'
+    available = [r for r in experiments.values() if r['status']=='available']
+    return dict(experiments=experiments, candidate_pool=_candidate_pool_metrics(rows),
+        decision='no_shadow_candidate' if available and all(r['decision']=='no_shadow_candidate' for r in available) else 'insufficient_evidence',
+        formal_shadow_candidate=None, execution_run=False, frozen_protocol_sha256=protocol['protocol_sha256'],
+        previously_examined_intervals=protocol['previously_examined_intervals'],
+        historical_status='retrospective_not_independent_unseen', e2_evidence=e2_evidence,
+        ui_order=_evaluate_variant(rows,'ui_order',lambda r:(r['ui_rank_no'],r['symbol']))
+            if rows and all(r.get('ui_rank_no') is not None for r in rows) else dict(status='unavailable'),
+        e3_future_collection='Record rule_up/dd, pre/postfusion scores, model_up/dd/id/schema, fusion coefficients '
+            'and gates during existing inference only; separate future task; historical traces remain absent')
+
+
 def compare_current_and_a(rows: Sequence[Dict[str, Any]], bootstrap_iterations: int = 10000) -> Dict[str, Any]:
     """Forward observation only: reuse fixed-pool metrics, never select/deploy a model."""
     masked = []
@@ -220,6 +445,13 @@ def _horizon_metrics(ordered_by_date: Dict[str, List[Dict[str, Any]]], horizon: 
     daily: Dict[str, Dict[str, Any]] = {}
     for trade_date, rows in ordered_by_date.items():
         daily[trade_date] = _daily_metrics(rows, return_key, pools[trade_date])
+    daily_groups = [_rank_groups({day:items},return_key) for day,items in eligible_by_date.items()]
+    equal_groups = []
+    for i,label in enumerate(('1-5','6-10','11-20','21+')):
+        values = [groups[i] for groups in daily_groups if groups[i]['candidate_count']]
+        equal_groups.append(dict(rank_group=label,evaluable_dates=len(values),candidate_count=sum(v['candidate_count'] for v in values),
+            **{key:_mean_or_none([v[key] for v in values]) for key in
+               ('avg_return','median_return','positive_return_rate','severe_loss_rate')}))
     return {
         "horizon_days": horizon,
         "evaluated_date_count": sum(item["pool_complete"] for item in daily.values()),
@@ -232,6 +464,12 @@ def _horizon_metrics(ordered_by_date: Dict[str, List[Dict[str, Any]]], horizon: 
         "mrr": _mean_or_none([item["mrr"] for item in daily.values()]),
         "top_k": {str(k): _aggregate_top_k(daily.values(), k) for k in TOP_KS},
         "rank_groups": _rank_groups(eligible_by_date, return_key),
+        "legacy_rank_aggregation": "row_pooled_descriptive_not_protocol_date_weighted",
+        "daily_equal_weight_rank_groups": equal_groups,
+        "daily_equal_weight_monotonicity": _monotonic_rank_groups(equal_groups),
+        "daily_equal_weight_spearman": _mean_or_none([_spearman(
+            [float(r['evaluated_rank_no']) for r in items],[float(r[return_key]) for r in items])
+            for items in eligible_by_date.values()]),
         "spearman_rank_vs_future_return": _spearman(
             [float(row["evaluated_rank_no"]) for rows in eligible_by_date.values() for row in rows],
             [float(row[return_key]) for rows in eligible_by_date.values() for row in rows],
@@ -342,6 +580,9 @@ def _aggregate_top_k(daily: Iterable[Dict[str, Any]], k: int) -> Dict[str, Any]:
     output["incomplete_date_count"] = sum(not item["complete"] for item in values)
     output["input_date_count"] = len(values)
     output["completeness"] = _ratio(output["complete_date_count"], len(values))
+    output['planned_slots'] = sum(item['slot_count'] for item in values)
+    output['observed_slots'] = sum(item['slot_count']-item['unknown_slot_count'] for item in values)
+    output['slot_coverage'] = _ratio(output['observed_slots'],output['planned_slots'])
     return output
 
 

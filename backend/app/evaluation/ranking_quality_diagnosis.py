@@ -498,6 +498,57 @@ def _factor_analysis(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     return output
 
 
+def swing_diagnostics(rows, daily):
+    """Saved-stage associations only; candidate executability is not live health."""
+    factors = _factor_analysis(rows)
+    for factor,report in factors.items():
+        for horizon,result in report['horizons'].items():
+            key = f'future_return_{horizon}d'
+            correlations=[]
+            for items in _by_date(rows).values():
+                usable=[r for r in items if _number(r.get(factor)) is not None and _number(r.get(key)) is not None]
+                correlations.append(_spearman([r[factor] for r in usable],[r[key] for r in usable]))
+            result['daily_equal_weight_spearman']=_mean_or_none([v for v in correlations if v is not None])
+            result['evaluable_dates']=sum(v is not None for v in correlations)
+            result['aggregation']='spearman_and_quantiles_row_pooled_descriptive; daily_spearman_date_equal_weight'
+    def stage(predicate):
+        entered=[r for r in rows if predicate(r)]
+        lost=[r for r in rows if not predicate(r)]
+        strong=sorted([r for r in lost if _number(r.get('future_return_10d')) is not None and r['future_return_10d']>0],
+                      key=lambda r:(-r['future_return_10d'],r['trade_date'],r['symbol']))
+        weak=sorted([r for r in entered if _number(r.get('future_return_10d')) is not None and r['future_return_10d']<=-8],
+                    key=lambda r:(r['future_return_10d'],r['trade_date'],r['symbol']))
+        return dict(input_count=len(rows),entered_count=len(entered),lost_count=len(lost),
+            lost_positive_count=len(strong),entered_severe_loss_count=len(weak),
+            lost_strong_examples=[_sample_row(r) for r in strong[:20]],
+            entered_weak_examples=[_sample_row(r) for r in weak[:20]],
+            label_definition='diagnostic_only_positive_net_10d_and_severe_loss_le_minus8_not_strategy_thresholds')
+    risks={}
+    for horizon in (5,10,20):
+        per_day=[]
+        for items in _by_date(rows).values():
+            paths=[(r.get('horizon_paths') or {}).get(str(horizon),{}) for r in items]
+            per_day.append({key:_mean_or_none([p[key] for p in paths if _number(p.get(key)) is not None])
+                            for key in ('mfe','mae')})
+        risks[str(horizon)]={key:_mean_or_none([r[key] for r in per_day if r[key] is not None]) for key in ('mfe','mae')}
+    return dict(factors=factors,association_not_causation=True,risk_paths_date_equal_weight=risks,
+        missingness_by_rank={band:dict(rows=len(items),missing_10d=sum(_number(r.get('future_return_10d')) is None for r in items))
+            for band,items in ((label,[r for r in rows if lower<=r['rank_no']<=upper])
+                for label,lower,upper in [('1-5',1,5),('6-10',6,10),('11-20',11,20),('21+',21,999999)])},
+        funnel=dict(historical_full_market=dict(status='unavailable',
+            reason='saved stages do not contain full-market forward labels or historical name/ST/industry; no full-A-share recall claim'),
+            saved_daily_counts=[dict(trade_date=r['identity']['trade_date'],counts=r['funnel'],
+                analysis_pool_count=len(r.get('frozen_analysis_pool',[]))) for r in daily],
+            recall_to_ranking=dict(status='counts_only_missing_labels_for_removed_preanalysis_candidates'),
+            ranking_to_action=stage(lambda r:r.get('action')=='buy'),
+            ranking_to_executable=stage(lambda r:r.get('decision_executable') is True)),
+        execution=dict(status='pending_task_7',global_health='separate_unverified_not_candidate_quality',
+            real_money_rule='candidate_executable AND live_ready AND grade_A_or_B; no authorization',
+            tradability={key:sum((r.get('tradable_label') or 'unknown')==key for r in rows)
+                         for key in sorted({r.get('tradable_label') or 'unknown' for r in rows})}),
+        concentration=dict(industry='historical_unknown_no_board_proxy',market_cap='daily_basic_sidecar_no_unfrozen_buckets'))
+
+
 def _counterfactual(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     current = _strategy_metrics(rows, lambda row: row["rank_no"])
     raw_available = [row for row in rows if row.get("raw_total") is not None]

@@ -14,6 +14,97 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/run_swing_benchmark.py'
 
 
 class SwingBenchmarkTests(unittest.TestCase):
+    def test_turnover_uses_fixed_pool_and_preserves_removed_gate_slots(self):
+        from app.evaluation.swing_replay import replay_day,prepare_inputs,digest,decision_projection,label_candidates
+        from unittest.mock import patch
+        data=fixture(); saved=replay_day(data,self.protocol)
+        prepared=prepare_inputs(data,self.protocol)
+        input_hash=digest(dict(quotes=prepared['quotes'],histories={s:df.to_dict('records') for s,df in prepared['histories'].items()}))
+        current=self.cli._fixed_pool_compute(prepared,saved)
+        self.assertEqual(digest(decision_projection(current['picks'])),saved['identity']['decisions_sha256'])
+        actual=self.cli._fixed_pool_compute(prepared,saved,True)
+        self.assertEqual(input_hash,digest(dict(quotes=prepared['quotes'],histories={s:df.to_dict('records') for s,df in prepared['histories'].items()})))
+        self.assertEqual({r['symbol'] for r in actual['picks']},{r['symbol'] for r in current['picks']})
+        self.assertNotEqual(decision_projection(actual['picks']),decision_projection(current['picks']))
+        rows=label_candidates(saved['candidates'],data['histories'],CONFIG)
+        self.assertTrue(hasattr(self.cli,'preserve_turnover_slots'))
+        missing=rows[0]['symbol']; picks=[p for p in actual['picks'] if p['symbol']!=missing]
+        trial,changes,new=self.cli.preserve_turnover_slots(rows,picks)
+        self.assertEqual(len(rows),len(trial))
+        self.assertEqual(trial[0]['symbol'],missing)
+        self.assertTrue(trial[0]['_selection_unknown'])
+        from app.evaluation.ranking_quality_experiments import validate_swing_pair,_evaluate_variant
+        validate_swing_pair(rows,trial)
+        self.assertIsNone(_evaluate_variant(trial,'trial',lambda r:r['_trial_order'],rows)['metrics']['10']['top_k']['3']['avg_return'])
+        self.assertTrue(changes[0]['gate_removed'])
+        self.assertFalse(new)
+        complete,_,_=self.cli.preserve_turnover_slots(rows,actual['picks'])
+        for row in complete:
+            self.assertEqual(row['total'],row['score_breakdown']['total'])
+            self.assertEqual(row['decision_executable'],row['decision']['executable'])
+
+    def test_turnover_missing_zero_and_late_field_fail_without_pool_refill(self):
+        from app.evaluation.swing_replay import replay_day,label_candidates
+        from unittest.mock import patch
+        data=fixture(); saved=replay_day(data,self.protocol)
+        rows=label_candidates(saved['candidates'],data['histories'],CONFIG)
+        saved['frozen_analysis_pool'][0]['actual_daily_basic']['turnover_rate']=None
+        with patch.object(self.cli,'date_files',side_effect=AssertionError('must fail coverage before replay')):
+            trial,evidence=self.cli._turnover_trials(self.root,{},[saved],rows,CONFIG,
+                self.protocol,lambda _:None)
+        self.assertIsNone(trial)
+        self.assertIn('actual_turnover_coverage_below_95pct',evidence['unavailable_reasons'])
+        saved['frozen_analysis_pool'][0]['actual_daily_basic']['turnover_rate']=0
+        with patch.object(self.cli,'date_files',return_value=iter([])):
+            trial,evidence=self.cli._turnover_trials(self.root,{},[saved],rows,CONFIG,
+                self.protocol,lambda _:None)
+        self.assertEqual(evidence['field_coverage'],1)
+        self.assertEqual(evidence['excluded_dates'],[rows[0]['trade_date']])
+        self.assertEqual(len(evidence['true_zero_actual']),1)
+
+    def test_changed_final_pool_is_unavailable_not_survivor_efficacy(self):
+        from app.evaluation.swing_replay import replay_day,label_candidates
+        from unittest.mock import patch
+        data=fixture(); saved=replay_day(data,self.protocol)
+        later=fixture(81); later_saved=replay_day(later,self.protocol)
+        rows=label_candidates(saved['candidates']+later_saved['candidates'],later['histories'],CONFIG)
+        by_day={}
+        for history in later['histories'].values():
+            for row in history: by_day.setdefault(self.cli.iso_day(row['trade_date']),[]).append(row)
+        original=self.cli._fixed_pool_compute
+        def dropped(prepared,saved,actual=False):
+            result=original(prepared,saved,actual)
+            if actual: result['picks']=result['picks'][1:]
+            return result
+        with patch.object(self.cli,'date_files',return_value=iter((d,dict(rows=r)) for d,r in sorted(by_day.items()))), patch.object(self.cli,'_fixed_pool_compute',side_effect=dropped):
+            trial,evidence=self.cli._turnover_trials(self.root,{},[saved,later_saved],rows,CONFIG,self.protocol,lambda _:None)
+        self.assertEqual(len(trial),len(saved['candidates']))
+        self.assertIn('changed_final_pool_after_original_gates_or_caps_no_safe_same_pool_ranking',evidence['unavailable_reasons'])
+        self.assertEqual(evidence['early_stop']['tested_dates'],1)
+        self.assertEqual(evidence['early_stop']['total_eligible_dates'],2)
+        self.assertEqual(evidence['early_stop']['untested_gate_dates'],[later_saved['identity']['trade_date']])
+
+
+    def test_experiments_frozen_hashes_and_no_live_entry(self):
+        self.assertTrue(hasattr(self.cli, 'run_experiments'))
+        dataset, observation = self.dataset()
+        self.cli.run_baseline(self.protocol, dataset, observation, self.root/'base', progress=lambda _:None)
+        first = self.cli.run_experiments(self.protocol, dataset, observation, self.root/'base',
+                                        self.root/'e1', progress=lambda _:None)
+        second = self.cli.run_experiments(self.protocol, dataset, observation, self.root/'base',
+                                         self.root/'e2', progress=lambda _:None)
+        self.assertEqual(first, second)
+        metrics = self.cli.read_json(self.root/'e1'/'metrics.json')
+        e2 = metrics['reconstructed_research']['experiments']['E2']
+        self.assertEqual(e2['status'], 'available', e2.get('unavailable_reasons'))
+        self.assertEqual(first['experiments_run'], ['E1','E2','E3'])
+        self.assertFalse(first['execution_run'])
+        path = self.root/'base'/'reconstructed_research.json'
+        value = self.cli.read_json(path); value[0]['future_return_10d'] = 999
+        path.write_text(json.dumps(value))
+        with self.assertRaisesRegex(ValueError, 'hash'):
+            self.cli.run_experiments(self.protocol, dataset, observation, self.root/'base', self.root/'bad')
+
     def setUp(self):
         self.assertTrue(SCRIPT.exists(), 'offline baseline CLI is not implemented')
         spec = importlib.util.spec_from_file_location('swing_benchmark', SCRIPT)

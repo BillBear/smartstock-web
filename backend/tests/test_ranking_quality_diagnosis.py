@@ -16,6 +16,19 @@ from app.evaluation.ranking_quality_diagnosis import (
 
 
 class RankingQualityDiagnosisTests(unittest.TestCase):
+    def test_swing_diagnostics_separates_candidate_gate_from_global_health(self):
+        import app.evaluation.ranking_quality_diagnosis as module
+        self.assertTrue(hasattr(module,'swing_diagnostics'))
+        rows = [dict(trade_date='2026-07-01',symbol=str(i),rank_no=i,action='buy',
+                     decision_executable=True,decision_grade='B',decision_mode='paper_only',
+                     position_pct=0,trend=i,future_return_5d=i,future_return_10d=i,
+                     future_return_20d=i,market_state_tag='unknown') for i in range(1,4)]
+        result=module.swing_diagnostics(rows,[])
+        self.assertEqual(result['funnel']['ranking_to_executable']['entered_count'],3)
+        self.assertEqual(result['funnel']['historical_full_market']['status'],'unavailable')
+        self.assertEqual(result['execution']['status'],'pending_task_7')
+        self.assertEqual(result['factors']['trend']['horizons']['10']['daily_equal_weight_spearman'],1)
+
     def test_legacy_diagnosis_does_not_refill_missing_top_candidate(self):
         rows = [{"trade_date": "2026-07-01", "symbol": str(i), "rank_no": i,
                  "tradable_label": "tradable", "future_return_10d": 10 if i > 1 else None}

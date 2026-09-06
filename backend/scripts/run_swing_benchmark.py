@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cache-only baseline. No application bootstrap, provider, DB or ML execution."""
+"""Cache-only baseline and frozen experiments; no provider, DB or ML execution."""
 import argparse
 from collections import defaultdict, deque
 import gzip
@@ -7,6 +7,8 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+from copy import deepcopy
+import math
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -16,6 +18,208 @@ from app.evaluation.swing_replay import (BAR_FIELDS, LIMITATIONS, QUOTE_RECIPE, 
 from app.evaluation.ranking_quality_diagnosis import (
     quarantine_ambiguous_dates, validate_labeled_snapshot_sample)
 from app.evaluation.ranking_quality_experiments import _evaluate_variant, _candidate_pool_metrics
+
+
+def _fixed_pool_compute(prepared, saved, actual=False):
+    from app.evaluation.swing_replay import FrozenData, FrozenStore, OfflineCoach, signal_clock
+    pool = deepcopy(saved['frozen_analysis_pool'])
+    if actual:
+        for item in pool:
+            item['quote']['turnover_rate'] = item['actual_daily_basic']['turnover_rate']
+    class FixedPoolCoach(OfflineCoach):
+        def _build_dynamic_candidates(self, *args, **kwargs):
+            return dict(candidates=[deepcopy(item['quote']) for item in pool], meta=deepcopy(saved['funnel']))
+    data, store = FrozenData(prepared), FrozenStore()
+    service = FixedPoolCoach(data,store,news_service=None,ml_model_service=None)
+    service.fallback_blocked = False
+    try:
+        with signal_clock(prepared['day']):
+            now = service._now_ts(); quotes = prepared['quotes']
+            service._universe_state.update(entries=deepcopy(quotes),
+                entry_map={r['symbol']:deepcopy(r) for r in quotes}, last_full_refresh_ts=now,
+                last_refresh_attempt_ts=now,last_incremental_refresh_ts=now)
+            config = prepared['config']; risk = deepcopy(service.DEFAULT_RISK_PROFILE)
+            risk.update(risk_level=config['risk_level'],max_position_pct=config['max_position_pct'])
+            full,_ = service._compute_today_picks(80,prepared['identity']['user_id'],prepared['day'],
+                prepared['identity']['strategy_code'],None,config,risk,config['score_threshold'])
+    finally:
+        service._pick_executor.shutdown(wait=True)
+        if store.forbidden or data.forbidden:
+            raise RuntimeError('forbidden experiment IO')
+    if service.analysis_inputs != [item['quote'] for item in pool]:
+        raise ValueError('fixed analysis pool changed')
+    return full
+
+
+def preserve_turnover_slots(rows, picks):
+    """Retain unknown dropped slots for diagnostics, never manufacture a ranking."""
+    from app.evaluation.ranking_quality_diagnosis import _flatten_snapshot
+    original=sorted(rows,key=lambda r:r['rank_no']); by_symbol={p['symbol']:p for p in picks}
+    original_ids={r['symbol'] for r in original}
+    survivors=iter(sorted((r for r in original if r['symbol'] in by_symbol),key=lambda r:by_symbol[r['symbol']]['rank_no']))
+    trial,changes=[],[]
+    fields=('action','decision_grade','decision_executable','score_gate_status','position_pct',
+            'entry_range','take_profit','stop_loss','total','raw_total','up_prob','dd_prob')
+    for slot,old in enumerate(original,1):
+        if old['symbol'] not in by_symbol:
+            item=dict(old,_selection_unknown=True,_trial_order=slot,
+                      experiment_gate_status='removed_by_original_postprocessing')
+            changes.append(dict(trade_date=old['trade_date'],symbol=old['symbol'],gate_removed=True,
+                                old={k:old.get(k) for k in fields},new=None))
+        else:
+            source=next(survivors); pick=by_symbol[source['symbol']]
+            item=dict(source,**{k:v for k,v in _flatten_snapshot(pick).items()
+                if k not in ('symbol','trade_date','rank_no','name')},_trial_order=slot)
+            for key in ('position_pct','entry_range','take_profit','stop_loss','score_gate_status',
+                        'decision','score_breakdown','model_probability','reasons','risks'):
+                item[key]=deepcopy(pick.get(key))
+            changed={k:dict(old=source.get(k),new=item.get(k)) for k in fields if source.get(k)!=item.get(k)}
+            if changed: changes.append(dict(trade_date=source['trade_date'],symbol=source['symbol'],fields=changed))
+        trial.append(item)
+    return trial,changes,sorted(set(by_symbol)-original_ids)
+
+
+def _turnover_trials(root, manifest, daily, rows, config, protocol, progress):
+    from app.evaluation.swing_replay import prepare_inputs, decision_projection
+    saved_days = {r['identity']['trade_date']:r for r in daily}
+    baseline = defaultdict(list)
+    for row in rows: baseline[row['trade_date']].append(row)
+    pool = [(day,item) for day,saved in sorted(saved_days.items()) for item in saved['frozen_analysis_pool']]
+    missing, zero, no_proxy = [], [], []
+    for day,item in pool:
+        value = item['actual_daily_basic'].get('turnover_rate')
+        key = [day,item['quote']['symbol']]
+        if type(value) not in (int,float) or not math.isfinite(value) or value<0: missing.append(key)
+        elif value == 0: zero.append(key)
+        if not item.get('proxy_was_used'): no_proxy.append(key)
+    coverage = (len(pool)-len(missing))/len(pool) if pool else 0
+    excluded = sorted({day for day,symbol in missing+zero})
+    evidence = dict(field_coverage=coverage,full_sample_analysis_rows=len(pool), missing_actual=missing,
+        true_zero_actual=zero, excluded_dates=excluded,unavailable_reasons=[],parity_dates=[],changes=[],
+        common_complete_field_dates=sorted(set(baseline)-set(excluded)),
+        slot_policy='gate removals stay unknown at original slots; survivors reorder only remaining slots; no refill',
+        zero_policy='true zero retained in source; current method would reapply proxy, so whole date unavailable',
+        comparison_pool='baseline displayed symbols; full frozen preanalysis pool retained for postprocessing',
+        new_output_symbols_excluded=[],global_health='unverified_separate_from_candidate_executable')
+    if not pool: evidence['unavailable_reasons'].append('no_frozen_analysis_pool')
+    if no_proxy: evidence['unavailable_reasons'].append('proxy_was_not_used')
+    if coverage < protocol['qualification']['minimum_optional_field_coverage']:
+        evidence['unavailable_reasons'].append('actual_turnover_coverage_below_95pct')
+    if evidence['unavailable_reasons']: return None,evidence
+    histories = defaultdict(lambda:deque(maxlen=120)); trial=[]
+    for day,value in date_files(root,manifest):
+        for row in value['rows']:
+            if _usable(row): histories[row['symbol']].append({k:row.get(k) for k in BAR_FIELDS})
+        if day not in baseline or day in excluded: continue
+        saved = saved_days[day]
+        prepared = prepare_inputs(dict(trade_date=day,rows=value['rows'],histories=histories,
+            strategy_config=config,identity=protocol['identity']),protocol)
+        input_hash = digest(dict(quotes=prepared['quotes'],histories={s:df.to_dict('records')
+            for s,df in prepared['histories'].items()}))
+        if input_hash != saved['provenance']['input_sha256']:
+            raise ValueError('frozen feature input hash mismatch')
+        for item in saved['frozen_analysis_pool']:
+            if item['actual_daily_basic'] != prepared['sidecars'][item['quote']['symbol']]['actual_daily_basic']:
+                raise ValueError('frozen actual field differs from dataset')
+        parity = _fixed_pool_compute(prepared,saved)
+        if digest(decision_projection(parity['picks'])) != saved['identity']['decisions_sha256']:
+            evidence['unavailable_reasons'].append('fixed_pool_postprocessing_parity_mismatch:'+day)
+            return None,evidence
+        evidence['parity_dates'].append(day)
+        actual = _fixed_pool_compute(prepared,saved,True)
+        day_trial,changes,new=preserve_turnover_slots(baseline[day],actual['picks'])
+        evidence['changes'].extend(changes)
+        evidence['new_output_symbols_excluded'].extend([[day,s] for s in new])
+        trial.extend(day_trial)
+        if new or any(r.get('_selection_unknown') for r in day_trial):
+            # One frozen-contract counterexample disqualifies E2 for the run;
+            # never search remaining dates for a more favorable passing subset.
+            eligible=set(evidence['common_complete_field_dates'])
+            evidence['early_stop']=dict(reason='first_final_pool_divergence',first_counterexample_date=day,
+                tested_dates=len(evidence['parity_dates']),total_eligible_dates=len(eligible),
+                untested_gate_dates=sorted(eligible-set(evidence['parity_dates'])),
+                action_impact_scope='tested_dates_only_not_full_period')
+            progress(f'phase=turnover status=unavailable early_stop=final_pool_divergence date={day}')
+            break
+        if len(evidence['parity_dates']) % 20 == 0:
+            progress(f'phase=turnover parity_dates={len(evidence["parity_dates"])} date={day}')
+    evidence['tested_trial_dates'] = sorted(set(r['trade_date'] for r in trial))
+    changed_pool_dates=sorted({r['trade_date'] for r in trial if r.get('_selection_unknown')} |
+                              {day for day,symbol in evidence['new_output_symbols_excluded']})
+    evidence['changed_final_pool_dates']=changed_pool_dates
+    if changed_pool_dates:
+        evidence['unavailable_reasons'].append('changed_final_pool_after_original_gates_or_caps_no_safe_same_pool_ranking')
+    if not trial: evidence['unavailable_reasons'].append('no_complete_field_signal_dates')
+    return trial,evidence
+
+
+def run_experiments(protocol, dataset, observation, baseline, output_dir, progress=None):
+    from app.evaluation.ranking_quality_experiments import evaluate_swing_experiments
+    from app.evaluation.ranking_quality_diagnosis import swing_diagnostics
+    progress = progress or (lambda message:print(message,file=sys.stderr,flush=True))
+    protocol = validate_protocol(protocol); root=Path(dataset); base=Path(baseline); output=Path(output_dir)
+    if output.exists() and any(output.iterdir()): raise ValueError('output must be fresh; refusing overwrite')
+    manifest = dataset_index(root,protocol); frozen=read_json(base/'manifest.json')
+    artifacts = {}
+    for name,expected in frozen['artifacts'].items():
+        if Path(name).name != name: raise ValueError('baseline artifact path escape')
+        artifacts[name]=read_json(base/name)
+        if digest(artifacts[name]) != expected: raise ValueError('baseline artifact hash mismatch: '+name)
+    identity = artifacts['identity.json']
+    if identity != frozen['identity'] or identity['schema_version']!='swing-baseline-v1':
+        raise ValueError('baseline identity mismatch')
+    if artifacts['protocol.json'] != protocol: raise ValueError('baseline protocol mismatch')
+    for key in ('dataset_sha256','coverage_sha256'):
+        if identity[key]!=manifest[key]: raise ValueError('baseline dataset hash mismatch')
+    if identity['dataset_identity_sha256']!=manifest['identity_sha256']:
+        raise ValueError('baseline dataset identity mismatch')
+    observed=read_json(observation); config=observed['strategy_config']
+    validate_config(config,observed['identity'],protocol)
+    if Path(observation).stem!=digest(observed) or identity['observation_sha256']!=digest(observed):
+        raise ValueError('baseline observation hash mismatch')
+    if identity['config_sha256']!=digest(config) or observed['config_sha256']!=digest(config):
+        raise ValueError('baseline config hash mismatch')
+    backend=Path(__file__).resolve().parents[1]
+    for name,sha in identity['implementation_sha256'].items():
+        # Evaluation files evolve in Task 6; all frozen replay/production code must match.
+        if name.startswith('app/services/') or name in ('app/evaluation/swing_replay.py','app/evaluation/swing_protocol.py'):
+            if hashlib.sha256((backend/name).read_bytes()).hexdigest()!=sha:
+                raise ValueError('baseline replay implementation hash mismatch: '+name)
+    rows=artifacts['reconstructed_research.json']; daily=artifacts['daily_replay.json']
+    for r in rows:
+        if r.get('baseline_kind')!='reconstructed_research': raise ValueError('baseline kind mismatch')
+        for key,val in protocol['identity'].items():
+            if r.get(key)!=val: raise ValueError('baseline candidate identity mismatch')
+    rows,validation=validate_labeled_snapshot_sample(rows)
+    actual_dates=[]; required=total=0
+    for day,value in date_files(root,manifest):
+        if value['rows']: actual_dates.append(day)
+        if value['role']=='signal':
+            total+=len(value['rows']); required+=sum(_usable(r) for r in value['rows'])
+    e2,evidence=_turnover_trials(root,manifest,daily,rows,config,protocol,progress)
+    common_dates = set(r['trade_date'] for r in e2) if e2 is not None and not evidence['unavailable_reasons'] else set(r['trade_date'] for r in rows)
+    common=[r for r in rows if r['trade_date'] in common_dates]
+    metrics=dict(reconstructed_research=evaluate_swing_experiments(common,protocol,actual_dates,
+        e2,evidence,required/total if total else None),
+        full_sample=dict(metrics=baseline_metrics(rows,protocol),signal_dates=sorted(set(r['trade_date'] for r in rows)),
+            lost_dates=sorted(set(r['trade_date'] for r in rows)-common_dates),required_rows=required,total_rows=total),
+        observed_production=evaluate_swing_experiments(artifacts['observed_production.json'],protocol,actual_dates),
+        diagnostics=swing_diagnostics(rows,daily),comparison_policy='within_kind_only_no_cross_kind_subtraction',
+        validation=validation)
+    run_identity=dict(schema_version='swing-experiments-v1',mode='experiments',protocol_sha256=protocol['protocol_sha256'],
+        dataset_sha256=manifest['dataset_sha256'],baseline_manifest_sha256=digest(frozen),config_sha256=digest(config),
+        implementation_sha256={name:hashlib.sha256((backend/name).read_bytes()).hexdigest() for name in
+            ('scripts/run_swing_benchmark.py','app/evaluation/ranking_quality_experiments.py','app/evaluation/ranking_quality_diagnosis.py')})
+    values={'protocol.json':protocol,'identity.json':run_identity,'metrics.json':metrics,
+            'turnover_trial.json':e2,'turnover_evidence.json':evidence}
+    result=dict(identity=run_identity,status=metrics['reconstructed_research']['decision'],
+        experiments_run=['E1','E2','E3'],execution_run=False,formal_shadow_candidate=None,
+        counts=dict(reference_rows=len(rows),common_rows=len(common),common_dates=len(common_dates)),
+        artifacts={name:digest(value) for name,value in values.items()})
+    output.mkdir(parents=True,exist_ok=True)
+    for name,value in values.items(): write_json(output/name,value)
+    write_json(output/'manifest.json',result)
+    return result
 
 
 def read_json(path):
@@ -250,11 +454,16 @@ def main(argv=None):
     parser.add_argument('--protocol', required=True)
     parser.add_argument('--dataset', required=True)
     parser.add_argument('--observation', required=True, help='Frozen content-addressed observation JSON; never DB')
-    parser.add_argument('--mode', choices=['baseline'], default='baseline')
+    parser.add_argument('--mode', choices=['baseline','experiments'], default='baseline')
+    parser.add_argument('--baseline', help='Frozen Task 5 output directory; required for experiments')
     parser.add_argument('--output-dir', required=True)
     args = parser.parse_args(argv)
     try:
-        result = run_baseline(read_json(args.protocol), args.dataset, args.observation, args.output_dir)
+        if args.mode == 'experiments':
+            if not args.baseline: raise ValueError('--baseline required for experiments')
+            result = run_experiments(read_json(args.protocol),args.dataset,args.observation,args.baseline,args.output_dir)
+        else:
+            result = run_baseline(read_json(args.protocol), args.dataset, args.observation, args.output_dir)
     except (ValueError, KeyError, OSError, RuntimeError) as exc:
         print('blocked: '+str(exc), file=sys.stderr)
         return 1

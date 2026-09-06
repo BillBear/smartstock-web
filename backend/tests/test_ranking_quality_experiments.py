@@ -26,6 +26,108 @@ def _row(trade_date, symbol, rank_no, dd_prob, risk_adjusted, return_10d, action
 
 
 class RankingQualityExperimentTests(unittest.TestCase):
+    def test_adequate_null_improvement_is_no_shadow_not_an_execution_pass(self):
+        import app.evaluation.ranking_quality_experiments as module
+        from tests.test_swing_replay import PROTOCOL
+        from datetime import date,timedelta
+        import json
+        dates=[(date(2025,1,1)+timedelta(days=i)).isoformat() for i in range(130)]
+        rows=[dict(_row(day,str(i),i,.2,i,i),probability_source='rule',baseline_kind='reconstructed_research',
+            feature_bar_count=120,market_state_tag='bull' if n<65 else 'neutral',
+            label_end_dates={'20':(date.fromisoformat(day)+timedelta(days=20)).isoformat()})
+            for n,day in enumerate(dates) for i in range(1,7)]
+        result=module.evaluate_swing_experiments(rows,json.loads(PROTOCOL.read_text()),dates,required_coverage=1)
+        self.assertEqual(result['decision'],'no_shadow_candidate')
+        self.assertEqual(result['experiments']['E1']['holm']['p_value'],1)
+        self.assertIsNone(result['formal_shadow_candidate'])
+        self.assertFalse(result['execution_run'])
+
+    def test_swing_purge_uses_actual_end_whole_dates_and_ties_keep_original_rank(self):
+        import app.evaluation.ranking_quality_experiments as module
+        from tests.test_swing_replay import PROTOCOL
+        import json
+        protocol=json.loads(PROTOCOL.read_text())
+        rows=[dict(_row('2026-02-27',str(i),i,.2,i,i),baseline_kind='reconstructed_research',
+            probability_source='rule',label_end_dates={'20':'2026-03-01' if i==1 else '2026-02-28'}) for i in range(1,3)]
+        segments=module.swing_segments(rows,protocol)
+        self.assertEqual(segments['validation']['dates'],[])
+        rows[0]['label_end_dates']['20']='2026-02-28'
+        self.assertEqual(module.swing_segments(rows,protocol)['validation']['dates'],['2026-02-27'])
+        result=module.evaluate_swing_experiments(rows,protocol,['2026-02-27'])
+        self.assertEqual(result['experiments']['E1']['metrics']['selection_by_date']['2026-02-27'],['1','2'])
+
+    def test_incomplete_pool_narrows_all_primary_statistics_to_same_dates(self):
+        import app.evaluation.ranking_quality_experiments as module
+        from tests.test_swing_replay import PROTOCOL
+        import json
+        rows=[dict(_row(day,str(i),i,.9-i/100,i,i),probability_source='rule',
+            baseline_kind='reconstructed_research') for day in ('2026-07-01','2026-07-02') for i in range(1,7)]
+        rows[-1]['future_return_10d']=None
+        r=module.evaluate_swing_experiments(rows,json.loads(PROTOCOL.read_text()),['2026-07-01','2026-07-02'])['experiments']['E1']
+        self.assertEqual(r['paired']['matched_dates'],['2026-07-01'])
+        self.assertEqual(list(r['paired']['statistics_by_horizon']['10']['daily_deltas']),['2026-07-01'])
+        self.assertEqual(list(r['sensitivity']['day_removed_mean_deltas']),['2026-07-01'])
+        self.assertFalse(r['provisional_ranking_candidate'])
+        self.assertIn('auxiliary_same_date_metrics',r['paired'])
+        self.assertEqual(r['paired']['auxiliary_same_date_metrics']['10']['3']['dates'],['2026-07-01'])
+
+    def test_daily_rank_metrics_do_not_weight_large_date_more_and_report_slots(self):
+        from app.evaluation.ranking_quality_experiments import _evaluate_variant
+        rows=[_row('2026-07-01',str(i),i,.2,i,i) for i in range(1,7)]
+        rows += [_row('2026-07-02',str(i),i,.2,i,-i) for i in range(1,4)]
+        result=_evaluate_variant(rows,'baseline',lambda r:(r['rank_no'],r['symbol']))['metrics']['10']
+        self.assertIn('daily_equal_weight_spearman',result)
+        self.assertEqual(result['daily_equal_weight_spearman'],0)
+        self.assertEqual(result['top_k']['5']['planned_slots'],8)
+        self.assertEqual(result['top_k']['5']['observed_slots'],8)
+
+    def test_frozen_swing_e1_preserves_labels_slots_and_probability_scale(self):
+        import app.evaluation.ranking_quality_experiments as module
+        from tests.test_swing_replay import PROTOCOL
+        import json
+        self.assertTrue(hasattr(module, 'evaluate_swing_experiments'))
+        rows = [dict(_row('2026-07-01', str(i), i, .9-i/100, i, i),
+                     probability_source='rule', baseline_kind='reconstructed_research',
+                     label_end_dates={'20':'2026-07-29'}) for i in range(1, 7)]
+        original = copy.deepcopy(rows)
+        result = module.evaluate_swing_experiments(rows, json.loads(PROTOCOL.read_text()),
+                                                  ['2026-07-01'])
+        self.assertEqual(rows, original)
+        self.assertEqual(set(result['experiments']), {'E1','E2','E3'})
+        self.assertEqual(result['experiments']['E1']['metrics']['selection_by_date']['2026-07-01'],
+                         ['6','5','4','3','2','1'])
+        self.assertEqual(result['experiments']['E3']['status'], 'unavailable')
+        self.assertEqual(result['experiments']['E3']['holm']['p_value'], 1)
+        self.assertEqual(result['decision'], 'insufficient_evidence')
+        rows[0]['probability_source'] = 'ml'
+        result = module.evaluate_swing_experiments(rows, json.loads(PROTOCOL.read_text()), ['2026-07-01'])
+        self.assertEqual(result['experiments']['E1']['status'], 'unavailable')
+
+    def test_block_inference_does_not_bridge_missing_dates_and_holm_keeps_null_family(self):
+        import app.evaluation.ranking_quality_experiments as module
+        self.assertTrue(hasattr(module, 'swing_block_inference'))
+        index = [f'2026-07-{i:02d}' for i in range(1, 32)]
+        deltas = {day:1.0 for i, day in enumerate(index) if i != 15}
+        result = module.swing_block_inference(deltas, index, 10)
+        self.assertEqual(result['run_lengths'], [15,15])
+        self.assertEqual(result['block_count'], 2)
+        self.assertIsNone(result['p_value'])
+        result = module.swing_block_inference(dict.fromkeys(index, 1.0), index, 10)
+        self.assertGreater(result['p_value'], 0)
+        self.assertNotEqual(result['p_value'], result.get('bootstrap_negative_fraction', 0))
+        corrected = module.swing_holm({'E1':.02, 'E2':None, 'E3':None})
+        self.assertAlmostEqual(corrected['E1']['adjusted_p'], .06)
+        self.assertFalse(corrected['E1']['reject'])
+
+    def test_swing_comparison_rejects_pool_label_identity_drift(self):
+        import app.evaluation.ranking_quality_experiments as module
+        self.assertTrue(hasattr(module, 'validate_swing_pair'))
+        rows = [dict(_row('2026-07-01', '000001', 1, .2, 1, 2), baseline_kind='reconstructed_research')]
+        module.validate_swing_pair(rows, copy.deepcopy(rows))
+        for key,value in [('symbol','000002'), ('future_return_10d',3), ('baseline_kind','observed_production')]:
+            changed = copy.deepcopy(rows); changed[0][key] = value
+            with self.assertRaises(ValueError): module.validate_swing_pair(rows, changed)
+
     def test_qualification_sensitivity_uses_same_full_pool_dates(self):
         rows = [_row(date, str(i), i, .2, 10-i, i)
                 for date in ("2026-07-01", "2026-07-02") for i in range(1, 7)]
