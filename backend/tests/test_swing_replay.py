@@ -80,6 +80,31 @@ class SwingReplayTests(unittest.TestCase):
         after = self.replay.replay_day(data, self.protocol)
         self.assertEqual(before, after)
 
+    def test_known_late_prior_dependency_rejects_day_before_decisions(self):
+        data = fixture()
+        prior = data['histories']['000001'][-2]
+        prior['available_at'] = '2026-12-31T18:00:00+08:00'
+        for amount in (prior['amount'], 999999999):
+            prior['amount'] = amount
+            with self.assertRaisesRegex(ValueError, 'feature_input_available_after_signal'):
+                self.replay.prepare_inputs(data, self.protocol)
+            with self.assertRaisesRegex(ValueError, 'feature_input_available_after_signal'):
+                self.replay.replay_day(data, self.protocol)
+
+    def test_known_same_day_after_cutoff_rejected_and_cutoff_equality_allowed(self):
+        data = fixture()
+        signal = data['rows'][0]
+        signal['available_at'] = '2026-05-19T18:00:01+08:00'
+        with self.assertRaisesRegex(ValueError, 'feature_input_available_after_signal'):
+            self.replay.replay_day(data, self.protocol)
+        signal['available_at'] = '2026-05-19T18:00:00+08:00'
+        data['histories']['300750'][-2]['available_at'] = '2026-05-19T09:00:00+00:00'
+        prepared = self.replay.prepare_inputs(data, self.protocol)
+        self.assertEqual(prepared['sidecars']['300750']['effective_available_at'], signal['available_at'])
+        self.assertEqual(prepared['sidecars']['300750']['feature_availability_status'],
+                         'assumed_with_unknown_dependencies')
+        self.assertTrue(self.replay.replay_day(data,self.protocol)['candidates'])
+
     def test_insufficient_warmup_and_empty_universe_never_curated_fallback(self):
         short = self.replay.replay_day(fixture(59), self.protocol)
         self.assertEqual(short['candidates'], [])

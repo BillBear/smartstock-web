@@ -111,6 +111,47 @@ class SwingBenchmarkTests(unittest.TestCase):
         labeled = label_candidates([signal], {'000001':rows}, CONFIG)[0]
         self.assertTrue(all(labeled[f'future_return_{h}d'] is None for h in (5,10,20)))
 
+    def test_bar12_factor_gap_preserves_valid_primary_entry_and_status(self):
+        from app.evaluation.swing_replay import label_candidates, iso_day
+        rows = fixture()['histories']['000001'][-21:]
+        signal = dict(symbol='000001',rank_no=1,trade_date=rows[0]['trade_date'])
+        rows[12]['adj_factor'] = None
+        result = label_candidates([signal],{'000001':rows},CONFIG)[0]
+        self.assertIsNotNone(result['future_return_10d'])
+        self.assertEqual(result['entry_date'],iso_day(rows[1]['trade_date']))
+        self.assertEqual(result['entry_price'],round(rows[1]['open'],6))
+        self.assertEqual(result['tradable_label'],'tradable')
+        self.assertIsNone(result['label_missing_reason'])
+        self.assertEqual(result['label_metadata_horizon'],10)
+        self.assertNotIn(10,result['incomplete_horizons'])
+        self.assertIn(20,result['incomplete_horizons'])
+        self.assertEqual(result['horizon_paths']['20']['label_missing_reason'],'adjustment_factor_missing')
+        self.assertEqual(result['max_favorable_excursion'],result['horizon_paths']['10']['mfe'])
+
+    def test_four_future_bars_have_no_complete_5d_path_outcomes(self):
+        from app.evaluation.swing_replay import label_candidates
+        rows = fixture()['histories']['000001'][-21:-16]
+        signal = dict(symbol='000001',rank_no=1,trade_date=rows[0]['trade_date'])
+        result = label_candidates([signal],{'000001':rows},CONFIG)[0]
+        path = result['horizon_paths']['5']
+        self.assertFalse(path['mature'])
+        self.assertEqual(path['label_missing_reason'],'insufficient_future_bars')
+        for key in ('end_date','mfe','mae','first_hit_path','first_hit_date',
+                    'first_hit_take_profit','first_hit_stop_loss'):
+            self.assertIsNone(path[key],key)
+        self.assertIsNone(result['max_favorable_excursion'])
+        self.assertEqual(result['label_missing_reason'],'insufficient_future_bars')
+        self.assertIsNotNone(result['entry_date'])
+
+    def test_effective_feature_availability_propagates_to_label_rejection(self):
+        from app.evaluation.swing_replay import label_candidates
+        rows = fixture()['histories']['000001'][-21:]
+        signal = dict(symbol='000001',rank_no=1,trade_date=rows[0]['trade_date'],
+                      effective_available_at='2026-12-31T20:00:00+08:00')
+        result = label_candidates([signal],{'000001':rows},CONFIG)[0]
+        self.assertEqual(result['label_missing_reason'],'input_available_after_entry')
+        self.assertTrue(all(result[f'future_return_{h}d'] is None for h in (5,10,20)))
+
     def test_duplicate_observation_quarantines_entire_date_and_keeps_unknowns(self):
         dataset, observation = self.dataset()
         data = fixture(); day = data['trade_date']

@@ -96,6 +96,10 @@ def _usable(row):
     return all(row.get(k) is not None for k in ('open','high','low','close','volume','amount','adj_factor'))
 
 
+def _decision_time(day):
+    return datetime.fromisoformat(iso_day(day)+'T18:00:00+08:00')
+
+
 def prepare_inputs(day_inputs, protocol):
     protocol = validate_protocol(protocol)
     config = deepcopy(day_inputs['strategy_config'])
@@ -109,6 +113,8 @@ def prepare_inputs(day_inputs, protocol):
     originals = {r['symbol']:r for r in day_inputs['rows']}
     quotes, histories, sidecars = [], {}, {}
     missing_factor, short, missing_history = [], [], []
+    cutoff = _decision_time(day)
+    known_availability, unknown_availability = [], False
     for row in bars:
         symbol = row['symbol']; original = originals[symbol]
         # Ignore all current metadata and every future bar before validation/hash.
@@ -119,6 +125,17 @@ def prepare_inputs(day_inputs, protocol):
         elif prior[-1] != row:
             raise ValueError('signal/history same-day bar mismatch')
         valid = [r for r in prior if _usable(r)][-protocol['dates']['max_warmup_bars']:]
+        # Fail the whole signal day, not one stock: removing a late dependency
+        # could change recall, market state and cross-sectional calibration.
+        for dependency in [row] + valid:
+            stamp = dependency['available_at']
+            if stamp is None:
+                unknown_availability = True
+                continue
+            available = datetime.fromisoformat(stamp.replace('Z','+00:00'))
+            if available > cutoff:
+                raise ValueError('feature_input_available_after_signal: '+symbol+'/'+dependency['trade_date'])
+            known_availability.append(available)
         if row['adj_factor'] is None:
             missing_factor.append(symbol)
         if len(valid) < 60:
@@ -146,6 +163,11 @@ def prepare_inputs(day_inputs, protocol):
             feature_bar_count=len(frame), missing_feature_bar_count=sum(not _usable(r) for r in prior),
             feature_start_date=frame[0]['date'] if frame else None,
             feature_end_date=frame[-1]['date'] if frame else None)
+    effective = max(known_availability).astimezone(cutoff.tzinfo).isoformat() if known_availability else None
+    for sidecar in sidecars.values():
+        sidecar.update(effective_available_at=effective, decision_time=cutoff.isoformat(),
+            feature_availability_status='assumed_with_unknown_dependencies' if unknown_availability else
+                                        'known_on_time')
     return dict(day=day, config=config, quotes=quotes, histories=histories, sidecars=sidecars,
                 missing_factor=missing_factor, short=short, missing_history=missing_history,
                 identity=deepcopy(day_inputs['identity']))
@@ -153,7 +175,7 @@ def prepare_inputs(day_inputs, protocol):
 
 @contextmanager
 def signal_clock(day):
-    fixed = datetime.fromisoformat(iso_day(day)+'T18:00:00+08:00')
+    fixed = _decision_time(day)
     class FrozenDateTime(datetime):
         @classmethod
         def now(cls, tz=None):
@@ -308,11 +330,13 @@ def label_candidates(candidates, histories, config):
         bars = checked_bars(histories.get(symbol, []), symbol)
         same = [r for r in bars if r['trade_date'] == day]
         future = [r for r in bars if r['trade_date'] > day][:20]
-        known = candidate.get('available_at')
-        late = bool(known and future and datetime.fromisoformat(known.replace('Z','+00:00')) >
+        known = [datetime.fromisoformat(candidate[key].replace('Z','+00:00')) for key in
+                 ('available_at','effective_available_at') if candidate.get(key)]
+        late = bool(known and future and max(known) >
                     datetime.fromisoformat(future[0]['trade_date']+'T09:30:00+08:00'))
         def fetch(_symbol, _start, _end):
-            records = [dict(r, date=r['trade_date']) for r in same+future]
+            # Entry validity is independent of gaps later in the holding path.
+            records = [dict(r, date=r['trade_date']) for r in same+future[:1]]
             return pd.DataFrame(records), 'tushare', None
         labeled, _ = label_snapshot_rows([candidate], fetch, execution_config=execution,
                                          max_calendar_days=10000)
@@ -320,10 +344,11 @@ def label_candidates(candidates, histories, config):
         row['decision_executable'] = decision_projection([candidate])[0]['decision_executable']
         row['name'] = candidate.get('name')
         row['snapshot_has_same_date_bar'] = bool(same)
-        row['label_end_dates'] = {str(h):future[h-1]['trade_date'] if len(future)>=h else None for h in (5,10,20)}
+        row['label_end_dates'] = {str(h):future[h-1]['trade_date'] if len(future)>=h else None for h in (3,5,10,20)}
         row['tradability_status'] = 'unknown_historical_suspension_limits_and_fill'
+        row['tradable_label_scope'] = 'entry_bar_proxy_only'
         row['horizon_paths'] = {}
-        for h in (5,10,20):
+        for h in (3,5,10,20):
             subset = future[:h]
             def horizon_fetch(*_):
                 return pd.DataFrame([dict(r,date=r['trade_date']) for r in same+subset]), 'tushare', None
@@ -332,7 +357,8 @@ def label_candidates(candidates, histories, config):
             value = partial[0]
             missing_bar = any(not _usable(r) for r in subset)
             reason = ('input_available_after_entry' if late else 'same_day_bar_missing' if not same else
-                      'missing_future_bar_fields' if missing_bar else value.get('label_missing_reason'))
+                      value.get('label_missing_reason') or ('missing_future_bar_fields' if missing_bar else
+                      'insufficient_future_bars' if len(subset)<h else None))
             row[f'future_return_{h}d'] = None if reason else value.get(f'future_return_{h}d')
             row['horizon_paths'][str(h)] = dict(label_missing_reason=reason,
                 mature=len(subset)>=h and not reason,
@@ -341,7 +367,15 @@ def label_candidates(candidates, histories, config):
                 **{key:value.get(key) if not reason else None for key in
                    ('first_hit_path','first_hit_date','first_hit_take_profit','first_hit_stop_loss')},
                 end_date=row['label_end_dates'][str(h)])
+        # The legacy scalar path metadata now explicitly describes the primary
+        # horizon; per-horizon status is authoritative, never the longest path.
+        primary = row['horizon_paths']['10']
+        row.update(label_metadata_horizon=10, label_missing_reason=primary['label_missing_reason'],
+            incomplete_horizons=[h for h in (3,5,10,20) if not row['horizon_paths'][str(h)]['mature']],
+            max_favorable_excursion=primary['mfe'], max_adverse_excursion=primary['mae'],
+            **{key:primary[key] for key in ('first_hit_path','first_hit_date',
+                                          'first_hit_take_profit','first_hit_stop_loss')})
         if late or not same:
-            row['label_missing_reason'] = 'input_available_after_entry' if late else 'same_day_bar_missing'
+            row['tradable_label'] = 'untradable'
         output.append(row)
     return output
