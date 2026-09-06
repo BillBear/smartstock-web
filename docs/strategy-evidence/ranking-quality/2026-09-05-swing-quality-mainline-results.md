@@ -4,7 +4,7 @@
 
 ## 当前结论
 
-**Task 1-3 已完成；Task 4 完整历史采集已成功，正在进行全量 cache-only 核验；Task 5 代码与修复已提交，尚未完成实际历史基线。新实验尚未运行，不能声称准确率已经提高。**
+**Task 1-4 已完成，完整历史数据通过 cache-only 核验；Task 5 代码与修复已通过评审，实际历史基线正在运行；Task 6 实验实现并行推进。新实验尚未运行，不能声称准确率已经提高。**
 
 工程修复和数据契约在独立研究工作区验证，未合并、推送或部署。用户当前页面仍运行原版本。没有修改生产模型融合、评分、排序、动作、仓位、止盈止损或参数，没有生成正式候选或正式回测。
 
@@ -80,7 +80,7 @@ python scripts/build_swing_research_dataset.py --protocol tests/fixtures/swing_q
 python scripts/build_swing_research_dataset.py --protocol tests/fixtures/swing_quality/protocol.json --output-dir "$SMARTSTOCK_RUNTIME_ROOT/strategy-quality/swing-quality-v1/history-full-20260906-offline" --cache-dir "$SMARTSTOCK_RUNTIME_ROOT/strategy-quality/swing-quality-v1/history-full-20260906/cache" --label-end-date 2026-09-04 --cache-only
 ```
 
-第一条已实际执行，`status=complete new_requests=2276 processed_dates=978/978 stop_reason=None`；第二条已启动，无 token/env 参数，核验结果完成后追加。数据 SHA256 `976775d51cb2081631ff780654c7ff8e9ac18364b1cbee772a596c0f80c5970e`，覆盖 SHA256 `423ab38c7e81426932499e8b79831e23b6e142acf10898354cfcdd7c22ee7f32`。原始缓存及衍生日期文件约 1.1G，保存在 worktree 外的 runtime 中。
+两条均已实际执行并返回 0：采集为 `status=complete new_requests=2276 processed_dates=978/978 stop_reason=None`；cache-only 为 `status=complete new_requests=0 processed_dates=978/978 stop_reason=None`，无 token/env 参数。规范数据哈希、覆盖哈希及全部计数完全一致。数据 SHA256 `976775d51cb2081631ff780654c7ff8e9ac18364b1cbee772a596c0f80c5970e`，覆盖 SHA256 `423ab38c7e81426932499e8b79831e23b6e142acf10898354cfcdd7c22ee7f32`。原始缓存及衍生日期文件约 1.1G，保存在 worktree 外的 runtime 中。
 
 ### 换手率的真实差异
 
@@ -97,7 +97,7 @@ python scripts/build_swing_research_dataset.py --protocol tests/fixtures/swing_q
 
 代理公式为 `clamp(成交额亿元 * 0.35, 0.2, 25)`，并不等于实际成交股数/流通股数。这个差异证明输入语义有问题，**尚不证明替换真实值后收益会提高**；E2 必须保持参考候选池及其他字段不变后检验。机器可读对照为 runtime 的 `turnover-comparison-20260720.json`，文件 SHA256 `5d1176b401f3ec3d80de81657b660e5345b937d2a2019b86c3e7ef4ed60a0f48`。
 
-Task 4 代码评审及修复已通过，最终全量后端测试 324 项 OK，独立定向复核 58 项 OK。Task 5 适配器提交 `5771bc5`、修复 `737da58`，最终全量后端测试 349 项 OK；修复包含已知迟到历史依赖的阻断和按周期区分标签有效性。Task 5 修复独立复审及实际历史运行仍待完成。这些工程测试不等于策略有效性证明。
+Task 4 代码评审及修复已通过，最终全量后端测试 324 项 OK，独立定向复核 58 项 OK。Task 5 适配器提交 `5771bc5`、修复 `737da58`，最终全量后端测试 349 项 OK；修复包含已知迟到历史依赖的阻断和按周期区分标签有效性，修复独立复审通过。实际历史基线及重复性运行尚待完成。这些工程测试不等于策略有效性证明。
 
 Python命令使用项目既有Python3.9虚拟环境；前端Node22.17.0，未升级依赖。
 
@@ -130,4 +130,4 @@ Python命令使用项目既有Python3.9虚拟环境；前端Node22.17.0，未升
 - 请求协调仅限单进程；阻塞线程占满时后续批次可能排队降级，不能宣称超时根因已解决。history/fallback细分耗时及source_asof未知时为null，不伪造零或时间。
 - 既有CoachStore全局`ON CONFLICT(pick_id)`可能跨用户覆盖。当前服务批次校验不能修复该存储键；不扩大本轮为迁移，也不声称多用户持久化已安全。该问题阻止无条件生产采用，但不阻止default身份只读研究。
 - 数据契约只支持已核验的TuShare raw；其他来源仍不可直接混用。当前选择暂缓跨源研究，不能将其宣称为全数据源修复。
-- 历史采集已成功，完整离线核验、回放、三个实验及持有执行成绩单仍待完成；目前无新Shadow候选，无新增策略准入证明。
+- 历史采集和完整离线核验已成功，回放、三个实验及持有执行成绩单仍待完成；目前无新Shadow候选，无新增策略准入证明。
