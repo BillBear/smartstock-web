@@ -136,6 +136,22 @@ def swing_segments(rows, protocol):
     return result
 
 
+def _qualification_group_evidence(groups, primary_dates):
+    """Descriptive subsets cannot reintroduce dates missing from primary evidence."""
+    result = {}
+    primary_dates = set(primary_dates)
+    for dimension in ('source', 'market_state'):
+        result[dimension] = {}
+        for name, group in groups[dimension].items():
+            dates = sorted(primary_dates.intersection(group['paired']['matched_dates']))
+            deltas = {day: group['metrics']['_daily_top5_returns'][day] -
+                      group['baseline']['_daily_top5_returns'][day] for day in dates}
+            result[dimension][name] = dict(dates=dates, paired_date_count=len(dates),
+                mean_delta=mean(deltas.values()) if deltas else None,
+                status='available' if dates else 'unavailable')
+    return result
+
+
 def evaluate_swing_experiments(rows, protocol, trading_dates, e2_rows=None, e2_evidence=None,
                                required_coverage=None):
     """Only the three frozen hypotheses; no strategy registration or promotion."""
@@ -196,8 +212,12 @@ def evaluate_swing_experiments(rows, protocol, trading_dates, e2_rows=None, e2_e
         base,trial = primary['baseline'],primary['experiment']
         ci = paired['statistics_by_horizon']['10']['ci']
         q = protocol['qualification']; sensitivity = result['sensitivity']
-        known_states = {key:value for key,value in result['groups']['market_state'].items() if key!='unknown'}
-        state_counts = {key:value['paired']['matched_date_count'] for key,value in known_states.items()}
+        group_evidence = _qualification_group_evidence(result['groups'], paired['matched_dates'])
+        known_states = {key:value for key,value in group_evidence['market_state'].items()
+                        if key!='unknown' and value['paired_date_count'] > 0}
+        state_counts = {key:value['paired_date_count'] for key,value in known_states.items()}
+        adequate_states = sorted(key for key, count in state_counts.items() if count >= q['minimum_paired_dates'])
+        sparse_states = {key:count for key,count in state_counts.items() if count < q['minimum_paired_dates']}
         # No state-specific sample minimum was frozen; never invent a passing one.
         checks = dict(signal_dates=len(set(r['trade_date'] for r in rows))>=q['minimum_signal_dates'],
             paired_dates=paired['matched_date_count']>=q['minimum_paired_dates'],
@@ -212,20 +232,31 @@ def evaluate_swing_experiments(rows, protocol, trading_dates, e2_rows=None, e2_e
             ci_positive=ci['lower'] is not None and ci['lower']>0, holm=holm[name]['reject'],
             leave_date=sensitivity['positive_after_every_day_removal'],
             leave_symbol=sensitivity['positive_after_every_symbol_removal'])
-        source = result['groups']['source'].get('tushare_only')
+        source = group_evidence['source'].get('tushare_only')
         checks['source_direction'] = bool(source) and _greater(
-            source['paired']['mean_daily_top5_return_difference'],0) and _greater(paired['mean_daily_top5_return_difference'],0)
-        checks['market_state_coverage'] = len(state_counts)>=q['minimum_market_states'] and all(n>=q['minimum_paired_dates'] for n in state_counts.values())
+            source['mean_delta'],0) and _greater(paired['mean_daily_top5_return_difference'],0)
+        checks['market_state_coverage'] = len(adequate_states)>=q['minimum_market_states']
         checks['market_state_direction'] = bool(known_states) and all(_not_greater(0,
-            v['paired']['mean_daily_top5_return_difference']) for v in known_states.values())
+            v['mean_delta']) for v in known_states.values())
         checks['auxiliary_no_reversal'] = all(paired['auxiliary_same_date_metrics'][str(h)][str(k)]['no_reversal']
             for h in HORIZONS for k in TOP_KS if (h,k)!=(10,5))
+        availability = dict(
+            primary_inference=paired['statistics_by_horizon']['10']['status']=='evaluated' and
+                paired['statistics_by_horizon']['10']['p_value'] is not None and
+                all(ci[key] is not None for key in ('lower', 'upper')),
+            source=bool(source) and source['status']=='available',
+            market_states=bool(known_states) and all(v['status']=='available' for v in known_states.values()),
+            auxiliary=all(bool(paired['auxiliary_same_date_metrics'][str(h)][str(k)]['dates'])
+                for h in HORIZONS for k in TOP_KS if (h,k)!=(10,5)))
         result['qualification'] = dict(checks=checks,market_state_paired_counts=state_counts,
+            evidence_available=availability, group_evidence=group_evidence,
+            adequate_market_states=adequate_states, sparse_market_states=sparse_states,
+            sparse_state_policy='disclosed_not_counted_as_adequate_adverse_direction_still_blocks',
             adequate_state_basis='conservative_use_existing_minimum_paired_dates_per_state_not_new_tuning',
             execution='pending_task_7', historical_production_parity='unavailable',
             source_independence='all_sources_and_tushare_only_are_not_independent_when_identical')
-        result['provisional_ranking_candidate'] = all(checks.values())
-        enough = all(checks[k] for k in ('signal_dates','paired_dates','required_coverage','optional_coverage','market_state_coverage'))
+        result['provisional_ranking_candidate'] = all(checks.values()) and all(availability.values())
+        enough = all(availability.values()) and all(checks[k] for k in ('signal_dates','paired_dates','required_coverage','optional_coverage','market_state_coverage'))
         result['decision'] = 'insufficient_evidence' if not enough or all(checks.values()) else 'no_shadow_candidate'
     available = [r for r in experiments.values() if r['status']=='available']
     return dict(experiments=experiments, candidate_pool=_candidate_pool_metrics(rows),

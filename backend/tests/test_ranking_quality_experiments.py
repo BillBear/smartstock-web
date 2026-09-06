@@ -26,6 +26,73 @@ def _row(trade_date, symbol, rank_no, dd_prob, risk_adjusted, return_10d, action
 
 
 class RankingQualityExperimentTests(unittest.TestCase):
+    def _swing_fixture(self, count=130, spacing=1):
+        from datetime import date, timedelta
+        from tests.test_swing_replay import PROTOCOL
+        import json
+        start = date(2025, 1, 1)
+        dates = [(start + timedelta(days=i)).isoformat() for i in range(count * spacing)]
+        rows = [dict(_row(day, str(rank), rank, .2, rank, rank),
+                     probability_source='rule', baseline_kind='reconstructed_research',
+                     market_state_tag='bull' if n < 60 else 'neutral',
+                     label_end_dates={'20': day})
+                for n, day in enumerate(dates[::spacing]) for rank in range(1, 7)]
+        return rows, json.loads(PROTOCOL.read_text()), dates
+
+    def test_missing_contiguous_blocks_is_insufficient_not_negative_evidence(self):
+        from app.evaluation.ranking_quality_experiments import evaluate_swing_experiments
+        rows, protocol, dates = self._swing_fixture(spacing=2)
+        result = evaluate_swing_experiments(rows, protocol, dates, required_coverage=1)
+        trial = result['experiments']['E1']
+        self.assertEqual(trial['paired']['statistics_by_horizon']['10']['status'], 'insufficient_blocks')
+        self.assertEqual(trial['decision'], 'insufficient_evidence')
+        self.assertEqual(result['decision'], 'insufficient_evidence')
+
+    def test_qualification_groups_cannot_reintroduce_incomplete_primary_date(self):
+        from app.evaluation.ranking_quality_experiments import evaluate_swing_experiments
+        rows, protocol, dates = self._swing_fixture(count=2)
+        for row in rows:
+            row['dd_prob'] = .9 - row['rank_no'] / 100
+        rows[-1]['future_return_10d'] = None
+        rows[-1]['history_source'] = 'AKShare'
+        result = evaluate_swing_experiments(rows, protocol, dates)['experiments']['E1']
+        self.assertEqual(result['paired']['matched_dates'], dates[:1])
+        self.assertEqual(result['groups']['source']['tushare_only']['paired']['matched_dates'], dates)
+        evidence = result['qualification'].get('group_evidence', {})
+        self.assertEqual(evidence.get('source', {}).get('tushare_only', {}).get('dates'), dates[:1])
+        self.assertEqual(evidence.get('market_state', {}).get('bull', {}).get('dates'), dates[:1])
+
+    def test_sparse_third_state_does_not_remove_two_adequate_states(self):
+        from app.evaluation.ranking_quality_experiments import evaluate_swing_experiments
+        rows, protocol, dates = self._swing_fixture(count=121)
+        for row in rows[-6:]:
+            row['market_state_tag'] = 'bear'
+        result = evaluate_swing_experiments(rows, protocol, dates, required_coverage=1)['experiments']['E1']
+        qualification = result['qualification']
+        self.assertTrue(qualification['checks']['market_state_coverage'])
+        self.assertEqual(qualification['adequate_market_states'], ['bull', 'neutral'])
+        self.assertEqual(qualification['sparse_market_states'], {'bear': 1})
+
+    def test_missing_auxiliary_outcomes_is_insufficient_evidence(self):
+        from app.evaluation.ranking_quality_experiments import evaluate_swing_experiments
+        rows, protocol, dates = self._swing_fixture()
+        for row in rows:
+            row['future_return_20d'] = None
+        result = evaluate_swing_experiments(rows, protocol, dates, required_coverage=1)['experiments']['E1']
+        self.assertEqual(result['decision'], 'insufficient_evidence')
+
+    def test_state_only_outside_primary_dates_is_descriptive_not_a_gate(self):
+        from app.evaluation.ranking_quality_experiments import evaluate_swing_experiments
+        rows, protocol, dates = self._swing_fixture(count=121)
+        for row in rows[-6:]:
+            row['market_state_tag'] = 'bear'
+        rows[-1]['future_return_10d'] = None
+        result = evaluate_swing_experiments(rows, protocol, dates, required_coverage=1)['experiments']['E1']
+        self.assertEqual(result['paired']['matched_date_count'], 120)
+        self.assertEqual(result['qualification']['group_evidence']['market_state']['bear']['dates'], [])
+        self.assertTrue(result['qualification']['evidence_available']['market_states'])
+        self.assertEqual(result['decision'], 'no_shadow_candidate')
+
     def test_adequate_null_improvement_is_no_shadow_not_an_execution_pass(self):
         import app.evaluation.ranking_quality_experiments as module
         from tests.test_swing_replay import PROTOCOL
