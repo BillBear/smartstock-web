@@ -13,7 +13,7 @@ from scripts.run_swing_benchmark import (
     read_json, write_json, dataset_index, date_files, _execution_artifacts, _label_from_stream)
 from app.evaluation.swing_protocol import validate_protocol
 from app.evaluation.swing_replay import (
-    BAR_FIELDS, _usable, digest, prepare_inputs, validate_config, replay_execution)
+    BAR_FIELDS, _usable, digest, prepare_inputs, validate_config, replay_execution, decision_projection)
 from app.evaluation.ranking_quality_experiments import swing_segments
 from app.evaluation.turnover_end_to_end import (
     LABEL_FIELDS, attach_labels, compare_outputs, replay_turnover_day)
@@ -56,7 +56,37 @@ def qualification(comparison, protocol, coverage, groups):
         production_authorized=False)
 
 
-def run(protocol, dataset, observation, baseline, output_dir, progress=None):
+def verified_replay_pair(paths, identity):
+    """Only accept two byte-identical independently produced signal streams."""
+    if len(paths)!=2 or Path(paths[0]).resolve()==Path(paths[1]).resolve():
+        raise ValueError('two distinct replay directories required')
+    identities=[read_json(Path(p)/'identity.json') for p in paths]
+    if identities[0]!=identities[1]: raise ValueError('independent replay identity mismatch')
+    previous=identities[0]
+    for key,value in identity.items():
+        if key=='implementation_sha256':
+            for name,sha in value.items():
+                approved={sha}
+                if name=='scripts/run_turnover_end_to_end.py':
+                    # Original signal producer at commit 137aeb3, before recovery support.
+                    approved.add('ac4668c55a9d7e0c384d5340f72a752f7fbe99d6da9b5ef625b0be6aa47f144d')
+                if previous[key].get(name) not in approved:
+                    raise ValueError('replay producer source mismatch: '+name)
+        elif previous.get(key)!=value: raise ValueError('replay lineage mismatch: '+key)
+    names=[sorted(p.name for p in (Path(root)/'days').glob('*.json')) for root in paths]
+    if names[0]!=names[1] or not names[0]: raise ValueError('independent replay date mismatch')
+    days={}; hashes={}
+    for name in names[0]:
+        first=(Path(paths[0])/'days'/name).read_bytes()
+        if first!=(Path(paths[1])/'days'/name).read_bytes():
+            raise ValueError('independent replay mismatch: '+name)
+        days[name[:-5]]=read_json(Path(paths[0])/'days'/name)
+        hashes[name]=hashlib.sha256(first).hexdigest()
+    return days,dict(producer_identity_sha256=digest(previous),daily_file_sha256=hashes,
+                     method='two_independent_byte_identical_replays_no_signal_regeneration')
+
+
+def run(protocol, dataset, observation, baseline, output_dir, progress=None, replay_pair=None):
     progress = progress or (lambda message:print(message,file=sys.stderr,flush=True))
     protocol = validate_protocol(protocol); root=Path(dataset); out=Path(output_dir)
     if out.exists() and any(out.iterdir()): raise ValueError('output must be fresh')
@@ -85,13 +115,18 @@ def run(protocol, dataset, observation, baseline, output_dir, progress=None):
         dataset_sha256=dataset_manifest['dataset_sha256'],observation_sha256=digest(observed),
         config_sha256=digest(config),
         implementation_sha256={name:hashlib.sha256((backend/name).read_bytes()).hexdigest() for name in files})
+    restored={}
+    if replay_pair:
+        restored,proof=verified_replay_pair(replay_pair,run_identity)
+        run_identity['verified_replay_pair']=proof
     out.mkdir(parents=True); (out/'days').mkdir(); write_json(out/'identity.json',run_identity)
     histories=defaultdict(lambda:deque(maxlen=120)); candidates=[]; pool=[]; evidence=[]; excluded={}
     actual_dates=[]; required=total=actual_ok=actual_total=0
     for day,value in date_files(root,dataset_manifest):
         if value['rows']: actual_dates.append(day)
-        for row in value['rows']:
-            if _usable(row): histories[row['symbol']].append({k:row.get(k) for k in BAR_FIELDS})
+        if not replay_pair:
+            for row in value['rows']:
+                if _usable(row): histories[row['symbol']].append({k:row.get(k) for k in BAR_FIELDS})
         if value['role']!='signal' or not value['rows']: continue
         if day not in saved_days: raise ValueError('signal missing frozen baseline')
         saved=saved_days[day]; frozen_pool=saved['frozen_analysis_pool']
@@ -104,19 +139,36 @@ def run(protocol, dataset, observation, baseline, output_dir, progress=None):
         if missing or not frozen_pool:
             excluded[day]=dict(reason='missing_or_nonpositive_actual_turnover' if missing else 'empty_preanalysis_pool',symbols=missing)
             continue
-        prepared=prepare_inputs(dict(trade_date=day,rows=value['rows'],histories=histories,
-            strategy_config=config,identity=protocol['identity']),protocol)
-        picks,proof=replay_turnover_day(prepared,saved)
+        if replay_pair:
+            checkpoint=restored.pop(day,None)
+            if checkpoint is None: raise ValueError('replay missing eligible day: '+day)
+            picks,proof=checkpoint['picks'],checkpoint['proof']
+            if (proof['trade_date']!=day or proof['baseline_parity'] is not True or
+                proof['input_sha256']!=saved['provenance']['input_sha256'] or
+                proof['reference_decisions_sha256']!=saved['identity']['decisions_sha256'] or
+                proof['trial_decisions_sha256']!=digest(decision_projection(picks))):
+                raise ValueError('saved replay proof mismatch: '+day)
+            sidecars={item['quote']['symbol']:{k:v for k,v in item.items()
+                if k not in ('quote','proxy_was_used','turnover_recipe')} for item in frozen_pool}
+            for pick in picks:
+                if pick['trade_date']!=day or any(pick.get(k)!=v for k,v in protocol['identity'].items()):
+                    raise ValueError('saved replay candidate identity mismatch')
+        else:
+            prepared=prepare_inputs(dict(trade_date=day,rows=value['rows'],histories=histories,
+                strategy_config=config,identity=protocol['identity']),protocol)
+            picks,proof=replay_turnover_day(prepared,saved)
+            sidecars=prepared['sidecars']
         candidates.extend(picks); evidence.append(proof)
         for i,item in enumerate(frozen_pool,1):
             pool.append(dict(symbol=item['quote']['symbol'],trade_date=day,rank_no=i,
                 **protocol['identity'],baseline_kind='reconstructed_research',
-                market_state=saved['market_state'],**prepared['sidecars'][item['quote']['symbol']]))
+                market_state=saved['market_state'],**sidecars[item['quote']['symbol']]))
         # Per-day proof survives interruption; it is not a completed run manifest.
         write_json(out/'days'/(day+'.json'),dict(proof=proof,picks=picks))
         if len(evidence)%10==0:
             progress(f'phase=replay dates={len(evidence)}/{len(saved_days)} date={day} trial_rows={len(candidates)}')
     histories.clear()
+    if restored: raise ValueError('unexpected replay dates')
     if not pool: raise ValueError('no eligible preanalysis dates')
     progress(f'phase=labels preanalysis_rows={len(pool)}')
     labels=_label_from_stream(root,dataset_manifest,pool,config)
@@ -193,8 +245,10 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     for name in ('protocol','dataset','observation','baseline','output-dir'):
         parser.add_argument('--'+name,required=True)
+    parser.add_argument('--replay-pair',nargs=2,metavar=('FIRST','SECOND'))
     args=parser.parse_args()
-    result=run(read_json(args.protocol),args.dataset,args.observation,args.baseline,args.output_dir)
+    result=run(read_json(args.protocol),args.dataset,args.observation,args.baseline,args.output_dir,
+               replay_pair=args.replay_pair)
     print(result['status'])
 
 

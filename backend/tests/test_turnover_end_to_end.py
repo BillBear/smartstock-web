@@ -123,6 +123,17 @@ class TurnoverEndToEndTests(unittest.TestCase):
         self.assertEqual(set(result['segments']) & {'development','validation','walk_forward'},
                          {'development','validation','walk_forward'})
         self.assertEqual(result['decision'],'insufficient_evidence')
+        resumed=run(self.protocol,dataset,observation,baseline,helper.root/'t3',
+                    progress=lambda _:None,replay_pair=[helper.root/'t1',helper.root/'t2'])
+        self.assertEqual(json.loads((helper.root/'t3'/'metrics.json').read_text()),result)
+        self.assertEqual(json.loads((helper.root/'t3'/'execution.json').read_text()),
+                         json.loads((helper.root/'t1'/'execution.json').read_text()))
+        self.assertIn('verified_replay_pair',resumed['identity'])
+        checkpoint=next((helper.root/'t2'/'days').glob('*.json'))
+        checkpoint.write_text(checkpoint.read_text()+' ')
+        with self.assertRaisesRegex(ValueError,'independent replay mismatch'):
+            run(self.protocol,dataset,observation,baseline,helper.root/'bad-pair',
+                progress=lambda _:None,replay_pair=[helper.root/'t1',helper.root/'t2'])
         with self.assertRaisesRegex(ValueError,'fresh'):
             run(self.protocol,dataset,observation,baseline,helper.root/'t1')
         identity=json.loads((baseline/'identity.json').read_text())
