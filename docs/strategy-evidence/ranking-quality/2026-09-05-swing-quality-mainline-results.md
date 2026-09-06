@@ -1,10 +1,10 @@
 # 波段选股质量主线结果
 
-实际执行日期：2026-09-05。本文随已批准主线追加结果，不是新的审计或实施计划。
+实际执行日期：2026-09-05 至 2026-09-06。本文随已批准主线追加结果，不是新的审计或实施计划。
 
 ## 当前结论
 
-**Task 1-3 已完成；历史批量采集、同口径回放和新实验尚未完成。不能声称准确率已经提高。**
+**Task 1-3 已完成；Task 4 完整历史采集已成功，正在进行全量 cache-only 核验；Task 5 代码与修复已提交，尚未完成实际历史基线。新实验尚未运行，不能声称准确率已经提高。**
 
 工程修复和数据契约在独立研究工作区验证，未合并、推送或部署。用户当前页面仍运行原版本。没有修改生产模型融合、评分、排序、动作、仓位、止盈止损或参数，没有生成正式候选或正式回测。
 
@@ -54,6 +54,51 @@ TuShare1.4.21，显式trade_date=20260720，timeout=8秒，各一次请求，没
 
 ## 验证与提交
 
+### 2026-09-06 历史采集结果
+
+正式评估信号区间为 2024-09-01 至 2026-08-31；预热从 2024-01-01 开始，标签行情截止已完成的 2026-09-04。只调用 TuShare `daily`、`daily_basic`、`adj_factor`；不调用 trade_cal、不使用今天的股票名单补历史池、不生成正式候选。
+
+| 完整采集 | 实际结果 |
+|---|---:|
+| CLI 返回码 / provider 错误数 | 0 / 0 |
+| 实际请求数 / 已处理日历日期 | 2276 / 978 |
+| 有真实日线的日期 | 649 |
+| 其中预热 / 信号 / 额外标签日期 | 162 / 483 / 4 |
+| 空 daily 响应日期，状态保留为 unknown | 329 |
+| 原始 daily 行 / 接受行 | 3509617 / 3509617 |
+| 所选数值字段全部齐全的行 | 3507998，99.95387% |
+| 单日最大 daily 返回量 | 5549，未达到 6000 边界 |
+
+649 个日期不是 649 个合格策略样本；预热、标签成熟、停牌及各实验共同覆盖仍须由回放检查。数值字段齐全不包含历史名称/ST/行业/退市状态或精确可用时间，这些仍未知，不能声称完整 PIT 或全 A 股召回已经验证。
+
+研究采集通过独立 HTTPS POST 保留 HTTP/provider 状态，避免已安装 SDK 将部分 HTTP 失败掩盖为空表；生产 SDK、配置和数据源优先级未变。[TuShare HTTP 协议](https://tushare.pro/document/1?doc_id=130)。
+
+复现命令（从研究 worktree 的 backend 执行，环境变量仅由本地配置赋值）：
+
+```bash
+python scripts/build_swing_research_dataset.py --protocol tests/fixtures/swing_quality/protocol.json --output-dir "$SMARTSTOCK_RUNTIME_ROOT/strategy-quality/swing-quality-v1/history-full-20260906" --env-file "$SMARTSTOCK_ENV_FILE" --label-end-date 2026-09-04
+python scripts/build_swing_research_dataset.py --protocol tests/fixtures/swing_quality/protocol.json --output-dir "$SMARTSTOCK_RUNTIME_ROOT/strategy-quality/swing-quality-v1/history-full-20260906-offline" --cache-dir "$SMARTSTOCK_RUNTIME_ROOT/strategy-quality/swing-quality-v1/history-full-20260906/cache" --label-end-date 2026-09-04 --cache-only
+```
+
+第一条已实际执行，`status=complete new_requests=2276 processed_dates=978/978 stop_reason=None`；第二条已启动，无 token/env 参数，核验结果完成后追加。数据 SHA256 `976775d51cb2081631ff780654c7ff8e9ac18364b1cbee772a596c0f80c5970e`，覆盖 SHA256 `423ab38c7e81426932499e8b79831e23b6e142acf10898354cfcdd7c22ee7f32`。原始缓存及衍生日期文件约 1.1G，保存在 worktree 外的 runtime 中。
+
+### 换手率的真实差异
+
+只读核对已存 `2026-07-20:a_share_snapshot`：5200 条记录的 turnover_rate 和 circ_mv 全部为 0，现有代码会进入成交额估算换手率路径。下面用**新取得的同日收盘数据**同时计算代理值与真实值，不声称它们与早先保存快照的成交额或行情时刻完全一致。
+
+| 股票 | TuShare 真实换手率 | 同日成交额套现有代理公式 |
+|---|---:|---:|
+| 中国银行 601988 | 0.2198% | 9.7746% |
+| 中国石油 601857 | 0.2347% | 14.3450% |
+| 农业银行 601288 | 0.1991% | 14.5141% |
+| 工商银行 601398 | 0.2307% | 16.6766% |
+| 建设银行 601939 | 1.7427% | 6.0352% |
+| 格力电器 000651 | 1.3835% | 10.7601% |
+
+代理公式为 `clamp(成交额亿元 * 0.35, 0.2, 25)`，并不等于实际成交股数/流通股数。这个差异证明输入语义有问题，**尚不证明替换真实值后收益会提高**；E2 必须保持参考候选池及其他字段不变后检验。机器可读对照为 runtime 的 `turnover-comparison-20260720.json`，文件 SHA256 `5d1176b401f3ec3d80de81657b660e5345b937d2a2019b86c3e7ef4ed60a0f48`。
+
+Task 4 代码评审及修复已通过，最终全量后端测试 324 项 OK，独立定向复核 58 项 OK。Task 5 适配器提交 `5771bc5`、修复 `737da58`，最终全量后端测试 349 项 OK；修复包含已知迟到历史依赖的阻断和按周期区分标签有效性。Task 5 修复独立复审及实际历史运行仍待完成。这些工程测试不等于策略有效性证明。
+
 Python命令使用项目既有Python3.9虚拟环境；前端Node22.17.0，未升级依赖。
 
 | 命令/验证 | 实际结果 |
@@ -85,4 +130,4 @@ Python命令使用项目既有Python3.9虚拟环境；前端Node22.17.0，未升
 - 请求协调仅限单进程；阻塞线程占满时后续批次可能排队降级，不能宣称超时根因已解决。history/fallback细分耗时及source_asof未知时为null，不伪造零或时间。
 - 既有CoachStore全局`ON CONFLICT(pick_id)`可能跨用户覆盖。当前服务批次校验不能修复该存储键；不扩大本轮为迁移，也不声称多用户持久化已安全。该问题阻止无条件生产采用，但不阻止default身份只读研究。
 - 数据契约只支持已核验的TuShare raw；其他来源仍不可直接混用。当前选择暂缓跨源研究，不能将其宣称为全数据源修复。
-- 历史采集、回放、三个实验及持有执行成绩单尚待后续任务；目前无新Shadow候选，无新增策略准入证明。
+- 历史采集已成功，完整离线核验、回放、三个实验及持有执行成绩单仍待完成；目前无新Shadow候选，无新增策略准入证明。
