@@ -35,6 +35,7 @@ import {
   getProbabilityModelPresentation,
   getRankPresentation,
   getPickDataQualityPresentation,
+  getPickEvidencePresentation,
   getRefreshFeedback,
 } from './smartScreenPresentation.mjs'
 import './SmartScreen.css'
@@ -443,17 +444,22 @@ const SmartScreen = () => {
 
   const columns = [
     {
-      title: '排序',
+      title: '展示序号 / 原排名',
       dataIndex: 'display_order',
       key: 'display_order',
-      width: 72,
-      render: (order) => {
+      width: 140,
+      render: (order, row) => {
         const rankMeta = getRankPresentation(order)
         return (
-          <div className="rank-cell">
-            {rankMeta.isTopRank && <TrophyOutlined style={{ color: '#faad14', fontSize: 16 }} />}
-            <span className="rank-number">{rankMeta.rankText}</span>
-          </div>
+          <Tooltip title="当前保留综合分展示顺序；手动排序不改变后端保存的原策略排名。">
+            <div>
+              <div className="rank-cell">
+                {rankMeta.isTopRank && <TrophyOutlined style={{ color: '#faad14', fontSize: 16 }} />}
+                <span className="rank-number">{rankMeta.rankText}</span>
+              </div>
+              <div className="stock-code">原策略排名 {getPickEvidencePresentation(row).backendRankText}</div>
+            </div>
+          </Tooltip>
         )
       },
     },
@@ -497,11 +503,14 @@ const SmartScreen = () => {
       },
     },
     {
-      title: '预期收益',
+      title: '估计收益（非实证）',
       dataIndex: 'expected_return_pct',
       key: 'expected_return_pct',
-      width: 120,
-      render: (v) => `${Number(v || 0).toFixed(2)}%`,
+      width: 170,
+      render: (_, row) => {
+        const evidence = getPickEvidencePresentation(row)
+        return <Tooltip title={evidence.description}><span>{evidence.estimateText}</span></Tooltip>
+      },
     },
     {
       title: '仓位',
@@ -516,13 +525,16 @@ const SmartScreen = () => {
       width: 140,
       defaultSortOrder: 'descend',
       sorter: (left, right) => Number(left?.score_breakdown?.total || 0) - Number(right?.score_breakdown?.total || 0),
-      render: (_, row) => (
-        <Progress
-          percent={Number(row?.score_breakdown?.total || 0)}
-          size="small"
-          strokeColor="#00C076"
-        />
-      ),
+      render: (_, row) => {
+        const evidence = getPickEvidencePresentation(row)
+        return (
+          <Tooltip title={evidence.description}>
+            {evidence.score === null ? <span>{evidence.scoreText}</span> : (
+              <Progress percent={evidence.score} format={() => evidence.scoreText} size="small" strokeColor="#00C076" />
+            )}
+          </Tooltip>
+        )
+      },
     },
     {
       title: '操作',
