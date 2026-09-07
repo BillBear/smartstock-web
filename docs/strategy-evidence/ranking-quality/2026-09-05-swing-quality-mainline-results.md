@@ -575,3 +575,54 @@ git diff --exit-code 53211c0 -- backend/app/services backend/app/main.py fronten
 本次交付解决的是诊断工具正确性和真实字段归属，不是新增排名实验或策略上线。先验收本节，再按原计划单独冻结一个最小生产数据语义修复：优先明确腾讯真实入口的解析边界、单位与缺失来源，给固定输入的推荐影响对照；不得直接把更多字段塞入评分。若修复单位确实需要腾讯原 payload，只追加同一小批股票的一次原始响应采集及原时间/字段依据，另行确认，不扩成全量数据工程。
 
 当前剩余证据限制为腾讯原 payload/原时间/单位未证实、AKShare 单次 unavailable、旧采集元信息不足。T1 的 483 天真实换手率实验已经是 no_shadow_candidate，不重复跑、不靠调参挽救；本次旁路可复算也不改变该结论。停止在人工验收点，未改变任何生产候选、评分、排序、ML、买卖或仓位行为。
+
+## 2026-09-07 连续推进：腾讯严格解析与真实响应差分
+
+用户已明确内部验证自动完成，不再每个步骤要求人工验收。本节接续主计划第 12 节；上节“停止在人工验收点”是历史执行记录，不再作为日常实施暂停规则。策略取舍、合并/部署仍不自动批准。
+
+### 本次交付与行为边界
+
+新增 `TencentService.parse_quote_contract` 纯研究入口，处理短数组、身份不符、空值/零/非有限数值、非法或缺失行情时间、量额字段冲突、转换溢出及价格区间一致性。缺失不补零、时间不补 now。默认不采用任何成交量/额单位假设，规范化的 volume/amount 为 null；只有显式传入 `volume_lots_amount_yuan_v1` 才按 100 股/原成交量单位和金额原值生成研究结果。
+
+该假设有本批响应内部一致性支持，但**不是已核定的腾讯官方字段契约**，输出始终 `official_unit_contract_verified=false / production_enabled=false`。不为原始位置 38/39/44/45/46 擅自补上换手率、PE/PB、市值的正式语义。不调用生产评分，不从实时三股外推历史收益。
+
+原 `_parse_quote_payload`、两个 live getter、历史方法及其他旧方法共 8 个，AST 对照 `420f265113a85da0553dec072e72da0defc60464` 全部不变；唯一新增方法为严格研究入口。旧方法组合 AST SHA-256 为 `1f1c1d8280927c66b4fbf50f6709adcf151662cc65fcbd78bcda46ece40e8224`。固定响应测试将新方法 mock 为抛错，原单股/batch getter 仍输出原成交量和原字典，证明没有隐式启用。CoachService、DataSourceManager、TuShare/AKShare、前端、配置和协议无变更。故本次不是线上数据缺陷已经消失，旧 live 缺失填零等行为仍待有影响的接入验证。
+
+### 唯一真实请求与结果
+
+只对腾讯公开接口发送一次三股批量 GET，15 秒上限；HTTP 200，000651/601988/000001 各一条，均 88 段。未读取 token，无 TuShare/AKShare 请求，无数据库、应用初始化、候选、模型或回测执行。其余命令全部读本地缓存。
+
+证据根：`$SMARTSTOCK_RUNTIME_ROOT/strategy-quality/swing-quality-v1/tencent-contract-20260907-214433/`。raw capture SHA `212693b94ec8c69b342e46caf8293aa8ce05f459dae4bd0babf539c1d5d373e1`；request-manifest SHA `b4353e15b820b18d3456396b3ae59be33ce003a19da106640a42bbd0ba690e3b`。新采集不修改、替代两日旧 capture。
+
+| 股票 | 响应原时间（北京时间） | 旧 volume | 假设下 volume（股） | 当日 low/high | 旧 amount/volume | 假设下均价 |
+|---|---|---:|---:|---|---:|---:|
+| 000001 | 2026-09-07 16:14:24 | 1087276 | 108727600 | 11.65 / 11.88 | 1173.2130 | 11.7321 |
+| 000651 | 2026-09-07 16:14:51 | 314117 | 31411700 | 38.78 / 39.28 | 3898.1625 | 38.9816 |
+| 601988 | 2026-09-07 16:14:38 | 2887773 | 288777300 | 6.42 / 6.62 | 648.0146 | 6.4801 |
+
+三条原始位置 6/36 及 35 中的成交量值一致；35 中金额与旧 amount 一致。不乘 100 时无法得到价格区间内的均价；乘 100 后三条都位于区间内。这是**数据内部一致性推断**，不是第二个独立数据源核真，也不证明所有未来响应使用相同单位。三条正常报价的字段数值差分仅 volume，其他既有价格、涨跌幅、成交额未变化。时间另以含 +08:00 的 source_time 保留，不将本地抓取时间冒充交易时间。
+
+未指定单位假设：CLI exit 2、partial，volume/amount 均 null。显式假设：三条均 `complete_under_assumption`，CLI exit 0；此 0 仅表示假设下的研究差分完整，`unit_contract_status=unverified_assumption`，绝不表示 production-ready。
+
+### 验证与复现
+
+执行前新增严格入口测试红灯，随后最小实现转绿；新增 CLI 模式也先观察到未支持而失败再实现。最终 107 项 focused tests，0.316s，OK，exit 0；包括短数组、错误时间、空/零/NaN/Infinity、错误单位尺度、重复身份、错误市场前缀、hash 篡改、已存在输出、无 payload、未指定假设、网络拒绝、旧 live 行为不变。
+
+从 backend 使用既有项目 venv Python 3.9.6：
+
+```bash
+"$PY" -B -m unittest tests.test_tencent_quote_contract tests.test_quote_field_diagnostics tests.test_provider_contract_check tests.test_swing_dataset tests.test_data_sources -v
+"$PY" -B scripts/check_provider_field_contracts.py --mode tencent-contract --input-dir "$CAPTURE" --output-dir "$UNKNOWN_OUT"
+"$PY" -B scripts/check_provider_field_contracts.py --mode tencent-contract --input-dir "$CAPTURE" --output-dir "$REPLAY_OUT" --unit-assumption volume_lots_amount_yuan_v1
+"$PY" -B scripts/check_provider_field_contracts.py --mode tencent-contract --input-dir "$CAPTURE" --output-dir "$REPEAT_OUT" --unit-assumption volume_lots_amount_yuan_v1
+```
+
+CAPTURE 为本节证据根；UNKNOWN_OUT/REPLAY_OUT/REPEAT_OUT 对应其 unknown-units/replay/repeat 子目录，复现须换新目录。两次显式假设结果字节一致，`tencent-contract.json` SHA `a3300bfe6f99fd25f7550020c20c501c04bb3605371568d98e342620db3a7336`；默认未知单位结果 SHA `436e688831672fbef6cef9ec1179d54928ea44c005d5ff108f2e7e24594aa4f3`；focused-tests.log SHA `644bd04fd847c6c88789513bda68db9aecf8cf9cf2fe9bceb3b6fbfe79b5a4ce`。未运行会导入 app.main/CoachStore 的全量测试，不冒称通过。
+
+实现分层提交：`dbefc47b5c41ac2371eb905f39dbcef746097d27`（Tencent 服务新增纯方法及独立测试）；`2ff9eafd5ed6b38786a0b37e5ed5c915374c7bc9`（既有字段 CLI/测试增加 cache-only 差分模式）。范围冻结提交 `34e56a0e9c92e78d8fae186253ac05e7f785a89e`。原有方法 AST、明确路径 diff、git diff --check 均通过，不合并、不推送、不部署。
+
+### 对准确率主线的实际意义
+
+已把“怀疑单位不对”收敛为三条可复算原始响应、一个显式假设、一个可测试修正入口；但不能据此宣称排名已改善。源码 `CoachService:669` 会保存实时 volume，关键量比在 1558-1560 用历史 analyzed_df 的 volume 自算，MLFeatureBuilder:108-109 的量比也来自历史序列。本次没有把实时成交量错尺度归因成选股不准的已证实主因。
+
+不重复失败的 T1、不新增任意第四项排序实验。后续真正有影响的生产接入应先确定单位依据和同输入推荐影响；新增字段实验应继续服从原固定成绩单和失败标准。内部回归/差分已自动完成，无需用户逐项签字；只有选择改变生产输入/策略方案及发布才需要决策。
