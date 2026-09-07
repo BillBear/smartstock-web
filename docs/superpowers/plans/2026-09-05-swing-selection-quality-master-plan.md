@@ -10,7 +10,7 @@
 
 **Spec:** 本文第 1 至 7 节是设计及验收约定，第 8 节是实施任务。用户目标为 A 股波段选股质量优先、必要基础修复、历史验证、不扩大项目。本文是这一主线的唯一执行入口，不另建 Gate、Phase 或架构审计方案。
 
-**Status:** 主线已获用户批准并完成首轮研究；2026-09-06 的 T1 端到端结果为 `no_shadow_candidate`，未批准生产接入。当前接续任务见第 10 节，由用户手动切换执行模型后实施。早期复选框保留设计记录，不作为当前进度清单；实际成果以结果报告和提交为准。
+**Status:** 主线已获用户批准并完成首轮研究；2026-09-06 的 T1 端到端结果为 `no_shadow_candidate`，未批准生产接入。第 10 节交付在 2026-09-07 验收为部分完成，下一项有限补齐任务见第 11 节，待用户交给执行模型实施。早期复选框保留设计记录，不作为当前进度清单；实际成果以结果报告和提交为准。
 
 ## Global Constraints
 
@@ -456,3 +456,117 @@ PY=/Users/xiong/Documents/SmartStock/smartstock-web/backend/venv/bin/python
 交付表必须列出：每个源是否真的调用成功；字段真实返回率和三个阶段的缺失率；已复现的解析/遗失问题；旁路修正前后具体值、单位、日期；每个异常及限额；测试命令/退出码；源码和响应 hash；完整提交 SHA。把“接口有字段”“程序保留字段”“策略采用字段”“改善收益”作为四个不同结论。
 
 **本任务的完成不代表线上数据问题已修好。** 用户切回 GPT-6 后先验收；只有证据明确后才冻结下一项最小生产解析修复及固定输入/策略影响对照。继续执行的授权不包含改权重、阈值、训练、新增策略变量或切换本地运行版本。
+
+## 11. 2026-09-07 验收与下一任务：补齐字段验收，锁定真实入口
+
+本节接续第 10 节，不新增治理阶段。本次只读取代码、执行离线验证和编写交接，没有实施下列修复、发起行情请求或访问数据库。执行方式为单智能体；用户选定执行模型后按本节实施，完成后再验收。
+
+### 11.1 验收裁决与有效成果
+
+被验收分支 `evaluation/provider-field-contract-check`，完整 HEAD 为
+`eea2567c6237c79190dfa07ef8e5dc5af24437fe`，提交 `b9ded5a/7684362/eea2567`。
+工作区干净，6 个变更文件均在第 10 节范围内；相对 `53211c0` 的服务、路由、前端和协议无差异。
+本次从 backend 重新执行第 10.4 节 focused 命令：47 tests，0.026s，OK，exit 0。
+
+**裁决：有效数据和局部问题定位接受，完整字段链路验收不通过。** 不能以测试数量代替契约验收。
+
+- 原采集 9 个文件的 manifest SHA 校验全部通过。六次 TuShare 请求各保存 3 条目标股票记录；腾讯保存 3 条已适配 quote；AKShare 原证据为 `ConnectionError/unavailable`。
+- 已修正的 TuShare 日线重演确实为 36/36 字段观测保留；daily_basic 的 24 个值未完整进入所测实时封装；这个事实有效。复权因子不在实时 quote 返回中不自动等于缺陷，需要区分历史复权用途与实时报价用途。
+- 原始抓取后的首份 stage 差分被跨股票测试桩错误污染。已有修正后的离线重演可复用；首份衍生结果继续标记无效，不能删除、覆盖或冒充通过。缓存 hash 证明留存内容一致，不证明来源可信或数值必真。
+- 本次直接复用 `join_daily_inputs`，两个日期各 3 行、拒绝 0 行。格力 20260720 的旁路参考为换手率 1.3835%、量比 1.43、流通市值 224083143116 元、因子 230.3931；20260831 为 0.6869%、0.66、214727182350 元、242.035。现有函数已能生成这些记录，无需新建数据框架。
+- T1 已在 483 天上完成真实换手率替换。Top5 10 日均值 0.409425% → 0.542271%，严重亏损率 18.5888% → 19.0754%，NDCG@10 0.122090 → 0.121515；结论 `no_shadow_candidate`。上轮完成说明把 T1 列作下一步不准确，不再次实施相同实验。
+
+### 11.2 必须补齐的具体问题
+
+| 优先级 | 真实缺口与位置（上述 HEAD） | 风险/验收要求 |
+|---|---|---|
+| P1 | `check_provider_field_contracts.py:295` 仅检查各日三个 endpoint 键存在 | 离线反例：六份 `status=unavailable, rows=[]` 返回 complete。请求完整性、字段完整性和复算完成必须分别表达；所有失败不能 exit 0，AKShare 不可用不能在 replay 中消失 |
+| P1 | `provider_contract_check.py:113` 允许相等数值绕过倍率；`:117-160` 把三层全缺失计入 retained/rate | 离线反例：市值 raw/adapted/normalized 都是 4，倍率 10000，仍 retained；全缺失 rate=1.0。明确数值可用率和链路保留率的不同分母；未知/缺失不能充当有效数据 |
+| P1 | 采集器未执行 `join_daily_inputs`，FIELD_MAP 无 pct_change；真实选股快照路径未验收 | 第 10.4 节第三步未交付。只验证 TuShare 实时封装不能说明当前选股入口已查清；需补正确旁路和实际字段消费定位 |
+| P2 | 腾讯文件保存解析后的 quote，不含原始 payload；AKShare 未进入字段差分和三层缺失统计 | 无法从旧腾讯缓存验证字段位置、原始时间或单位；不得倒造。边界测试和 source unavailable 覆盖必须补齐 |
+| P2 | request manifest 缺少请求/返回字段、版本、逐次耗时及源码 hash；raw 行合并覆盖同键 | 旧材料缺失项只能 unknown；新采集格式记录真实元信息。重复/错日期/响应上限必须先检查，不能 update 后静默消失 |
+
+真正选股输入链路（只读源码确认，不启动服务）：
+`CoachService._get_universe_snapshot → DataSourceManager.get_a_share_snapshot → _build_tushare_tencent_snapshot → TencentService.get_realtime_quotes_batch → _normalize_market_snapshot`。
+TuShare 在该优先路径提供的是 `stock_basic` 股票目录，不是 daily_basic 指标。
+`CoachService` 中 733-739 行及 1518-1522 行在换手字段缺失时进入代理；资金代理位于 1486-1496 行，量比还在 1560 行由历史成交量自行计算。
+这意味着“接口量比未透传”不等于“策略没有量比”，也不应直接把 TuShare 日终量比替换进当前计算。上述定位需在执行时核对函数名/行号，不调用选股流程。
+
+### 11.3 工作目录、范围与数据预算
+
+**Goal：** 让同一批已有响应能够可靠回答字段在哪里丢失、真实选股在哪里使用代理，并输出一个有来源的正确研究输入。完成此项才能冻结下一项生产解析修复的具体范围。
+
+- 使用当前 `.worktrees/swing-selection-master-plan`，从包含本交接的文档 HEAD 新建 `evaluation/provider-field-contract-completion`。不新建物理 worktree；先确认干净且 `eea2567` 是祖先。同名分支冲突时停止，不移动既有引用。
+- **只修改** `backend/app/evaluation/provider_contract_check.py`、`backend/scripts/check_provider_field_contracts.py`、`backend/tests/test_provider_contract_check.py`、`backend/app/evaluation/quote_field_diagnostics.py`、`backend/tests/test_quote_field_diagnostics.py`。结果只追加原主线报告中文“接口字段链路补充验收”章节；不修改其他报告或旧实验结论。
+- `quote_field_diagnostics.py` 及其测试恢复复用 `7ffddf653028414d89e6132181b12af8433ef549` 中已经验收的两文件，不重写等价函数。旧 helper 空列表率 0.0 保持既有语义，source 可用率在调用层以空分母 null 处理，不把 0.0 当完备。
+- 只读生产服务、CoachService 的消费代码，禁止修改；不调用数据库、app.main、CoachStore、正式选股、模型、回测、trade_cal，不升级依赖或修改代理。
+- 默认使用旧 capture `provider-contract-check-20260906-231500` 和已修正 `...-derived-replay`，均位于 `$SMARTSTOCK_RUNTIME_ROOT/strategy-quality/swing-quality-v1/`。不再抓 TuShare 两日或下载两年数据，不重跑 T1。
+- 此补齐任务默认零真实网络请求：完整链路缺少的腾讯原 payload 如在已有 runtime 找不到，明确记 `raw_payload_not_captured`，以离线边界测试验证工具；保留单次 AKShare ConnectionError，不排查网络。真实单位/原始时间无法证实即 not_comparable，不能为完成率编造事实。若下一项修复确实需要新的腾讯原始响应，另列唯一缺失采集及用途，不能因此扩大当前采集。
+- 所有新增证据在外部 runtime 新目录 `provider-contract-completion-<实际时间>`；旧 capture 原样保留。可写 replay 的 manifest 记录原文件 hash 和实际重演代码 hash；禁止补写虚构的历史 SDK/时间/参数。
+
+### 11.4 实施任务 A：消除诊断器假成功
+
+**Files：** 五个限定 Python 文件（复用 helper/test 限于上述来源）；不改生产代码。
+
+**Interfaces：** 保留 `compare_field_stages` 和 CLI 的 probe/cache-only 入口。整合重复的 replay 实现，二者共用原始数据验证与分析函数；不能让一条路径校验完备、另一条跳过。
+
+- [ ] 先添加并运行以下回归，确认具体行为失败，不以新模块不存在作为这些修复的红灯：
+
+```python
+# 复用现有 record 和 FIELD_MAP，不另造 fixture 框架。
+def test_circ_mv_requires_declared_conversion(self):
+    rows = [record(circ_mv=4)]
+    result = compare_field_stages(rows, rows, rows, {"circ_mv": FIELD_MAP["circ_mv"]})
+    self.assertEqual(result["rows"][0]["fields"]["circ_mv"]["status"], "invalid")
+```
+
+- [ ] 增加：同倍率重复转换拒绝；raw 有值但适配缺失/归零分别可见；raw 缺失而统一层才归零也识别；三层全缺失不能提高可用率；空数据分母为 0/率 null；非法数值有限性；未知单位/日期不可比较；跨日期不关联。
+- [ ] 增加 CLI 回归：六个 endpoint 都在但全失败/全空返回 2；缺一股 partial；重复 symbol/date、重复 endpoint 或 manifest 引用、错日期返回 1；hash 不匹配或越出 input_dir 的路径（含 symlink）返回 1；拒绝已有输出目录。先校验再合并，不静默去重/过滤错误日期。
+- [ ] 最小实现：有效 numeric 值必须匹配声明倍率；每个 source/field/stage 记录 row_count、missing/invalid/zero/valid counts 和率。source 缺响应时 source 观察分母为 0，预期目标数另列，不伪造缺失行充响应。
+- [ ] 明确区分 `replay_completed`（处理完成）、`capture_status`（来源响应完整性）、`contract_status`（字段链路问题）。已知 field_dropped 可以作为成功诊断结果，但 source failure 仍使 CLI exit 2；结构/hash 错误 exit 1。不能仅断言 manifest 写着 transport=none 作为禁网证明。
+- [ ] 捕获 transport 调用并拒绝的测试覆盖 cache-only（例如 patch requests.Session.request/pro_api 为抛 AssertionError），含异常/空数据路径；不要调用真实网络来测失败。
+- [ ] 运行 focused 通过后，五个代码/测试文件显式暂存，检查 staged diff，提交 `fix: make provider contract checks fail accurately`，检查工作区干净。
+
+### 11.5 实施任务 B：补齐旁路和实际消费事实
+
+**Files：** 同三个主要代码/测试文件；不重写 helper、不新增框架。
+
+**Produces：** 共用分析函数生成 `field-contracts.json`、`stage-diff.json`、`coverage.json`。`stage-diff.json` 增加 `research_rows`，来自现有 join；每行可追溯原始 response hash。manifest 保留所有源的状态和未知字段，不能将采集不完整改称完整。
+
+- [ ] 先写测试：同股同日 daily/basic/factor 经现有 `join_daily_inputs` 得到 volume×100、amount×1000、circ_mv×10000、真实 turnover/volume_ratio/adj_factor；缺补充输入为 null，0 保持 0；不将 raw OHLC 乘复权因子。增加 pct_change 原值保留及日期身份测试。运行确认未实现的 research_rows 导致失败。
+- [ ] 最小实现旁路：直接调用 `join_daily_inputs(daily, basics, factors, metadata)`；原路径继续由隔离服务方法处理。两个路径分别记录，不把研究值传入生产评分、不复制策略公式产生另一套评分。
+- [ ] 腾讯边界测试用人工构造并明确 synthetic 的 payload，通过当前 `_parse_quote_payload` 验证短数组/边界长度、空/零、缺原时间、未知单位；AKShare 用 mock spot DataFrame 验证缺列/非有限/未提供行情日期。捕获已有异常或 now 回填作为诊断，不修改适配器。保证测试不会改父进程代理配置。
+- [ ] 为 `get_a_share_snapshot/_build_tushare_tencent_snapshot/_normalize_market_snapshot` 增加离线特征测试，mock TuShare 股票目录与腾讯报价（满足源码现有500条最小规模，不降低该阈值），确认优先路径的字段流失和零填充。不实例化 CoachService，也不生成候选；其消费位置只做源码对照。
+- [ ] 记录字段矩阵：provider 真值/当前适配保留/标准化保留/策略消费方式（实际、代理、自算、未使用、未知）。资金只标代理或实际调用条件，PE/PB/总市值只记已有事实。复权因子在历史契约的用途与实时 quote 需求分开。
+- [ ] probe 保存真正原始响应或明确 selected SDK rows / adapted-only 的证据等级；新格式含参数、字段、耗时、SDK/源码 hash、响应日期。SDK 无 HTTP 状态证据时保留 unknown；已知返回上限须检查截断，不能丢弃其他返回行后宣称无截断。密钥反射测试必须覆盖成功载荷和异常；异常只输出受控类别。
+- [ ] 调整 probe 的超时/预算/失败停止逻辑时用 fake transport/clock 验证六次上限、单次15秒、总180秒、AKShare子进程60秒；没有安全超时能力就拒绝 probe，不能无界调用。清理只限本次子进程，不动用户服务。当前交付只离线测，不运行 probe。
+- [ ] 运行 focused；仅暂存三文件，提交 `research: complete source field paths and corrected inputs`。检查干净后进入结果记录。
+
+### 11.6 实施任务 C：复算、中文结果与交付
+
+**Files：** 仅追加 `docs/strategy-evidence/ranking-quality/2026-09-05-swing-quality-mainline-results.md`；运行数据不进 Git。
+
+- [ ] 从 backend 使用项目原解释器运行：
+
+```bash
+PY=/Users/xiong/Documents/SmartStock/smartstock-web/backend/venv/bin/python
+"$PY" -B -m unittest tests.test_quote_field_diagnostics tests.test_provider_contract_check tests.test_swing_dataset tests.test_data_sources -v
+"$PY" -B scripts/check_provider_field_contracts.py --mode cache-only --input-dir "$PROBE_OUT" --output-dir "$REPLAY_OUT"
+"$PY" -B scripts/check_provider_field_contracts.py --mode cache-only --input-dir "$PROBE_OUT" --output-dir "$REPEAT_OUT"
+```
+
+`PROBE_OUT` 是旧原始 capture；REPLAY_OUT/REPEAT_OUT 是新任务目录下两个未存在的目录。补丁必须明确识别 legacy manifest，逐文件 hash 必须通过；缺旧字段标 unknown。两次允许由于旧 AKShare 不可用返回 exit 2，但必须分别标记 replay_completed=true，不能将既有 source failure 判为本次代码错误或整体成功。规范 field-contracts/stage-diff/coverage 内容和 hash 必须一致；元信息的路径/运行时间不混入数值比较。
+
+- [ ] 原采集目录及已修正 replay 不覆盖。若已存 raw 格式不足以复建某字段，保留 unavailable/not_comparable，列出仅影响哪个结论；不得新增 provider 兜底或改计划口径。
+- [ ] 在**仓库根目录**运行 `git diff --check` 和 `git diff --exit-code 53211c0 -- backend/app/services backend/app/main.py frontend backend/tests/fixtures/swing_quality/protocol.json`。从 backend 执行带 backend/ 前缀的 pathspec 会检查错目录，不能用空输出误报通过。检查相对 `eea2567` 的变更文件仅为允许列表及交接文档。
+- [ ] 检查全量 unittest 的实际副作用；仅可证明在 mock/临时数据中隔离时执行，否则报告未运行原因，不访问真实库或启动应用。focused 的安全失败测试必须全通过；不以旧失败豁免新增问题。
+- [ ] 中文追加结论，引用本节验收纠正旧“已完成”说法，保留历史文字并说明 superseded 范围。报告至少有逐源响应状态、三层缺失率、旁路具体值、当前生产入口、源码/缓存谱系、测试命令与关键输出、完整提交SHA、旧缓存不可证明事项。
+- [ ] 文档单独提交 `docs: record completed field verification and remaining limits`，`git status --short` 为空；停止，等待用户选择验收模型。不合并、不推送、不部署。
+
+### 11.7 完成边界和后续方向
+
+本任务只解决第 10 节欠缺的验收内容，收敛为一次修复交付，不扩展成其他接口/存储/模型审计。最关键退出条件为：不会空数据假成功、不会错倍率假通过、同源同日旁路可复算、实际选股入口有明确字段归属。
+
+验收后才能按原计划冻结一项最小生产数据语义修复，并给固定输入/策略影响对照。候选修复优先考虑实际腾讯快照入口的缺失/单位/来源表达；具体修复是否应透传某字段由旁路与消费证据决定。此处不授权直接改评分、关闭ML或将真实换手率上线。
+
+原 T1 不再重复。它表明旧规则直接换入真值没有达到排名质量标准。后续新的单变量策略假设必须使用明确语义字段、固定同池/成本/周期和已定失败标准，单独冻结后再实验；本节不预选“更多字段”作为赢家，不调参数挽救既有失败结果。
