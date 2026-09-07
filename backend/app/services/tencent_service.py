@@ -3,7 +3,10 @@
 作为AKShare不可用时的真实数据备用源（实时行情 + 日线K线）
 """
 from datetime import datetime
+from datetime import timedelta, timezone
+import hashlib
 import logging
+import math
 from typing import Optional
 
 import pandas as pd
@@ -92,6 +95,104 @@ class TencentService:
             "amount": amount,
             "update_time": update_time,
         }
+
+    @staticmethod
+    def parse_quote_contract(symbol: str, raw: str, *, unit_assumption=None) -> dict:
+        """Pure research contract; deliberately not used by live getters.
+
+        Position semantics follow the captured A-share layout. Volume/amount
+        normalization requires an explicit, unverified research assumption;
+        internal price consistency is supporting evidence, not provider proof.
+        """
+        if unit_assumption not in (None, "volume_lots_amount_yuan_v1"):
+            raise ValueError("unsupported unit assumption")
+        if not isinstance(raw, str) or not isinstance(symbol, str) or len(symbol) != 6 or not symbol.isdigit():
+            raise ValueError("invalid payload or symbol")
+        result = {"schema_version": "tencent-quote-contract-v1", "symbol": symbol,
+                  "source": "tencent", "status": "rejected", "values": {}, "raw_values": {},
+                  "source_time": None, "trade_date": None, "issues": [],
+                  "raw_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+                  "unit_assumption": unit_assumption, "official_unit_contract_verified": False,
+                  "production_enabled": False, "consistency": {"average_price": None},
+                  "positions": {"price": 3, "open": 5, "change": 31, "pct_change": 32,
+                                "high": 33, "low": 34, "volume": 36, "amount": "35/2", "source_time": 30}}
+        parts = raw.split("~")
+        if len(parts) < 37:
+            result["issues"].append("short_payload")
+            return result
+        if parts[2] != symbol:
+            result["issues"].append("symbol_mismatch")
+            return result
+        issues = result["issues"]
+
+        def number(text, field):
+            if not text.strip():
+                issues.append("missing:" + field)
+                return None
+            try:
+                value = float(text)
+                if math.isfinite(value):
+                    return value
+            except (ValueError, OverflowError):
+                pass
+            issues.append("invalid:" + field)
+            return None
+
+        values = result["values"]
+        for field in ("price", "open", "change", "pct_change", "high", "low"):
+            values[field] = number(parts[result["positions"][field]], field)
+        amount_parts = parts[35].split("/")
+        volume = number(parts[36], "volume")
+        amount = number(amount_parts[2] if len(amount_parts) == 3 else "", "amount")
+        result["raw_values"].update(values, volume=volume, amount=amount)
+        for text in (parts[6], amount_parts[1] if len(amount_parts) == 3 else ""):
+            if text.strip():
+                alternate = number(text, "volume_alternate")
+                if alternate is not None and volume is not None and alternate != volume:
+                    issues.append("conflicting_volume")
+        for field, value in (("volume", volume), ("amount", amount)):
+            if value is not None and value < 0:
+                issues.append("negative:" + field)
+        if len(parts[30]) == 14 and parts[30].isdigit():
+            try:
+                timestamp = datetime.strptime(parts[30], "%Y%m%d%H%M%S")
+                result["source_time"] = timestamp.replace(tzinfo=timezone(timedelta(hours=8))).isoformat()
+                result["trade_date"] = timestamp.strftime("%Y%m%d")
+            except ValueError:
+                issues.append("invalid_source_time")
+        else:
+            issues.append("missing_or_invalid_source_time")
+        low, high = values["low"], values["high"]
+        price = values["price"]
+        rejected = price is None or price <= 0
+        if low is not None and high is not None:
+            if low <= 0 or high < low or any(value is not None and not low <= value <= high for value in (price, values["open"])):
+                issues.append("invalid_price_range")
+                rejected = True
+        values.update(volume=None, amount=None)
+        result["units"] = {"price": "yuan_per_share", "volume": "unknown", "amount": "unknown"}
+        if unit_assumption is None:
+            issues.append("unverified_units")
+        else:
+            values["volume"] = volume * 100 if volume is not None else None
+            values["amount"] = amount
+            result["units"].update(volume="shares_under_assumption", amount="yuan_under_assumption")
+            if values["volume"] is not None and not math.isfinite(values["volume"]):
+                issues.append("invalid:converted_volume")
+                values["volume"] = None
+            if values["volume"] and values["volume"] > 0 and amount is not None and low is not None and high is not None:
+                average = amount / values["volume"]
+                if math.isfinite(average):
+                    result["consistency"]["average_price"] = average
+                    if not low - 0.01 <= average <= high + 0.01:
+                        issues.append("amount_volume_outside_price_range")
+                else:
+                    issues.append("invalid:average_price")
+            else:
+                issues.append("unit_consistency_unavailable")
+        result["issues"] = sorted(set(issues))
+        result["status"] = "rejected" if rejected else "partial" if issues else "complete_under_assumption"
+        return result
 
     def get_realtime_quote(self, symbol: str) -> Optional[dict]:
         """获取腾讯实时行情。"""
