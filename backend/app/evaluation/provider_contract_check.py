@@ -11,7 +11,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from app.evaluation.quote_field_diagnostics import classify_value
+from app.evaluation.quote_field_diagnostics import classify_value, summarize_fields
 from app.evaluation.swing_dataset import compact_trade_date
 
 
@@ -23,6 +23,7 @@ _STATUSES = {
     "invalid",
     "unmatched_identity",
     "not_comparable",
+    "missing",
 }
 
 
@@ -92,11 +93,11 @@ def _status(raw_values, adapted_values, normalized_values, config, trade_date):
         "adapted": classify_value(adapted_value),
         "normalized": classify_value(normalized_value),
     }
-    if trade_date is None:
+    if trade_date is None or config["unit"] == "unknown":
         status = "not_comparable"
     elif raw_values is None or adapted_values is None or normalized_values is None:
         status = "unmatched_identity"
-    elif classes["raw"] == "missing" and classes["adapted"] == "zero":
+    elif classes["raw"] == "missing" and "zero" in (classes["adapted"], classes["normalized"]):
         status = "missing_coerced_to_zero"
     elif "invalid" in classes.values():
         status = "invalid"
@@ -110,12 +111,10 @@ def _status(raw_values, adapted_values, normalized_values, config, trade_date):
             converted = _same(raw_number * float(config["multiplier"]), adapted_number)
             if converted and _same(adapted_number, normalized_number):
                 status = "unit_converted" if float(config["multiplier"]) != 1 else "retained"
-            elif _same(raw_number, adapted_number) and _same(adapted_number, normalized_number):
-                status = "retained"
             else:
                 status = "invalid"
         elif classes["raw"] == classes["adapted"] == classes["normalized"] == "missing":
-            status = "retained"
+            status = "missing"
         else:
             status = "invalid"
     return {
@@ -130,7 +129,19 @@ def _status(raw_values, adapted_values, normalized_values, config, trade_date):
     }
 
 
-def compare_field_stages(raw_rows, adapted_rows, normalized_rows, field_map):
+def stage_summary(rows, fields):
+    """Use the accepted helper, with null rates for unobserved sources."""
+    result = summarize_fields(rows, fields)
+    count = result["row_count"]
+    for stats in result["fields"].values():
+        stats["row_count"] = count
+        for category in ("missing", "invalid", "zero", "valid"):
+            stats[category + "_rate"] = stats[category + "_count"] / count if count else None
+        stats["numeric_available_rate"] = (stats["valid_count"] + stats["zero_count"]) / count if count else None
+    return result
+
+
+def compare_field_stages(raw_rows, adapted_rows, normalized_rows, field_map, source_keys=None):
     """Compare records by symbol/date and report loss without silent repair.
 
     Date-less real-time records are retained for evidence but are explicitly
@@ -144,6 +155,17 @@ def compare_field_stages(raw_rows, adapted_rows, normalized_rows, field_map):
     rows = []
     coverage = {source: {"denominator": 0, "comparable": 0, "retained": 0, "rate": None}
                 for source in sorted({config["source"] for config in fields.values()})}
+    for source, stats in coverage.items():
+        observed = set(keys) if source_keys is None else set(source_keys.get(source, []))
+        stats["observed_rows"] = len(observed)
+        stats["fields"] = {}
+        for name, config in fields.items():
+            if config["source"] != source:
+                continue
+            stats["fields"][name] = {
+                stage: stage_summary([index[key] for key in sorted(observed, key=str) if key in index], [config[stage]])["fields"][config[stage]]
+                for stage, index in (("raw", raw), ("adapted", adapted), ("normalized", normalized))
+            }
     issues = []
     for symbol, trade_date in keys:
         row_fields = {}
@@ -153,8 +175,9 @@ def compare_field_stages(raw_rows, adapted_rows, normalized_rows, field_map):
                 raise AssertionError("unsupported field status")
             row_fields[name] = detail
             stats = coverage[config["source"]]
-            stats["denominator"] += 1
-            if detail["status"] not in {"not_comparable", "unmatched_identity"}:
+            observed = source_keys is None or (symbol, trade_date) in source_keys.get(config["source"], [])
+            stats["denominator"] += int(observed)
+            if observed and detail["classification"]["raw"] in {"valid", "zero"} and detail["status"] not in {"not_comparable", "unmatched_identity"}:
                 stats["comparable"] += 1
                 if detail["status"] in {"retained", "unit_converted"}:
                     stats["retained"] += 1
@@ -181,9 +204,11 @@ def _verified_raw_files(input_dir):
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError("request manifest is unreadable") from exc
     files = manifest.get("raw_files") if isinstance(manifest, dict) else None
-    if not isinstance(files, list):
+    if not isinstance(files, list) or not files:
         raise ValueError("request manifest raw_files must be a list")
     verified = []
+    seen = set()
+    root = input_dir.resolve()
     for item in files:
         if not isinstance(item, dict) or not isinstance(item.get("path"), str) or not isinstance(item.get("sha256"), str):
             raise ValueError("request manifest raw_files entry is invalid")
@@ -191,6 +216,12 @@ def _verified_raw_files(input_dir):
         if relative.is_absolute() or ".." in relative.parts:
             raise ValueError("raw capture path must be relative")
         path = input_dir / relative
+        resolved = path.resolve()
+        if root not in resolved.parents:
+            raise ValueError("raw capture path escapes input directory")
+        if resolved in seen:
+            raise ValueError("duplicate raw capture reference")
+        seen.add(resolved)
         try:
             payload = path.read_bytes()
         except OSError as exc:
@@ -198,7 +229,14 @@ def _verified_raw_files(input_dir):
         if hashlib.sha256(payload).hexdigest() != item["sha256"]:
             raise ValueError("raw capture sha256 mismatch")
         try:
-            verified.append(json.loads(payload.decode("utf-8")))
+            capture = json.loads(payload.decode("utf-8"))
+            _canonical_bytes(capture)
+            if not isinstance(capture, dict):
+                raise ValueError("raw capture must be an object")
+            if "_capture" in capture:
+                raise ValueError("reserved capture metadata")
+            capture["_capture"] = {"path": str(relative), "sha256": item["sha256"]}
+            verified.append(capture)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("raw capture is not JSON") from exc
     return verified
@@ -209,7 +247,7 @@ def load_verified_capture(input_dir):
     return _verified_raw_files(Path(input_dir))
 
 
-def build_verified_replay(input_dir, output_dir, field_map):
+def build_verified_replay(input_dir, output_dir, field_map, analyzer):
     """Create a cache-only comparison after verifying captured raw-file hashes.
 
     The function has no network transport. Existing output directories are a
@@ -220,20 +258,19 @@ def build_verified_replay(input_dir, output_dir, field_map):
     if output_dir.exists():
         raise FileExistsError("replay output already exists")
     captures = load_verified_capture(input_dir)
-    raw_rows, adapted_rows, normalized_rows = [], [], []
-    for capture in captures:
-        if isinstance(capture, list):
-            raw_rows.extend(capture)
-        elif isinstance(capture, dict):
-            for name, target in (("raw_rows", raw_rows), ("adapted_rows", adapted_rows), ("normalized_rows", normalized_rows)):
-                rows = capture.get(name, [])
-                if not isinstance(rows, list):
-                    raise ValueError(f"capture {name} must be a list")
-                target.extend(rows)
-        else:
-            raise ValueError("raw capture must be a list or an object")
-    result = compare_field_stages(raw_rows, adapted_rows, normalized_rows, field_map)
+    result = analyzer(captures, field_map)
     output_dir.mkdir(parents=True)
-    for name, value in (("stage-diff.json", {"rows": result["rows"], "issues": result["issues"]}), ("coverage.json", result["coverage"])):
+    for name, value in (("field-contracts.json", {"schema_version": "provider-field-contract-v2", "fields": field_map}),
+                        ("stage-diff.json", result["stage_diff"]), ("coverage.json", result["coverage"])):
         (output_dir / name).write_bytes(_canonical_bytes(value))
+    manifest = json.loads((input_dir / "request-manifest.json").read_text(encoding="utf-8"))
+    replay_manifest = {
+        "schema_version": "provider-field-cache-replay-v2", "transport": "none",
+        "input_manifest_sha256": hashlib.sha256((input_dir / "request-manifest.json").read_bytes()).hexdigest(),
+        "input_schema": manifest.get("schema_version", "unknown"),
+        "legacy_manifest": manifest.get("schema_version") != "provider-field-probe-v2",
+        "raw_file_count": len(captures), "raw_files": [item["_capture"] for item in captures],
+        **{key: result[key] for key in ("replay_completed", "capture_status", "contract_status", "statuses")},
+    }
+    (output_dir / "replay-manifest.json").write_bytes(_canonical_bytes(replay_manifest))
     return result

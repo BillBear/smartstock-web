@@ -3,11 +3,12 @@ import importlib.util
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import pandas as pd
 
-from app.evaluation.provider_contract_check import compare_field_stages, build_verified_replay
+from app.evaluation.provider_contract_check import compare_field_stages, build_verified_replay, load_verified_capture
 from app.services.data_source_manager import DataSourceManager
 from app.services.tushare_service import TuShareService
 
@@ -50,7 +51,67 @@ def record(symbol="000651", trade_date="20260720", **values):
     return {"symbol": symbol, "trade_date": trade_date, "values": values}
 
 
+def captures_fixture(status="ok", empty=False):
+    captures = []
+    for day in provider_contract_probe.DATES:
+        for endpoint in provider_contract_probe.TUSHARE_FIELDS:
+            values = {
+                "daily": {"open": 10, "high": 12, "low": 9, "close": 11, "pre_close": 10,
+                          "pct_chg": 10, "vol": 2, "amount": 3},
+                "daily_basic": {"turnover_rate": 0, "turnover_rate_f": 2, "volume_ratio": 1.5, "circ_mv": 4},
+                "adj_factor": {"adj_factor": 2},
+            }[endpoint]
+            captures.append({"source": "tushare", "endpoint": endpoint, "trade_date": day,
+                             "status": status, "rows": [] if empty else [dict(values, ts_code=symbol, trade_date=day)
+                                                                         for symbol in provider_contract_probe.SYMBOLS]})
+    return captures
+
+
+def write_capture(root, captures):
+    root.mkdir(parents=True, exist_ok=True)
+    entries = []
+    for index, capture in enumerate(captures):
+        path = root / f"raw-{index}.json"
+        path.write_text(json.dumps(capture), encoding="utf-8")
+        entries.append({"path": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+    (root / "request-manifest.json").write_text(json.dumps({"raw_files": entries}), encoding="utf-8")
+    return entries
+
+
 class ProviderContractCheckTests(unittest.TestCase):
+    def test_circ_mv_requires_declared_conversion(self):
+        rows = [record(circ_mv=4)]
+        result = compare_field_stages(rows, rows, rows, {"circ_mv": FIELD_MAP["circ_mv"]})
+        self.assertEqual(result["rows"][0]["fields"]["circ_mv"]["status"], "invalid")
+
+    def test_missing_in_all_stages_never_counts_as_retained(self):
+        rows = [record()]
+        result = compare_field_stages(rows, rows, rows, {"turnover_rate": FIELD_MAP["turnover_rate"]})
+        self.assertEqual(result["coverage"]["tushare.daily_basic"]["retained"], 0)
+
+    def test_missing_becomes_zero_only_at_normalizer(self):
+        result = compare_field_stages([record()], [record()], [record(turnover_rate=0)],
+                                      {"turnover_rate": FIELD_MAP["turnover_rate"]})
+        self.assertEqual(result["rows"][0]["fields"]["turnover_rate"]["status"], "missing_coerced_to_zero")
+
+    def test_unknown_unit_cannot_be_compared(self):
+        rows = [record(turnover_rate=4)]
+        field = dict(FIELD_MAP["turnover_rate"], unit="unknown")
+        result = compare_field_stages(rows, rows, rows, {"turnover_rate": field})
+        self.assertEqual(result["rows"][0]["fields"]["turnover_rate"]["status"], "not_comparable")
+
+    def test_all_endpoints_unavailable_is_partial_without_transport(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            captures = [{"source": "tushare", "endpoint": endpoint, "trade_date": day,
+                         "status": "unavailable", "rows": []}
+                        for day in provider_contract_probe.DATES for endpoint in provider_contract_probe.TUSHARE_FIELDS]
+            write_capture(root, captures)
+            with patch("requests.Session.request", side_effect=AssertionError("network forbidden")), \
+                    patch("tushare.pro_api", side_effect=AssertionError("SDK forbidden")):
+                result = provider_contract_probe.replay_probe(root, root / "replay")
+            self.assertEqual(result["status"], "partial")
+
     def test_missing_raw_value_coerced_to_zero_is_reported(self):
         result = compare_field_stages(
             [record(turnover_rate=None)],
@@ -110,12 +171,10 @@ class ProviderContractCheckTests(unittest.TestCase):
     def test_unavailable_source_keeps_coverage_rate_null(self):
         result = compare_field_stages([], [], [], {"turnover_rate": FIELD_MAP["turnover_rate"]})
 
-        self.assertEqual(result["coverage"]["tushare.daily_basic"], {
-            "denominator": 0,
-            "comparable": 0,
-            "retained": 0,
-            "rate": None,
-        })
+        stats = result["coverage"]["tushare.daily_basic"]
+        self.assertEqual(stats["denominator"], 0)
+        self.assertIsNone(stats["rate"])
+        self.assertIsNone(stats["fields"]["turnover_rate"]["raw"]["numeric_available_rate"])
 
     def test_tushare_realtime_adapter_only_requests_daily_and_coerces_basic_fields(self):
         class FakePro:
@@ -166,21 +225,21 @@ class ProviderContractCheckTests(unittest.TestCase):
             raw_dir = input_dir / "raw"
             raw_dir.mkdir(parents=True)
             raw_path = raw_dir / "daily.json"
-            raw_path.write_text(json.dumps([record(turnover_rate=1)]), encoding="utf-8")
+            raw_path.write_text(json.dumps(captures_fixture()[0]), encoding="utf-8")
             digest = hashlib.sha256(raw_path.read_bytes()).hexdigest()
             (input_dir / "request-manifest.json").write_text(json.dumps({
                 "raw_files": [{"path": "raw/daily.json", "sha256": digest}],
             }), encoding="utf-8")
 
-            result = build_verified_replay(input_dir, root / "replay", {"turnover_rate": FIELD_MAP["turnover_rate"]})
+            result = build_verified_replay(input_dir, root / "replay", FIELD_MAP, provider_contract_probe.analyze_captures)
             self.assertTrue((root / "replay" / "stage-diff.json").is_file())
             self.assertEqual(result["coverage"]["tushare.daily_basic"]["rate"], None)
             with self.assertRaisesRegex(FileExistsError, "output"):
-                build_verified_replay(input_dir, root / "replay", {"turnover_rate": FIELD_MAP["turnover_rate"]})
+                build_verified_replay(input_dir, root / "replay", FIELD_MAP, provider_contract_probe.analyze_captures)
 
             raw_path.write_text("[]", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "sha256"):
-                build_verified_replay(input_dir, root / "tampered", {"turnover_rate": FIELD_MAP["turnover_rate"]})
+                build_verified_replay(input_dir, root / "tampered", FIELD_MAP, provider_contract_probe.analyze_captures)
 
     def test_probe_adapter_keeps_each_symbol_on_its_own_daily_row(self):
         adapted, normalized = provider_contract_probe._adapter_rows([
@@ -237,10 +296,91 @@ class ProviderContractCheckTests(unittest.TestCase):
 
             result = provider_contract_probe.replay_probe(input_dir, root / "replay")
 
-            self.assertEqual(result["status"], "complete")
+            self.assertEqual(result["status"], "partial")
             replay_manifest = json.loads((root / "replay" / "replay-manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(replay_manifest["transport"], "none")
             self.assertEqual(replay_manifest["raw_file_count"], 6)
+
+    def test_numeric_edges_and_cross_dates(self):
+        for raw, adapted, normalized, expected in (
+                (4, 40000, 400000000, "invalid"), (4, 0, 0, "invalid"),
+                (float("nan"), 4, 4, "invalid"), (True, 1, 1, "invalid"),
+                (None, None, None, "missing")):
+            with self.subTest(raw=raw, adapted=adapted):
+                result = compare_field_stages([record(circ_mv=raw)], [record(circ_mv=adapted)],
+                                              [record(circ_mv=normalized)], {"circ_mv": FIELD_MAP["circ_mv"]})
+                self.assertEqual(result["rows"][0]["fields"]["circ_mv"]["status"], expected)
+        result = compare_field_stages([record(turnover_rate=1)],
+                                      [record(trade_date="20260721", turnover_rate=1)], [],
+                                      {"turnover_rate": FIELD_MAP["turnover_rate"]})
+        self.assertEqual(len(result["rows"]), 2)
+        self.assertTrue(all(row["fields"]["turnover_rate"]["status"] == "unmatched_identity" for row in result["rows"]))
+
+    def test_cli_partial_empty_and_missing_symbol_and_source_failures(self):
+        variants = [captures_fixture("unavailable", True), captures_fixture("ok", True), captures_fixture()]
+        variants[-1][0]["rows"].pop()
+        for captures in variants:
+            with self.subTest(captures=captures[0]["status"]), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                write_capture(root, captures)
+                with patch("requests.Session.request", side_effect=AssertionError("network forbidden")), \
+                        patch("tushare.pro_api", side_effect=AssertionError("SDK forbidden")):
+                    code = provider_contract_probe.main(["--mode", "cache-only", "--input-dir", str(root), "--output-dir", str(root / "out")])
+                self.assertEqual(code, 2)
+                manifest = json.loads((root / "out/replay-manifest.json").read_text())
+                self.assertTrue(manifest["replay_completed"])
+                self.assertEqual(manifest["capture_status"], "partial")
+                self.assertIn("akshare", {item["source"] for item in manifest["statuses"]})
+
+    def test_cli_rejects_duplicate_identity_endpoint_wrong_date_before_output(self):
+        for case in ("identity", "endpoint", "date", "reference", "hash", "traversal", "symlink"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "input"
+                captures = captures_fixture()
+                if case == "identity":
+                    captures[0]["rows"].append(captures[0]["rows"][0])
+                elif case == "endpoint":
+                    captures.append(captures[0])
+                elif case == "date":
+                    captures[0]["rows"][0]["trade_date"] = "20260721"
+                entries = write_capture(root, captures)
+                if case == "reference":
+                    entries.append(entries[0])
+                elif case == "hash":
+                    entries[0]["sha256"] = "0" * 64
+                elif case in {"traversal", "symlink"}:
+                    outside = root.parent / "outside.json"
+                    outside.write_bytes((root / entries[0]["path"]).read_bytes())
+                    if case == "symlink":
+                        (root / "link.json").symlink_to(outside)
+                        entries[0]["path"] = "link.json"
+                    else:
+                        entries[0]["path"] = "../outside.json"
+                (root / "request-manifest.json").write_text(json.dumps({"raw_files": entries}))
+                with patch("requests.Session.request", side_effect=AssertionError("network forbidden")), \
+                        patch("tushare.pro_api", side_effect=AssertionError("SDK forbidden")):
+                    self.assertEqual(provider_contract_probe.main(["--mode", "cache-only", "--input-dir", str(root),
+                                                                  "--output-dir", str(root / "out")]), 1)
+                self.assertFalse((root / "out").exists())
+
+    def test_source_without_response_has_zero_observation_denominator(self):
+        captures = captures_fixture()
+        for item in captures:
+            if item["endpoint"] == "daily_basic":
+                item.update(status="unavailable", rows=[])
+        result = provider_contract_probe.analyze_captures(captures, provider_contract_probe.FIELD_MAP)
+        stats = result["coverage"]["tushare.daily_basic"]
+        self.assertEqual(stats["denominator"], 0)
+        self.assertEqual(stats["expected_rows"], 6)
+        self.assertIsNone(stats["fields"]["circ_mv"]["raw"]["missing_rate"])
+
+    def test_complete_capture_is_distinct_from_field_loss(self):
+        captures = captures_fixture() + [
+            {"source": "tencent", "status": "ok", "rows": [{"code": symbol} for symbol in provider_contract_probe.PLAIN_SYMBOLS]},
+            {"source": "akshare", "status": "ok", "rows": [{"代码": symbol} for symbol in provider_contract_probe.PLAIN_SYMBOLS]}]
+        result = provider_contract_probe.analyze_captures(captures, provider_contract_probe.FIELD_MAP)
+        self.assertEqual(result["capture_status"], "complete")
+        self.assertEqual(result["contract_status"], "issues_detected")
 
 
 if __name__ == "__main__":

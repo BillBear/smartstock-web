@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.evaluation.provider_contract_check import compare_field_stages, load_verified_capture
+from app.evaluation.provider_contract_check import compare_field_stages, build_verified_replay, stage_summary
 from app.services.data_source_manager import DataSourceManager
 from app.services.tushare_service import TuShareService
 
@@ -146,6 +146,8 @@ def _adapter_rows(daily_rows, trade_date):
 
 
 def _raw_rows(responses, trade_date):
+    for rows in responses.values():
+        _validate_endpoint_rows(rows, trade_date)
     by_symbol = {symbol: {} for symbol in SYMBOLS}
     for endpoint, rows in responses.items():
         for row in rows:
@@ -252,48 +254,119 @@ def probe(env_file, output_dir):
     return {"status": "complete" if complete else "partial", "output_dir": str(output_dir), "statuses": statuses}
 
 
-def replay_probe(input_dir, output_dir):
-    """Rebuild derived stages from verified raw TuShare files without transport."""
-    output_dir = Path(output_dir)
-    if output_dir.exists():
-        raise FileExistsError("replay output already exists")
-    captures = load_verified_capture(input_dir)
+def _validate_endpoint_rows(rows, day):
+    if not isinstance(rows, list):
+        raise ValueError("endpoint rows must be a list")
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict) or row.get("trade_date") != day:
+            raise ValueError("wrong response date")
+        symbol = row.get("ts_code")
+        if symbol not in SYMBOLS:
+            raise ValueError("unexpected response symbol")
+        if symbol in seen:
+            raise ValueError("duplicate response symbol/date")
+        seen.add(symbol)
+
+
+def analyze_captures(captures, field_map):
+    """Validate identities before rebuilding, never trust captured stage rows."""
     by_day = {day: {} for day in DATES}
+    realtime = {}
     for capture in captures:
-        if not isinstance(capture, dict) or capture.get("source") != "tushare":
+        if not isinstance(capture, dict):
+            raise ValueError("capture must be an object")
+        source = capture.get("source")
+        path = capture.get("_capture", {}).get("path", "")
+        if "raw_rows" in capture:
+            # Legacy stage-records are derived and known to be contaminated.
             continue
-        day, endpoint, rows = capture.get("trade_date"), capture.get("endpoint"), capture.get("rows")
-        if day in by_day and endpoint in TUSHARE_FIELDS and isinstance(rows, list):
-            by_day[day][endpoint] = rows
-    output_dir.mkdir(parents=True)
+        if source is None:
+            source = {"tencent-batch.json": "tencent", "akshare-spot.json": "akshare"}.get(Path(path).name)
+        if source == "tushare":
+            day, endpoint = capture.get("trade_date"), capture.get("endpoint")
+            if day not in by_day or endpoint not in TUSHARE_FIELDS:
+                raise ValueError("unexpected endpoint/date")
+            if endpoint in by_day[day]:
+                raise ValueError("duplicate endpoint/date")
+            _validate_endpoint_rows(capture.get("rows"), day)
+            by_day[day][endpoint] = capture
+        elif source in {"tencent", "akshare"}:
+            if source in realtime:
+                raise ValueError("duplicate realtime endpoint")
+            rows = capture.get("rows", [])
+            if not isinstance(rows, list):
+                raise ValueError("realtime rows must be a list")
+            seen = set()
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise ValueError("realtime row must be an object")
+                symbol = row.get("code") or row.get("symbol") or row.get("代码")
+                if symbol not in PLAIN_SYMBOLS:
+                    raise ValueError("unexpected realtime symbol")
+                if symbol in seen:
+                    raise ValueError("duplicate realtime symbol")
+                seen.add(symbol)
+            realtime[source] = capture
+        else:
+            raise ValueError("unknown capture source")
     all_raw, all_adapted, all_normalized = [], [], []
-    replay_statuses = []
+    statuses, source_keys = [], {}
     for day in DATES:
-        responses = by_day[day]
+        responses = {}
+        for endpoint in TUSHARE_FIELDS:
+            capture = by_day[day].get(endpoint, {})
+            rows = capture.get("rows", [])
+            responses[endpoint] = rows
+            source = "tushare." + endpoint
+            source_keys.setdefault(source, []).extend((row["ts_code"][:6], day) for row in rows)
+            statuses.append({"source": source, "trade_date": day,
+                             "status": capture.get("status", "unknown"),
+                             "observed_rows": len(rows), "expected_rows": len(SYMBOLS),
+                             "complete": capture.get("status") == "ok" and len(rows) == len(SYMBOLS)})
         raw_rows = _raw_rows(responses, day)
         adapted_rows, normalized_rows = _adapter_rows(responses.get("daily", []), day)
         all_raw.extend(raw_rows)
         all_adapted.extend(adapted_rows)
         all_normalized.extend(normalized_rows)
-        replay_statuses.append({
-            "trade_date": day,
-            "raw_symbols": len(raw_rows),
-            "adapter_symbols": len(adapted_rows),
-            "endpoints": sorted(responses),
-        })
-    diff = compare_field_stages(all_raw, all_adapted, all_normalized, FIELD_MAP)
-    _write_json(output_dir / "field-contracts.json", {"schema_version": "provider-field-contract-v1", "fields": FIELD_MAP})
-    _write_json(output_dir / "stage-diff.json", {"rows": diff["rows"], "issues": diff["issues"]})
-    _write_json(output_dir / "coverage.json", diff["coverage"])
-    _write_json(output_dir / "replay-manifest.json", {
-        "schema_version": "provider-field-cache-replay-v1",
-        "input_dir": str(Path(input_dir)),
-        "raw_file_count": len(captures),
-        "statuses": replay_statuses,
-        "transport": "none",
-    })
-    complete = all(len(by_day[day]) == len(TUSHARE_FIELDS) for day in DATES)
-    return {"status": "complete" if complete else "partial", "coverage": diff["coverage"]}
+    diff = compare_field_stages(all_raw, all_adapted, all_normalized, field_map, source_keys)
+    for source, stats in diff["coverage"].items():
+        stats["expected_rows"] = len(DATES) * len(SYMBOLS)
+    realtime_stages = {}
+    manager = object.__new__(DataSourceManager)
+    for source in ("tencent", "akshare"):
+        capture = realtime.get(source, {})
+        rows = capture.get("rows", [])
+        statuses.append({"source": source, "trade_date": None, "status": capture.get("status", "unavailable"),
+                         "observed_rows": len(rows), "expected_rows": len(SYMBOLS),
+                         "complete": capture.get("status") == "ok" and len(rows) == len(SYMBOLS)})
+        fields = list(field_map)
+        raw, adapted, normalized = [], [], []
+        if source == "tencent":
+            adapted = rows
+            normalized = manager._normalize_market_snapshot(rows)
+        else:
+            raw = rows
+        stage_rows = {"raw": raw, "adapted": adapted, "normalized": normalized}
+        diff["coverage"][source] = {
+            "observed_rows": len(rows), "expected_rows": len(SYMBOLS),
+            "denominator": len(raw), "rate": None, "comparison": "not_comparable",
+            "stages": {stage: stage_summary(values, fields) for stage, values in stage_rows.items()},
+        }
+        realtime_stages[source] = {"status": "not_comparable", "trade_date": None,
+                                   "reason": "raw_payload_not_captured" if source == "tencent" else "unavailable_or_unadapted",
+                                   **stage_rows}
+    complete = all(item["complete"] for item in statuses)
+    return {"status": "complete" if complete else "partial", "replay_completed": True,
+            "capture_status": "complete" if complete else "partial",
+            "contract_status": "issues_detected" if diff["issues"] else "not_comparable" if not all_raw else "retained",
+            "statuses": statuses, "coverage": diff["coverage"],
+            "stage_diff": {"rows": diff["rows"], "issues": diff["issues"], "realtime_stages": realtime_stages}}
+
+
+def replay_probe(input_dir, output_dir):
+    """Use the sole validated replay route; transport is never constructed."""
+    return build_verified_replay(input_dir, output_dir, FIELD_MAP, analyze_captures)
 
 
 def main(argv=None):
