@@ -675,3 +675,22 @@ git diff --check
 ```
 
 结果为 112 项通过、0 失败。覆盖短 34/35/36/37 段、非文本 payload、缺/非法时间、`NaN`、有效同批 sibling、有效 quote 不变以及诊断记录。未进行任何网络请求、应用启动、数据库访问、候选生成、模型、训练或回测。这个修复提升的是数据链路的失败隔离与真实性，不能据此声称选股准确率已经提高。
+
+## 2026-09-07 连续推进：弱 ML 融合旁路证据
+
+### 为什么要记录，而不是继续调参
+
+已有 ranking 实验不能从历史快照可靠还原“规则评分”和“弱 ML 融合后的评分”，因此既不能证明 ML 改善排序，也不能证明它拖累排序。按照主计划的 E3 边界，本次只在既有候选计算中写入 `ml_fusion_trace_v1`；不改变模型模式、模型调用次数、融合系数、分数、动作、评级、仓位、止盈止损或任何策略阈值。
+
+trace 记录规则侧 `up_prob/dd_prob/total_score`、模型 ID、模型 `up/dd/final_score`、feature schema 名称、既有 0.45/0.55 与 0.65/0.35 融合权重、融合结果、横截面校准的 `raw_total/total`，以及最终的 action、grade、executable、real_money_allowed。未配置模型、预测不可用和预测异常也显式记录状态；异常只记录类型，不保存异常文本或特征值。trace 仅写入当日新候选的 JSON 快照，旧快照不伪造、不回填，也不需要数据库迁移。
+
+### 固定输入不变性与验证
+
+新增 `tests/test_pick_ml_trace.py` 使用本地合成日线和伪造 ML 服务：没有数据库、网络、真实模型推理、持久化正式候选、训练或回测。测试先验证旧代码没有 trace 而失败，最小实现后验证：
+
+- 已应用融合时，feature builder 与 `predict_live` 各恰好调用一次；
+- trace 中的融合值、横截面 `raw_total/total` 与最终交易闸门逐项对应已有 pick 值；
+- 固定输入的完整推荐投影固定为 `000001 / watch / up_prob=0.7615 / dd_prob=0.1563 / raw_total=74.58 / total=81.32 / grade=C / executable=false`；
+- 未配置 ML 时仍生成显式 `not_configured` trace，不把缺少模型冒充为规则或模型成功。
+
+该固定投影只用于防止本次证据旁路改变既有行为，**不代表收益、胜率或策略有效性**。当前没有新的历史融合 trace，故 E3 仍是 `historically_unavailable`；本次只是为今后足够长的前向观察提供可审计输入。不得据此把弱模型切换到 shadow/active，也不得重新解释此前 T1 的 `no_shadow_candidate` 结论。

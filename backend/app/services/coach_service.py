@@ -7,6 +7,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import math
 import re
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timedelta
@@ -1914,6 +1915,38 @@ class CoachService:
                     + news_display_score * 0.10
                 )
 
+        # This trace is observational only. It preserves the rule inputs and
+        # fusion outputs needed to evaluate an already-configured ML sidecar.
+        # It must never be read by the recommendation or ranking path.
+        ml_fusion_trace = {
+            "schema_version": "ml_fusion_trace_v1",
+            "status": "not_configured",
+            "rule": {
+                "up_prob": round(up_prob, 4),
+                "dd_prob": round(dd_prob, 4),
+                "total_score": round(total_score, 2),
+            },
+            "model": {
+                "model_id": None,
+                "model_version_id": None,
+                "feature_schema": [],
+                "model_up_prob": None,
+                "model_dd_prob": None,
+                "model_final_score": None,
+            },
+            "fusion": {
+                "up_prob": {"rule_weight": 0.45, "model_weight": 0.55},
+                "dd_prob": {"rule_weight": 0.45, "model_weight": 0.55},
+                "total_score": {"rule_weight": 0.65, "model_weight": 0.35},
+            },
+            "fused": {
+                "up_prob": round(up_prob, 4),
+                "dd_prob": round(dd_prob, 4),
+                "total_score": round(total_score, 2),
+            },
+            "ranking": {"raw_total": None, "total": None},
+            "gate_outcomes": {},
+        }
         ml_enrichment: Dict[str, Any] = {}
         if self.ml_model_service:
             try:
@@ -1924,6 +1957,7 @@ class CoachService:
                     money_flow_proxy_yi=main_net_inflow_yi,
                     turnover_rate=turnover_rate,
                 )
+                ml_fusion_trace["model"]["feature_schema"] = self._trace_feature_names(feature_payload)
                 model_prediction = self.ml_model_service.predict_live(
                     feature_payload,
                     pick_context={
@@ -1934,18 +1968,40 @@ class CoachService:
                 )
                 if model_prediction:
                     model_probability = model_prediction.get("model_probability") or {}
+                    observed_model_up_prob = self._trace_optional_float(model_probability.get("model_up_prob"))
+                    observed_model_dd_prob = self._trace_optional_float(model_probability.get("model_dd_prob"))
+                    observed_model_final_score = self._trace_optional_float(model_probability.get("final_score"))
                     model_up_prob = self._safe_float(model_probability.get("model_up_prob"), up_prob)
                     model_dd_prob = self._safe_float(model_probability.get("model_dd_prob"), dd_prob)
                     model_final_score = self._safe_float(model_probability.get("final_score"), total_score)
                     up_prob = self._clamp(up_prob * 0.45 + model_up_prob * 0.55, 0.05, 0.90)
                     dd_prob = self._clamp(dd_prob * 0.45 + model_dd_prob * 0.55, 0.05, 0.85)
                     total_score = self._clamp(total_score * 0.65 + model_final_score * 0.35, 0, 100)
+                    ml_fusion_trace["status"] = "applied"
+                    ml_fusion_trace["model"].update(
+                        {
+                            "model_id": model_prediction.get("model_version_id"),
+                            "model_version_id": model_prediction.get("model_version_id"),
+                            "model_up_prob": observed_model_up_prob,
+                            "model_dd_prob": observed_model_dd_prob,
+                            "model_final_score": observed_model_final_score,
+                        }
+                    )
+                    ml_fusion_trace["fused"] = {
+                        "up_prob": round(up_prob, 4),
+                        "dd_prob": round(dd_prob, 4),
+                        "total_score": round(total_score, 2),
+                    }
                     ml_enrichment = {
                         **model_prediction,
                         "model_version_id": model_prediction.get("model_version_id"),
                     }
-            except Exception:
+                else:
+                    ml_fusion_trace["status"] = "prediction_unavailable"
+            except Exception as exc:
                 ml_enrichment = {}
+                ml_fusion_trace["status"] = "prediction_error"
+                ml_fusion_trace["error_type"] = type(exc).__name__
 
         expected_mult = 16 if risk_level == "low" else (24 if risk_level == "high" else 20)
         expected_return = round((up_prob - dd_prob) * expected_mult, 2)
@@ -1999,6 +2055,7 @@ class CoachService:
                 "news": round(news_display_score, 2),
                 "total": round(self._clamp(total_score, 0, 100), 2),
             },
+            "ml_fusion_trace": ml_fusion_trace,
             "teaching_points": [
                 "先看市场状态，再决定是否进攻",
                 "资金流与换手率要结合看：放量流入优于放量分歧",
@@ -2284,6 +2341,9 @@ class CoachService:
             raw_total = float(breakdown.get("total", 0) or 0)
             breakdown["raw_total"] = round(raw_total, 2)
             pick["score_breakdown"] = breakdown
+            trace = pick.get("ml_fusion_trace")
+            if isinstance(trace, dict):
+                trace["ranking"] = {"raw_total": breakdown["raw_total"], "total": None}
             raw_scores.append(raw_total)
 
         ordered = sorted(raw_scores)
@@ -2349,6 +2409,12 @@ class CoachService:
             )
             breakdown["total"] = round(display_total, 2)
             pick["score_breakdown"] = breakdown
+            trace = pick.get("ml_fusion_trace")
+            if isinstance(trace, dict):
+                trace["ranking"] = {
+                    "raw_total": breakdown.get("raw_total"),
+                    "total": breakdown["total"],
+                }
 
     def _build_pick_decision(
         self,
@@ -2524,6 +2590,15 @@ class CoachService:
                 }
                 pick["probability_model"] = model
             pick["decision"] = self._build_pick_decision(pick, strategy_health, market_state, risk_level)
+            trace = pick.get("ml_fusion_trace")
+            if isinstance(trace, dict):
+                decision = pick["decision"]
+                trace["gate_outcomes"] = {
+                    "action": pick.get("action"),
+                    "grade": decision.get("grade"),
+                    "executable": bool(decision.get("executable")),
+                    "real_money_allowed": bool(decision.get("real_money_allowed")),
+                }
 
         core = [p for p in picks if (p.get("decision") or {}).get("grade") == "A"]
         trial = [p for p in picks if (p.get("decision") or {}).get("grade") == "B"]
@@ -4199,6 +4274,30 @@ class CoachService:
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
         return safe_float(value, default)
+
+    @staticmethod
+    def _trace_optional_float(value: Any) -> Optional[float]:
+        """Return a finite observed value without substituting a strategy default."""
+        if value is None or isinstance(value, bool) or (isinstance(value, str) and not value.strip()):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(parsed):
+            return None
+        return round(parsed, 4)
+
+    @staticmethod
+    def _trace_feature_names(feature_payload: Dict[str, Any]) -> List[str]:
+        schema = feature_payload.get("feature_schema") or []
+        if not isinstance(schema, list):
+            return []
+        return [
+            str(item.get("name"))
+            for item in schema
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        ]
 
     def _build_trade_diagnostics(self, trades: List[Dict[str, Any]]) -> Dict[str, Any]:
         normalized = []
