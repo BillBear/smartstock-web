@@ -36,6 +36,7 @@ import {
   getRankPresentation,
   getPickDataQualityPresentation,
   getPickEvidencePresentation,
+  getSnapshotProvenancePresentation,
   getRefreshFeedback,
 } from './smartScreenPresentation.mjs'
 import './SmartScreen.css'
@@ -441,6 +442,8 @@ const SmartScreen = () => {
       setDetailLoading(false)
     }
   }
+
+  const snapshotProvenance = getSnapshotProvenancePresentation(result)
 
   const columns = [
     {
@@ -931,7 +934,7 @@ const SmartScreen = () => {
 
       <Card className="ranking-card" variant="borderless">
         <div className="ranking-card-title">
-          <h3>完整候选池</h3>
+          <h3>{snapshotProvenance.observationOnly ? '候选观察池（不是买入清单）' : '完整候选池'}</h3>
           <span>当前列表 {displayPickList.length} 只，按策略综合分倒序展示；A/B 级 {tradePlanCandidateCount} 只进入模拟验证口径，C 级 {watchCandidateCount} 只用于观察学习。</span>
         </div>
         <Space wrap style={{ marginBottom: 12 }}>
@@ -939,6 +942,19 @@ const SmartScreen = () => {
           <Tag>距当前：{signalAgeText}</Tag>
           <span>综合分不是成功率；降级候选的收益为代理估计。</span>
         </Space>
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={snapshotProvenance.sourceText}
+          description={(
+            <div>
+              <div>候选生成时间：{snapshotProvenance.generatedAtText}</div>
+              <div>市场快照保存时间：{snapshotProvenance.marketSavedAtText}</div>
+              <div>{snapshotProvenance.quoteTimeText}</div>
+            </div>
+          )}
+        />
         {diagnostic.coverageLevel === 'warning' && diagnostic.coverageText && (
           <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={diagnostic.coverageText} />
         )}

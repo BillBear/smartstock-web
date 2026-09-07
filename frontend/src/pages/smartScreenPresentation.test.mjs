@@ -10,6 +10,35 @@ import {
   RANKING_TABLE_COLUMN_KEYS,
 } from './smartScreenPresentation.mjs'
 
+test('snapshot provenance separates saved dates from unknown quote timestamps', () => {
+  const result = {
+    status: 'cached_from_store', trade_date: '2026-09-07', updated_at: '2026-09-07',
+    universe_meta: { market_snapshot_created_at: '2026-09-07 21:48:52' },
+    picks: [{ decision: { grade: 'C', mode: 'watch_only' }, position_pct: 0 }],
+  }
+  const before = JSON.stringify(result)
+  const display = qualityPresentation.getSnapshotProvenancePresentation(result)
+  assert.equal(display.sourceText, '已保存候选快照（本次读取未重新计算）')
+  assert.match(display.generatedAtText, /生成时刻未记录/)
+  assert.equal(display.marketSavedAtText, '2026-09-07 21:48:52')
+  assert.match(display.quoteTimeText, /未记录/)
+  assert.equal(display.observationOnly, true)
+  assert.equal(JSON.stringify(result), before)
+})
+
+test('missing provenance cannot claim freshness or an observation-only decision', () => {
+  const display = qualityPresentation.getSnapshotProvenancePresentation({})
+  assert.equal(display.sourceText, '候选来源未标记')
+  assert.equal(display.marketSavedAtText, '未记录')
+  assert.equal(display.observationOnly, false)
+  const precise = qualityPresentation.getSnapshotProvenancePresentation({
+    updated_at: '2026-09-07T15:05:00+08:00',
+    picks: [{ decision: { grade: 'B', mode: 'paper_only' } }],
+  })
+  assert.equal(precise.generatedAtText, '2026-09-07T15:05:00+08:00')
+  assert.equal(precise.observationOnly, false)
+})
+
 assert.deepEqual(
   RANKING_TABLE_COLUMN_KEYS,
   [

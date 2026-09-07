@@ -130,3 +130,22 @@ export function getRefreshFeedback(response = {}) {
   }
   return { type: 'success', text: '候选池刷新完成' }
 }
+
+export function getSnapshotProvenancePresentation(result = {}) {
+  const updatedAt = typeof result?.updated_at === 'string' ? result.updated_at : ''
+  const marketSavedAt = result?.universe_meta?.market_snapshot_created_at
+  const picks = Array.isArray(result?.picks) ? result.picks : []
+  return {
+    sourceText: result?.status === 'cached_from_store'
+      ? '已保存候选快照（本次读取未重新计算）'
+      : '候选来源未标记',
+    generatedAtText: /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}/.test(updatedAt)
+      ? updatedAt : '生成时刻未记录（仅有快照日期）',
+    marketSavedAtText: typeof marketSavedAt === 'string' && marketSavedAt.trim()
+      ? marketSavedAt : '未记录',
+    quoteTimeText: '行情原始时刻未记录；快照保存时间不等于行情时间，不能据此确认实时性。',
+    observationOnly: picks.length > 0 && picks.every((pick) => (
+      pick?.decision?.grade === 'C' && pick?.decision?.mode === 'watch_only'
+    )),
+  }
+}
