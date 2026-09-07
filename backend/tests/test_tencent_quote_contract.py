@@ -116,6 +116,41 @@ class TencentQuoteContractTests(unittest.TestCase):
             self.assertEqual(service.get_realtime_quote("000651"), expected)
             self.assertEqual(service.get_realtime_quotes_batch(["000651"]), {"000651": expected})
 
+    def test_legacy_parser_rejects_short_payload_and_does_not_invent_timestamp(self):
+        service = object.__new__(TencentService)
+        self.assertIsNone(service._parse_quote_payload("000651", None))
+        for size in (0, 34, 35, 36):
+            with self.subTest(size=size):
+                self.assertIsNone(service._parse_quote_payload("000651", "~".join([""] * size)))
+
+        for timestamp in ("", "20260230150000", "not-a-timestamp"):
+            with self.subTest(timestamp=timestamp), patch("app.services.tencent_service.datetime") as clock:
+                clock.strptime.side_effect = ValueError("invalid timestamp")
+                self.assertIsNone(service._parse_quote_payload("000651", synthetic_payload(**{"30": timestamp})))
+                clock.now.assert_not_called()
+
+    def test_legacy_batch_skips_malformed_quote_without_dropping_valid_sibling(self):
+        service = object.__new__(TencentService)
+        service.timeout = 4
+        service.session = Mock()
+        malformed = "~".join([""] * 35)
+        valid = synthetic_payload(**{"2": "601988"})
+        response = Mock()
+        response.content = (f'v_sz000651="{malformed}";v_sh601988="{valid}";').encode("gbk")
+        service.session.get.return_value = response
+
+        quotes = service.get_realtime_quotes_batch(["000651", "601988"])
+
+        self.assertEqual(list(quotes), ["601988"])
+        self.assertEqual(quotes["601988"]["price"], 10.0)
+        self.assertEqual(quotes["601988"]["update_time"], "2026-09-07 16:14:51")
+
+    def test_legacy_parser_rejects_non_finite_numeric_fields(self):
+        service = object.__new__(TencentService)
+        for field in ("3", "31", "32", "5", "33", "34", "36"):
+            with self.subTest(field=field):
+                self.assertIsNone(service._parse_quote_payload("000651", synthetic_payload(**{field: "nan"})))
+
     def test_overflow_does_not_escape_into_normalized_json(self):
         result = self.strict(synthetic_payload(**{"6": "1e308", "36": "1e308", "35": "10/1e308/2000"}),
                              "volume_lots_amount_yuan_v1")

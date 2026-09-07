@@ -238,6 +238,8 @@ def _probe_tencent():
                 quote = service._parse_quote_payload(symbol, raw.rsplit('"', 1)[0])
                 if quote:
                     quotes.append(quote)
+                else:
+                    parse_errors.append({"symbol": symbol, "status": "parser_rejected"})
             except (ValueError, IndexError):
                 parse_errors.append({"symbol": symbol, "status": "parser_error"})
         return {"status": "ok" if len(quotes) == len(PLAIN_SYMBOLS) else "partial", "rows": quotes,

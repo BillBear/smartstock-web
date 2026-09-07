@@ -213,28 +213,20 @@ class ProviderContractCheckTests(unittest.TestCase):
         self.assertEqual(direct["circ_mv"], 40000)
         self.assertEqual(direct["turnover_rate"], 0)
 
-    def test_tencent_parser_synthetic_boundary_and_now_fallback(self):
+    def test_tencent_parser_rejects_short_or_time_less_payloads(self):
         from app.services.tencent_service import TencentService
         service = object.__new__(TencentService)
-        self.assertIsNone(service._parse_quote_payload("000651", "~".join([""] * 34)))
-        fixed_clock = Mock()
-        fixed_clock.now.return_value = datetime(2026, 9, 7, 10)
-        fixed_clock.strptime = datetime.strptime
-        with patch("app.services.tencent_service.datetime", fixed_clock):
-            for size in (35, 36):
-                with self.subTest(size=size), self.assertRaises(IndexError):
-                    service._parse_quote_payload("000651", "~".join([""] * size))
-            parts = [""] * 37
-            quote = service._parse_quote_payload("000651", "~".join(parts))
-            self.assertEqual(quote["price"], 0)
-            self.assertEqual(quote["update_time"], "2026-09-07 10:00:00")
-            parts[3], parts[30], parts[35], parts[36] = "0", "20260720150000", "x/y/3", "2"
-            quote = service._parse_quote_payload("000651", "~".join(parts))
-            self.assertEqual(quote["volume"], 2)
-            self.assertEqual(quote["amount"], 3)
-            self.assertEqual(quote["update_time"], "2026-07-20 15:00:00")
-            self.assertNotIn("turnover_rate", quote)
-            self.assertNotIn("amount_unit", quote)
+        for size in (34, 35, 36, 37):
+            with self.subTest(size=size):
+                self.assertIsNone(service._parse_quote_payload("000651", "~".join([""] * size)))
+        parts = [""] * 37
+        parts[3], parts[30], parts[35], parts[36] = "0", "20260720150000", "x/y/3", "2"
+        quote = service._parse_quote_payload("000651", "~".join(parts))
+        self.assertEqual(quote["volume"], 2)
+        self.assertEqual(quote["amount"], 3)
+        self.assertEqual(quote["update_time"], "2026-07-20 15:00:00")
+        self.assertNotIn("turnover_rate", quote)
+        self.assertNotIn("amount_unit", quote)
 
     def test_akshare_synthetic_spot_missing_nonfinite_and_time_do_not_change_proxy(self):
         from app.services.akshare_service import AKShareService
@@ -367,7 +359,7 @@ class ProviderContractCheckTests(unittest.TestCase):
         self.assertIsNone(first["stage_diff"]["realtime_stages"]["akshare"]["adapted"][0]["update_time"])
         self.assertEqual(before, dict(os.environ))
 
-    def test_tencent_fake_response_preserves_payload_and_parse_error(self):
+    def test_tencent_fake_response_preserves_payload_and_parse_rejection(self):
         from app.services.tencent_service import TencentService
         response = Mock()
         response.content = ('v_sz000651="' + "~".join([""] * 35) + '";').encode("gbk")
@@ -379,7 +371,7 @@ class ProviderContractCheckTests(unittest.TestCase):
         self.assertEqual(result["status"], "partial")
         self.assertEqual(result["evidence_level"], "raw_payload_and_adapted")
         self.assertIn("v_sz000651", result["raw_payload"])
-        self.assertEqual(result["parse_errors"][0]["status"], "parser_error")
+        self.assertEqual(result["parse_errors"], [{"symbol": "000651", "status": "parser_rejected"}])
         self.assertEqual(session.get.call_count, 1)
         self.assertEqual(session.get.call_args.kwargs["timeout"], 15)
         session.close.assert_called_once_with()

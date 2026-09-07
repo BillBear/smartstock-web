@@ -65,33 +65,50 @@ class TencentService:
                 return None
         return None
 
-    def _parse_quote_payload(self, symbol: str, raw: str) -> Optional[dict]:
+    def _parse_quote_payload(self, symbol: str, raw: Optional[str]) -> Optional[dict]:
+        if not isinstance(raw, str):
+            return None
         parts = raw.split("~")
-        if len(parts) < 35:
+        if len(parts) < 37:
             return None
 
-        amount = 0.0
-        if len(parts) > 35 and "/" in parts[35]:
-            segments = parts[35].split("/")
-            if len(segments) >= 3:
-                amount = float(segments[2] or 0)
+        def number(value):
+            try:
+                numeric = float(value or 0)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return numeric if math.isfinite(numeric) else None
 
-        update_time = parts[30] if len(parts) > 30 else ""
-        if len(update_time) == 14:
+        segments = parts[35].split("/")
+        amount = number(segments[2]) if len(segments) >= 3 else 0.0
+        update_time = parts[30]
+        if len(update_time) != 14 or not update_time.isdigit():
+            return None
+        try:
             update_time = datetime.strptime(update_time, "%Y%m%d%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
-        else:
-            update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+
+        price = number(parts[3])
+        change = number(parts[31])
+        pct_change = number(parts[32])
+        open_price = number(parts[5])
+        high = number(parts[33])
+        low = number(parts[34])
+        volume = number(parts[36] or parts[6])
+        if None in (amount, price, change, pct_change, open_price, high, low, volume):
+            return None
 
         return {
             "code": symbol,
             "name": parts[1] or symbol,
-            "price": float(parts[3] or 0),
-            "change": float(parts[31] or 0),
-            "pct_change": float(parts[32] or 0),
-            "open": float(parts[5] or 0),
-            "high": float(parts[33] or 0),
-            "low": float(parts[34] or 0),
-            "volume": float(parts[36] or parts[6] or 0),
+            "price": price,
+            "change": change,
+            "pct_change": pct_change,
+            "open": open_price,
+            "high": high,
+            "low": low,
+            "volume": volume,
             "amount": amount,
             "update_time": update_time,
         }
@@ -234,7 +251,11 @@ class TencentService:
                     market_symbol = prefix.replace("v_", "").strip()
                     symbol = self._to_plain_symbol(market_symbol)
                     raw = payload.rsplit("\"", 1)[0]
-                    quote = self._parse_quote_payload(symbol, raw)
+                    try:
+                        quote = self._parse_quote_payload(symbol, raw)
+                    except (IndexError, TypeError, ValueError, OverflowError):
+                        logger.warning("Tencent批量行情解析失败 symbol=%s", symbol)
+                        continue
                     if quote:
                         result[symbol] = quote
             except Exception as e:

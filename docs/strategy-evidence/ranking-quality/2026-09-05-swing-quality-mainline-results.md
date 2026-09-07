@@ -651,3 +651,27 @@ git diff --check
 ```
 
 结果为 109 项通过、0 失败；仅有现有 LibreSSL/urllib3 警告，以及注入的 provider 负例日志。没有启动 FastAPI、访问 PostgreSQL、生成候选、运行模型、训练或回测。该测试范围不能证明腾讯单位假设为官方事实，也不能证明策略准确率提升；它只保证缺失和非法输入不再被静默伪装为有效数据，并保留后续单变量研究所需的来源状态。
+
+## 2026-09-07 连续推进：腾讯旧实时解析器安全边界
+
+### 修复的真实故障
+
+旧 `_parse_quote_payload` 对 35 或 36 段 payload 会访问不存在的第 36 位并抛出 `IndexError`。批量 getter 的异常边界在整批外层，所以一条坏报价可丢弃同批最多 180 只股票。旧代码还会把缺失或非法的 provider 行情时间替换为本机当前时间，使页面看起来像刚更新而实际无法证明。
+
+现在旧 live parser 只接受至少 37 段、14 位可解析的 provider 时间、有限的价格/涨跌/高低/成交量和可解析的成交额。短响应、无时间、非法时间、非法数值或无穷值返回不可用；批量循环记录并跳过单条解析异常，继续保留同批其他有效报价。字段位置、有效报价字段、成交量原单位与金额原单位均没有改变，严格研究入口也没有被 live getter 调用。
+
+### 行为与证据边界
+
+这项变更只改变损坏或无法证明时效的上游输入：以前它们可能造成整批空结果、`NaN` 流入、或伪造更新时间；现在是单条 unavailable。对合格 synthetic payload，单股与批量 getter 仍严格返回同一组 `code/name/price/change/pct_change/open/high/low/volume/amount/update_time`，其中 volume 仍为旧原值 `2.0`，没有乘以 100。
+
+这不是排名、换手率、模型或买卖策略变更。坏报价变为不可用时，系统可能减少该次实时覆盖，而不是用错误数据维持候选；这是数据质量优先的显式保守行为。`check_provider_field_contracts` 的原始响应诊断也将此类单条记为 `parser_rejected`，保留 payload 而不把没有异常混同为有效行情。
+
+### 验证
+
+先新增失败测试，复现短 payload 的 `IndexError`、伪造当前时间及“坏首行导致有效同批股票被丢弃”；最小修复后运行：
+
+```bash
+"$PY" -B -m unittest tests.test_data_sources tests.test_tencent_quote_contract tests.test_quote_field_diagnostics tests.test_provider_contract_check tests.test_swing_dataset -v
+```
+
+结果为 112 项通过、0 失败。覆盖短 34/35/36/37 段、非文本 payload、缺/非法时间、`NaN`、有效同批 sibling、有效 quote 不变以及诊断记录。未进行任何网络请求、应用启动、数据库访问、候选生成、模型、训练或回测。这个修复提升的是数据链路的失败隔离与真实性，不能据此声称选股准确率已经提高。
