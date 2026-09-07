@@ -457,3 +457,121 @@ not alter the existing `no_shadow_candidate` result. A future strategy-impact
 task must first repair source semantics in its own branch, freeze a new
 baseline, and run the same fixed ranking evaluation before any field becomes a
 live feature.
+
+## 2026-09-07 接口字段链路补充验收
+
+### 结论与纠正范围
+
+按主计划第 11 节完成限定诊断修复与离线复算，等待人工验收。不是生产接口全部通过，也不是策略准确率提升证明。本轮真实行情请求 0，未读取密钥、访问数据库、启动应用、构造 CoachStore、生成候选、调用模型或运行回测；未合并、推送、部署。
+
+本节 supersedes 上节关于“完整字段验收已闭合”、旧 cache-only exit 0 代表完备、错倍率必然拒绝的表述。保留上节历史文字及所有旧文件；36/36 日线局部观察仍成立，但新增 pct_change 后分母为 42。原始 capture 的 stage-records 及首份衍生结果曾受跨股票测试桩污染，不作为本次输入；仅校验其 hash 并明确跳过。上次修正的 derived-replay 也不覆盖。
+
+**本次复算完成，来源仍不完整：** `replay_completed=true`、`capture_status=partial`、`contract_status=issues_detected`，两次 CLI 均 exit 2。这里的 2 是旧 AKShare 不可用的真实状态，不是测试失败，更不是可以忽略来源缺失的成功码。
+
+实现提交：
+
+- `3da8514d1edc60fae51a6faf75fcb5eba04f23b8`：修复错倍率、全缺失假成功、分母、身份/路径/hash 校验；恢复已验收 helper 与测试。
+- `cbc97ae80fd7189927b9e83f56e2ba4c8a25fb8c`：复用 join 生成旁路，验证真实快照入口及腾讯/AKShare 边界，补采集安全预算与谱系。此提交中的 probe 只用 fake transport 验证，未真实执行。
+- 起点 `fcb9bb2009ec049a213be6314d261438d54fa9bf` 是已批准的文档交接；本轮没有更改该计划。分支 `evaluation/provider-field-contract-completion`。
+
+### 来源、分母与三层缺失
+
+输入保持为 `$SMARTSTOCK_RUNTIME_ROOT/strategy-quality/swing-quality-v1/provider-contract-check-20260906-231500/`。9 个 raw 文件逐文件 hash 校验通过。原 request-manifest SHA-256 为 `840c541628e88821ca8398ad2cd74b11f6b84d36472d83fab82b163557b24eb4`。
+
+| 来源 | 已观测/预期行数 | 原状态 | 可证明的范围 |
+|---|---:|---|---|
+| TuShare daily | 每日 3/3，两日 6/6 | ok | 20260720、20260831 的三股已筛选 SDK 行，不是完整 HTTP 响应 |
+| TuShare daily_basic | 每日 3/3，两日 6/6 | ok | 同股同日四字段存在 |
+| TuShare adj_factor | 每日 3/3，两日 6/6 | ok | 同股同日因子存在，非实时报价复权承诺 |
+| 腾讯 batch | 3/3 | ok | 仅 adapted-only；缺原 payload，不与两历史日期对齐 |
+| AKShare spot | 0/3 | unavailable | 原 ConnectionError，无响应行；不重试、不兜底 |
+
+下表缺失率按每个字段各阶段实际记录数统计，0 与 null 分开。raw 缺响应时分母 0，率 null；不伪造 3 行缺失响应。字段数值可用率不等于链路保留率：适配器填出的 0 在类型上有限，但不是 provider 真值。
+
+| 字段/来源 | raw 缺失率 | adapted 缺失率 | normalized 缺失率 | 额外事实 |
+|---|---:|---:|---:|---|
+| TuShare 价格/OHLC、pct_change、volume、amount，每字段 n=6 | 0% | 0% | 0% | 42/42 正确保留；volume x100，amount x1000，仅一次 |
+| TuShare turnover_rate，n=6 | 0% | 0% | 0% | 适配和统一层 6/6 为错误零值，完整链路保留 0/6 |
+| TuShare turnover_rate_f、volume_ratio，各 n=6 | 0% | 100% | 100% | 有原值但未透传 |
+| TuShare circ_mv，n=6 | 0% | 0% | 100% | 适配层 6/6 为零，统一层丢失，非正确 x10000 |
+| TuShare adj_factor，n=6 | 0% | 100% | 100% | 日终历史输入用途，不能据此要求实时报价调整价格 |
+| 腾讯七个日行情字段，各 adapted/normalized n=3 | null，n=0 | 0% | 0% | 数值存在不证明原单位、原时间正确 |
+| 腾讯 turnover_rate、circ_mv、pe、pb、total_mv，各 n=3 | null，n=0 | 100% | 0% | 统一层全部填零，零率 100% |
+| 腾讯 volume_ratio、turnover_rate_f、adj_factor，各 n=3 | null，n=0 | 100% | 100% | 当前报价未提供 |
+| AKShare 所有检测字段 | null，n=0 | null，n=0 | null，n=0 | 预期 3 单列，不能宣称可用率 100% |
+
+上述已观测字段 invalid_count 均为 0，但这只说明数字类型有限，不说明跨层值正确。TuShare daily_basic 的 24 个可比较观测，链路保留为 0/24。详细 missing/invalid/zero/valid counts、各自比率及阶段 row_count 均在 coverage.json；未知单位/日期为 not_comparable，不参与“正确保留”结论。
+
+### 研究旁路与真实生产消费
+
+直接复用 `join_daily_inputs`，生成 6 条 research_rows，两日各 3 条、拒绝 0 条、quality_status 均 complete。每条保留三份 capture 的路径/hash、逐原始行 hash、raw_inputs 和来源单位。available_at 始终 null；字段齐全不等于已具备历史 point-in-time 可得性证明。
+
+| 股票 | 日期 | 实际换手率 % | 自由流通换手率 % | provider 量比 | 流通市值 元 | adj_factor |
+|---|---|---:|---:|---:|---:|---:|
+| 000001 | 20260720 | 0.8077 | 1.9206 | 1.57 | 213073495686 | 139.008 |
+| 000651 | 20260720 | 1.3835 | 1.8209 | 1.43 | 224083143116 | 230.3931 |
+| 601988 | 20260720 | 0.2198 | 3.7898 | 1.40 | 1281454329984 | 2.6383 |
+| 000001 | 20260831 | 0.4683 | 1.1137 | 0.88 | 227434628200 | 139.008 |
+| 000651 | 20260831 | 0.6869 | 0.9045 | 0.66 | 214727182350 | 242.035 |
+| 601988 | 20260831 | 0.2361 | 2.2651 | 1.96 | 1372083501348 | 2.6383 |
+
+表内市值为阅读取整，JSON 保留原 join 的浮点值，未改规范化函数。格力两日原始开/收分别 39.8/40.58、38.9/38.95；未乘 adj_factor。null 补充数据不补 0，真实 0 不改为缺失；这两种情况均有合成测试。本旁路不传给评分，也未新增另一套策略公式。
+
+源码链路：`CoachService._get_universe_snapshot:589 -> DataSourceManager.get_a_share_snapshot:374 -> _build_tushare_tencent_snapshot:424 -> TencentService.get_realtime_quotes_batch:112 -> _normalize_market_snapshot:862`。500 条合成股票目录/报价的特征测试沿真实方法执行，保持现有 500 条门槛，确认优先路径不会调用 AKShare；未实例化 CoachService。
+
+| 字段 | provider/当前适配与标准化事实 | CoachService 当前消费方式 |
+|---|---|---|
+| 股票目录/行业 | TuShare stock_basic 提供目录，腾讯提供行情 | 实际目录与行业；优先路径并未调用 daily_basic |
+| 价格/OHLC/pct_change | 日线封装保留；腾讯当前输出这些字段 | 实际输入参与价格/动量/区间判断；不说明原腾讯数据已全面核真 |
+| volume/amount | TuShare 单位转换已离线核对；腾讯 parser 直接用位置数值，原单位未证实 | 实际输入或历史量，用于流动性和其他代理；错误单位可能放大后续影响 |
+| turnover_rate | 日线封装填零；腾讯 parser 无此字段，市场统一层填零 | 733-739、941-947 等候选路径：缺失/非正时用 amount/circ_mv 或 amount 代理；1518-1522 构建 pick 时亦用 amount 代理 |
+| circ_mv | TuShare 原四字段有值；腾讯组合快照不复制此键，即使人工报价带值也丢弃 | 候选换手代理的条件分母；不能声称线上已用真实流通市值 |
+| volume_ratio | TuShare 日终指标有值但未透传 | 1560 用历史末日成交量/末 5 行均值自算，不等于 TuShare 量比 |
+| turnover_rate_f | 原值有、当前报价未提供 | CoachService 没有直接引用，不视为已经使用的特征 |
+| money_flow | 本批没采集资金流真值 | 1486-1496：quote_override 列表路径是成交额与涨跌幅代理；无 override 才请求 remote，remote 标签本身不证明数据成功 |
+| PE/PB/总市值 | 本次 TuShare 请求未包含这些字段；腾讯 parser 不返回，统一层填零；AK 仅合成测试验证列映射 | CoachService 无直接字段引用；不扩张为全项目“未使用”或 provider“不提供”的结论 |
+| adj_factor | 独立历史字段，旁路保留且与 raw OHLC 分离 | 当前 CoachService 不直接引用，不把因子缺席实时报价当成需要盲目透传的 bug |
+
+腾讯合成边界测试确认：34 段返回 None；35/36 段可因读取第 36 索引而 IndexError；37 段空数值被转零，原时间缺失会用 datetime.now。AKShare 合成 DataFrame 确认：缺关键列时单股报价返回 None；单股浮点 NaN 可保留，全市场解析可归零；附加字段缺失默认零，时间使用 now。测试不调用真实 provider、不改变父进程代理。离线 AK 市场重演把该合成运行时间标为非 provider 时间并置 null，避免复算引入时钟差异；腾讯旧缓存的原始时间/单位保持 unknown。
+
+### 可复现性与验证
+
+新证据目录：`$SMARTSTOCK_RUNTIME_ROOT/strategy-quality/swing-quality-v1/provider-contract-completion-20260907-211219/`，包含 replay、repeat 与三份命令日志。旧 capture/derived-replay 原样保留。重演环境：Python 3.9.6、TuShare 1.4.21、AKShare 1.18.21、pandas 2.3.3、requests 2.31.0。这是本次运行版本，不追认旧采集版本；旧请求参数、HTTP 状态、耗时、SDK 版本缺证据处一律 unknown。
+
+| 两次输出均字节一致 | SHA-256 |
+|---|---|
+| field-contracts.json | `429b65628baff4d6ab8bed6b673cbc06eef6be070326dbe50d6c0180d69b2a43` |
+| stage-diff.json | `7127c7a45a05fb5bb3f12cc5acbd84818325ecac25dfbad2ce7a3a34bfe9e989` |
+| coverage.json | `37acf38116777a5c701d4aab9d1747dd0d6762465f8cb2e0b18ab7027cc4418b` |
+| replay-manifest.json | `d72ab9bd3240d13a4b3a6733fd1f77809b7c67d477ca49344ef7bc863a66ebae` |
+| focused-tests.log | `f1902679064f5f80891dc1b6d42e740829d7d3155c96bee0ee54a21a9ee4c8e2` |
+| replay.log / repeat.log | `541222846f0e85b1062bb9cfe205e5c28c6d949a32a7d82db79be5446911f83d` |
+
+manifest 记录 9 个输入 hash 及本次 9 个代码文件 hash。核心对照：CLI `020aa161bc7f2dff80f502d3e280bb17a30eefa95f351bb87c23982bc25f8dbb`；诊断器 `bb04d13f8860826fbe029c79a57b4624893e9d81d9263a73c97ecfbf9ef9a36c`；既有 join `000681d0eb469901cb024bee504803183493db8d829a752e165b6d6429389110`。hash 证明文件一致，不证明数据来源必真。
+
+复现时从 backend 运行，下列变量分别为项目既有 venv 解释器、旧 capture、新任务 replay 与 repeat 目录；输出目录必须不存在，不要覆盖本次结果：
+
+```bash
+"$PY" -B -m unittest tests.test_quote_field_diagnostics tests.test_provider_contract_check tests.test_swing_dataset tests.test_data_sources -v
+"$PY" -B scripts/check_provider_field_contracts.py --mode cache-only --input-dir "$PROBE_OUT" --output-dir "$REPLAY_OUT"
+"$PY" -B scripts/check_provider_field_contracts.py --mode cache-only --input-dir "$PROBE_OUT" --output-dir "$REPEAT_OUT"
+```
+
+实际输出：93 tests、0.294s、OK、exit 0；两次 cache-only 均 `provider_contract_check_status:partial`、exit 2。5 项 A 阶段旧逻辑回归先失败再通过；B 阶段研究旁路/日期过滤/安全超时 5 项先失败再通过；自审另发现的跨 endpoint 字段覆盖及 stage marker 绕过 2 项也红绿验证。缓存测试同时拦截 requests.Session.request 和 tushare.pro_api，不以 transport=none 自报作禁网证明。
+
+probe 新格式仅 fake 测试：TuShare 至多 6 次、每次 15 秒、总采集 180 秒硬截止、AK 子进程 60 秒；失败源不重试后续接口，无安全 alarm 时拒绝。检查 daily 已知 6000 行边界在筛选三股之前进行，其他未核实边界为 unknown；不把未知截断状态写成“无截断”。成功载荷和异常的密钥反射均有脱敏测试；腾讯未来采集可以保存原 payload，但本次没有补抓，旧文件仍 adapted-only。
+
+仓库根目录实际执行以下两条，均 exit 0；相对 eea2567 的文件名单仅五个允许 Python 文件、原计划已有交接和本报告追加章节。helper/test 与指定 7ffddf 版本无 diff。
+
+```bash
+git diff --check
+git diff --exit-code 53211c0 -- backend/app/services backend/app/main.py frontend backend/tests/fixtures/swing_quality/protocol.json
+```
+
+没有运行全量 unittest：静态发现 test_ranking_evaluation_api:18 直接 import app.main，test_non_trading_preparation_mode:425 也导入应用；多组测试实例化 CoachStore，部分涉及回测/模型。不能以“测试”名义绕过本轮禁止这些调用的边界。以上 focused suite 已实际运行，不把全量未运行写成通过。LibreSSL/urllib3 是既有环境警告，没有为消除警告升级依赖。
+
+### 收敛后的下一步
+
+本次交付解决的是诊断工具正确性和真实字段归属，不是新增排名实验或策略上线。先验收本节，再按原计划单独冻结一个最小生产数据语义修复：优先明确腾讯真实入口的解析边界、单位与缺失来源，给固定输入的推荐影响对照；不得直接把更多字段塞入评分。若修复单位确实需要腾讯原 payload，只追加同一小批股票的一次原始响应采集及原时间/字段依据，另行确认，不扩成全量数据工程。
+
+当前剩余证据限制为腾讯原 payload/原时间/单位未证实、AKShare 单次 unavailable、旧采集元信息不足。T1 的 483 天真实换手率实验已经是 no_shadow_candidate，不重复跑、不靠调参挽救；本次旁路可复算也不改变该结论。停止在人工验收点，未改变任何生产候选、评分、排序、ML、买卖或仓位行为。
