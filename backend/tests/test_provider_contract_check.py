@@ -81,6 +81,60 @@ def write_capture(root, captures):
 
 
 class ProviderContractCheckTests(unittest.TestCase):
+    def test_tencent_contract_cli_is_cache_only_and_explicit_about_assumptions(self):
+        from tests.test_tencent_quote_contract import synthetic_payload
+        symbols = provider_contract_probe.PLAIN_SYMBOLS
+        payload = ";".join(f'v_{"sh" if symbol.startswith("6") else "sz"}{symbol}="{synthetic_payload(**{"2": symbol})}"'
+                           for symbol in symbols) + ";"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_capture(root, [{"source": "tencent", "status": "ok", "raw_payload": payload, "rows": []}])
+            args = ["--mode", "tencent-contract", "--input-dir", str(root), "--output-dir", str(root / "out"),
+                    "--unit-assumption", "volume_lots_amount_yuan_v1"]
+            with patch("requests.Session.request", side_effect=AssertionError("network forbidden")), \
+                    patch("tushare.pro_api", side_effect=AssertionError("SDK forbidden")):
+                try:
+                    code = provider_contract_probe.main(args)
+                except SystemExit:
+                    self.fail("cache-only Tencent contract CLI not implemented")
+            self.assertEqual(code, 0)
+            result = json.loads((root / "out/tencent-contract.json").read_text())
+            self.assertEqual(len(result["rows"]), 3)
+            self.assertFalse(result["production_enabled"])
+            self.assertEqual(result["unit_contract_status"], "unverified_assumption")
+            self.assertEqual(result["rows"][0]["differences"]["volume"], {"legacy": 2, "research": 200})
+            self.assertEqual(provider_contract_probe.main(args), 1)
+
+    def test_tencent_contract_rejects_bad_envelope_duplicate_and_hash(self):
+        from tests.test_tencent_quote_contract import synthetic_payload
+        good = 'v_sz000651="' + synthetic_payload() + '";'
+        for label, payload in (("duplicate", good + good), ("envelope", "bad"),
+                               ("market", good.replace("v_sz", "v_sh")), ("hash", good)):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                write_capture(root, [{"source": "tencent", "status": "ok", "raw_payload": payload}])
+                if label == "hash":
+                    (root / "raw-0.json").write_text("{}")
+                with patch("requests.Session.request", side_effect=AssertionError("network forbidden")), \
+                        patch("tushare.pro_api", side_effect=AssertionError("SDK forbidden")):
+                    self.assertEqual(provider_contract_probe.main(["--mode", "tencent-contract", "--input-dir", str(root),
+                                                                  "--output-dir", str(root / "out")]), 1)
+                self.assertFalse((root / "out").exists())
+
+    def test_tencent_contract_without_payload_or_assumption_cannot_be_complete(self):
+        from tests.test_tencent_quote_contract import synthetic_payload
+        for capture in ({"source": "tencent", "status": "unavailable"},
+                        {"source": "tencent", "status": "ok", "raw_payload": 'v_sz000651="' + synthetic_payload() + '";'}):
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                write_capture(root, [capture])
+                with patch("requests.Session.request", side_effect=AssertionError("network forbidden")), \
+                        patch("tushare.pro_api", side_effect=AssertionError("SDK forbidden")):
+                    self.assertEqual(provider_contract_probe.main(["--mode", "tencent-contract", "--input-dir", str(root),
+                                                                  "--output-dir", str(root / "out")]), 2)
+                result = json.loads((root / "out/tencent-contract.json").read_text())
+                self.assertEqual(result["unit_contract_status"], "unknown")
+
     def test_research_rows_use_existing_join_once_without_adjusting_prices(self):
         result = provider_contract_probe.analyze_captures(captures_fixture(), provider_contract_probe.FIELD_MAP)
         rows = result["stage_diff"].get("research_rows", [])

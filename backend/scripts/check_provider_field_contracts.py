@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.evaluation.provider_contract_check import compare_field_stages, build_verified_replay, stage_summary
+from app.evaluation.provider_contract_check import compare_field_stages, build_verified_replay, stage_summary, load_verified_capture
 from app.evaluation.swing_dataset import join_daily_inputs
 from app.services.data_source_manager import DataSourceManager
 from app.services.tushare_service import TuShareService
@@ -541,14 +541,71 @@ def replay_probe(input_dir, output_dir):
     return build_verified_replay(input_dir, output_dir, FIELD_MAP, analyze_captures)
 
 
+def replay_tencent_contract(input_dir, output_dir, unit_assumption=None):
+    """Compare the frozen raw response without replacing any production getter."""
+    from app.services.tencent_service import TencentService
+    output_dir = Path(output_dir)
+    if output_dir.exists():
+        raise FileExistsError("contract output already exists")
+    captures = load_verified_capture(input_dir)
+    selected = [capture for capture in captures if capture.get("source") == "tencent"
+                or Path(capture["_capture"]["path"]).name == "tencent-batch.json"]
+    if len(selected) != 1:
+        raise ValueError("exactly one Tencent capture required")
+    capture = selected[0]
+    payload = capture.get("raw_payload")
+    rows, seen = [], set()
+    if payload is not None and not isinstance(payload, str):
+        raise ValueError("raw payload must be a string")
+    for line in (payload or "").split(";"):
+        if not line.strip():
+            continue
+        match = re.fullmatch(r'v_((?:sz|sh|bj)([0-9]{6}))="([^"]*)"', line.strip())
+        if not match:
+            raise ValueError("invalid Tencent response envelope")
+        symbol, raw = match.group(2), match.group(3)
+        expected_market = "sh" if symbol.startswith("6") else "sz"
+        if symbol not in PLAIN_SYMBOLS or not match.group(1).startswith(expected_market) or symbol in seen:
+            raise ValueError("duplicate or unexpected Tencent identity")
+        seen.add(symbol)
+        strict = TencentService.parse_quote_contract(symbol, raw, unit_assumption=unit_assumption)
+        legacy = None
+        legacy_status = "not_replayed_missing_provider_time"
+        if strict["source_time"] is not None:
+            try:
+                legacy = object.__new__(TencentService)._parse_quote_payload(symbol, raw)
+                legacy_status = "ok" if legacy is not None else "unavailable"
+            except (ValueError, IndexError, OverflowError):
+                legacy_status = "parser_error"
+        differences = {field: {"legacy": (legacy or {}).get(field), "research": value}
+                       for field, value in strict["values"].items() if (legacy or {}).get(field) != value}
+        rows.append({"symbol": symbol, "capture_ref": capture["_capture"], "strict": strict,
+                     "legacy": legacy, "legacy_status": legacy_status, "differences": differences})
+    result = {"schema_version": "tencent-contract-replay-v1", "transport": "none", "replay_completed": True,
+              "production_enabled": False, "unit_contract_status": "unknown" if unit_assumption is None else "unverified_assumption",
+              "source_status": capture.get("status", "unknown"), "expected_rows": len(PLAIN_SYMBOLS),
+              "observed_rows": len(rows), "raw_payload_available": payload is not None,
+              "rows": sorted(rows, key=lambda row: row["symbol"]), "code_provenance": code_provenance(),
+              "input_manifest_sha256": hashlib.sha256((Path(input_dir) / "request-manifest.json").read_bytes()).hexdigest()}
+    complete = capture.get("status") == "ok" and len(rows) == len(PLAIN_SYMBOLS) and all(
+        row["strict"]["status"] == "complete_under_assumption" for row in rows)
+    result["status"] = "complete" if complete else "partial"
+    output_dir.mkdir(parents=True)
+    _write_json(output_dir / "tencent-contract.json", result)
+    return result
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("probe", "cache-only"), required=True)
+    parser.add_argument("--mode", choices=("probe", "cache-only", "tencent-contract"), required=True)
+    parser.add_argument("--unit-assumption", choices=("volume_lots_amount_yuan_v1",))
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--input-dir", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
+        if args.unit_assumption and args.mode != "tencent-contract":
+            raise ProbeError("unit assumption only supported in research contract replay")
         if args.mode == "probe":
             if not args.env_file:
                 raise ProbeError("--env-file is required for probe")
@@ -556,7 +613,8 @@ def main(argv=None):
         else:
             if not args.input_dir:
                 raise ProbeError("--input-dir is required for cache-only")
-            result = replay_probe(args.input_dir, args.output_dir)
+            result = (replay_tencent_contract(args.input_dir, args.output_dir, args.unit_assumption)
+                      if args.mode == "tencent-contract" else replay_probe(args.input_dir, args.output_dir))
     except (OSError, ProbeError, ValueError, FileExistsError) as exc:
         print(f"provider_contract_check_failed:{type(exc).__name__}", file=sys.stderr)
         return 1
