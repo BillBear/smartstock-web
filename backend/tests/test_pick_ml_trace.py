@@ -138,7 +138,7 @@ class PickMlFusionTraceTests(unittest.TestCase):
 
         self.assertEqual(self.model.feature_builder.calls, 1)
         self.assertEqual(self.model.predict_live_calls, 1)
-        self.assertEqual(trace["schema_version"], "ml_fusion_trace_v1")
+        self.assertEqual(trace["schema_version"], "ml_fusion_trace_v2")
         self.assertEqual(trace["status"], "applied")
         self.assertEqual(trace["model"]["model_version_id"], "ml-trace-test-v1")
         self.assertEqual(trace["model"]["feature_schema"], ["return_5d_pct", "amount_yi"])

@@ -1919,7 +1919,7 @@ class CoachService:
         # fusion outputs needed to evaluate an already-configured ML sidecar.
         # It must never be read by the recommendation or ranking path.
         ml_fusion_trace = {
-            "schema_version": "ml_fusion_trace_v1",
+            "schema_version": "ml_fusion_trace_v2",
             "status": "not_configured",
             "rule": {
                 "up_prob": round(up_prob, 4),

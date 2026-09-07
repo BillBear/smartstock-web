@@ -39,6 +39,108 @@ class RankingQualityExperimentTests(unittest.TestCase):
                 for n, day in enumerate(dates[::spacing]) for rank in range(1, 7)]
         return rows, json.loads(PROTOCOL.read_text()), dates
 
+    def _e3_trace_rows(self, dates=("2026-07-01", "2026-07-02")):
+        rows = []
+        for trade_date in dates:
+            for rank in range(1, 7):
+                raw_total = 77.0 - rank
+                up_prob = 0.75 - rank * 0.03
+                dd_prob = 0.14 + rank * 0.02
+                relative_score = 48.0 + (6.5 - rank) / 6.0 * 24.0
+                quality_score = (
+                    up_prob * 100.0 * 0.22
+                    + (1.0 - dd_prob) * 100.0 * 0.20
+                    + 50.0 * 0.20
+                    + 61.0 * 0.24
+                    + 53.8 * 0.14
+                )
+                bonus = 3.0 if dd_prob <= 0.20 else 2.0
+                total = round(raw_total * 0.34 + quality_score * 0.46 + relative_score * 0.20 + bonus, 2)
+                row = dict(
+                    _row(trade_date, str(rank), rank, dd_prob, 50.0, float(rank)),
+                    baseline_kind="observed_production",
+                    probability_source="ml_fusion_trace_v1",
+                    market_state_tag="neutral",
+                    label_end_dates={"20": trade_date},
+                    raw_total=raw_total,
+                    total=total,
+                    up_prob=up_prob,
+                    expected_edge_pct=2.0,
+                    profit_factor_proxy=1.4,
+                    confidence_level="medium",
+                    main_net_inflow_yi=0.0,
+                    ml_fusion_trace={
+                        "schema_version": "ml_fusion_trace_v2",
+                        "status": "applied",
+                        "rule": {
+                            "up_prob": 0.42 + rank * 0.04,
+                            "dd_prob": 0.42 - rank * 0.025,
+                            "total_score": 44.0 + rank,
+                        },
+                        "fused": {"up_prob": up_prob, "dd_prob": dd_prob, "total_score": raw_total},
+                        "ranking_inputs": {
+                            "risk_level": "medium",
+                            "selection_action": "watch",
+                            "confidence_level": "medium",
+                            "expected_edge_pct": 2.0,
+                            "profit_factor_proxy": 1.4,
+                            "risk_adjusted_score": 50.0,
+                            "main_net_inflow_yi": 0.0,
+                            "market_state_tag": "neutral",
+                        },
+                        "ranking": {"raw_total": raw_total, "total": total},
+                    },
+                )
+                rows.append(row)
+        return rows
+
+    def test_e3_replays_rule_ranking_only_for_whole_dates_with_complete_trace(self):
+        from app.evaluation.ranking_quality_experiments import build_e3_rule_trial
+
+        rows = self._e3_trace_rows()
+        del rows[0]["ml_fusion_trace"]
+        trial = build_e3_rule_trial(rows)
+
+        self.assertEqual(trial["unavailable_reasons"], [])
+        self.assertEqual(trial["trace_diagnostics"]["included_dates"], ["2026-07-02"])
+        self.assertEqual(trial["trace_diagnostics"]["excluded_dates"][0]["trade_date"], "2026-07-01")
+        self.assertEqual(trial["trace_diagnostics"]["excluded_dates"][0]["reason"], "incomplete_ml_fusion_trace")
+        self.assertEqual(
+            [row["symbol"] for row in trial["rows"] if row["trade_date"] == "2026-07-02"],
+            ["6", "5", "4", "3", "2", "1"],
+        )
+        self.assertEqual(
+            {(row["trade_date"], row["symbol"]) for row in trial["rows"]},
+            {("2026-07-02", str(rank)) for rank in range(1, 7)},
+        )
+
+    def test_e3_is_available_when_complete_trace_replays_same_pool(self):
+        from app.evaluation.ranking_quality_experiments import evaluate_swing_experiments
+        from tests.test_swing_replay import PROTOCOL
+        import json
+
+        rows = self._e3_trace_rows(dates=("2026-07-01",))
+        result = evaluate_swing_experiments(rows, json.loads(PROTOCOL.read_text()), ["2026-07-01"], required_coverage=1)
+
+        e3 = result["experiments"]["E3"]
+        self.assertEqual(e3["status"], "available")
+        self.assertEqual(e3["metrics"]["selection_by_date"]["2026-07-01"], ["6", "5", "4", "3", "2", "1"])
+        self.assertEqual(e3["trace_diagnostics"]["included_dates"], ["2026-07-01"])
+
+    def test_e3_rejects_invalid_stored_rank_without_repairing_it(self):
+        from app.evaluation.ranking_quality_experiments import build_e3_rule_trial
+
+        rows = self._e3_trace_rows(dates=("2026-07-01",))
+        rows[0]["rank_no"] = "not-a-rank"
+        trial = build_e3_rule_trial(rows)
+
+        self.assertEqual(trial["rows"], [])
+        self.assertEqual(trial["unavailable_reasons"], ["no_complete_ml_fusion_trace_dates"])
+        self.assertEqual(
+            trial["trace_diagnostics"]["excluded_dates"][0]["reason_counts"],
+            {"stored_rank_no_invalid": 1},
+        )
+
     def test_missing_contiguous_blocks_is_insufficient_not_negative_evidence(self):
         from app.evaluation.ranking_quality_experiments import evaluate_swing_experiments
         rows, protocol, dates = self._swing_fixture(spacing=2)

@@ -148,6 +148,28 @@ class RankingQualityDiagnosisTests(unittest.TestCase):
         self.assertFalse(rows[0]["first_hit_stop_loss"])
         self.assertEqual(rows[0]["tradable_label"], "tradable")
 
+    def test_labeling_preserves_ml_fusion_trace_for_later_offline_evaluation(self):
+        trace = {
+            "schema_version": "ml_fusion_trace_v2",
+            "status": "applied",
+            "rule": {"up_prob": 0.62, "dd_prob": 0.24, "total_score": 71.0},
+            "fused": {"up_prob": 0.68, "dd_prob": 0.20, "total_score": 75.0},
+            "ranking_inputs": {"risk_level": "medium", "selection_action": "watch"},
+            "ranking": {"raw_total": 75.0, "total": 80.0},
+        }
+        rows, _ = label_snapshot_rows(
+            [{
+                "trade_date": "2026-07-01",
+                "symbol": "000001",
+                "rank_no": 1,
+                "score_breakdown": {"raw_total": 75.0, "total": 80.0},
+                "ml_fusion_trace": trace,
+            }],
+            history_fetcher=lambda *args: (pd.DataFrame(), "fixture", "no_history_needed_for_trace"),
+        )
+
+        self.assertEqual(rows[0]["ml_fusion_trace"], trace)
+
     def test_diagnosis_marks_no_model_counterfactual_unavailable_and_finds_ranking_errors(self):
         rows = [
             {

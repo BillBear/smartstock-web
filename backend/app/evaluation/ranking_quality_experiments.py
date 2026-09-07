@@ -136,6 +136,211 @@ def swing_segments(rows, protocol):
     return result
 
 
+def build_e3_rule_trial(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Replay the existing medium-risk rank path with only saved rule-side values.
+
+    A date is eligible only when every persisted candidate has a complete trace
+    and the saved fused trace reproduces the stored rank.  This is deliberately
+    stricter than dropping individual rows: the counterfactual must retain the
+    exact same daily candidate pool and labels as the observed ranking.
+    """
+    trial_rows: List[Dict[str, Any]] = []
+    included_dates: List[str] = []
+    excluded_dates: List[Dict[str, Any]] = []
+    for trade_date, items in _by_date(rows).items():
+        records, errors = [], []
+        for row in items:
+            record, reason = _e3_trace_record(row)
+            if reason:
+                errors.append(reason)
+            else:
+                records.append(record)
+        if errors:
+            excluded_dates.append(
+                {
+                    "trade_date": trade_date,
+                    "reason": "incomplete_ml_fusion_trace",
+                    "reason_counts": {reason: errors.count(reason) for reason in sorted(set(errors))},
+                    "candidate_count": len(items),
+                }
+            )
+            continue
+
+        fused = _e3_rank_records(records, "fused")
+        stored_symbols = [record["symbol"] for record in sorted(records, key=lambda record: (record["rank_no"], record["symbol"]))]
+        fused_symbols = [record["symbol"] for record in fused]
+        score_mismatch = any(
+            abs(record["display_total"] - record["ranking_total"]) > 0.01
+            for record in fused
+        )
+        if score_mismatch or fused_symbols != stored_symbols:
+            excluded_dates.append(
+                {
+                    "trade_date": trade_date,
+                    "reason": "fused_ranking_replay_mismatch",
+                    "candidate_count": len(items),
+                    "stored_symbols": stored_symbols,
+                    "replayed_symbols": fused_symbols,
+                }
+            )
+            continue
+
+        rule = _e3_rank_records(records, "rule")
+        for index, record in enumerate(rule, start=1):
+            trial_rows.append(dict(record["row"], _trial_order=index))
+        included_dates.append(trade_date)
+
+    diagnostics = {
+        "schema_version": "ml_fusion_trace_v2",
+        "input_row_count": len(rows),
+        "input_date_count": len(_by_date(rows)),
+        "included_dates": included_dates,
+        "excluded_dates": excluded_dates,
+        "included_row_count": len(trial_rows),
+        "whole_date_policy": "require_complete_trace_and_fused_rank_replay_no_row_drop_or_refill",
+    }
+    return {
+        "rows": trial_rows,
+        "unavailable_reasons": [] if trial_rows else ["no_complete_ml_fusion_trace_dates"],
+        "trace_diagnostics": diagnostics,
+    }
+
+
+def _e3_trace_record(row: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    trace = row.get("ml_fusion_trace")
+    if not isinstance(trace, dict):
+        return None, "trace_missing"
+    if trace.get("schema_version") != "ml_fusion_trace_v2":
+        return None, "unsupported_trace_schema"
+    if trace.get("status") != "applied":
+        return None, f"trace_status_{trace.get('status') or 'unknown'}"
+    rule = trace.get("rule") or {}
+    fused = trace.get("fused") or {}
+    ranking = trace.get("ranking") or {}
+    inputs = trace.get("ranking_inputs") or {}
+    if not all(isinstance(value, dict) for value in (rule, fused, ranking, inputs)):
+        return None, "trace_section_invalid"
+    if str(inputs.get("risk_level") or "") != "medium":
+        return None, "risk_level_not_medium"
+    for name, values in (("rule", rule), ("fused", fused)):
+        for field in ("up_prob", "dd_prob", "total_score"):
+            if _as_float(values.get(field)) is None:
+                return None, f"{name}_{field}_missing"
+    for field in ("raw_total", "total"):
+        if _as_float(ranking.get(field)) is None:
+            return None, f"ranking_{field}_missing"
+    for field in ("expected_edge_pct", "profit_factor_proxy", "risk_adjusted_score", "main_net_inflow_yi"):
+        if _as_float(inputs.get(field)) is None:
+            return None, f"ranking_input_{field}_missing"
+    if str(inputs.get("selection_action") or "") not in {"buy", "watch"}:
+        return None, "ranking_input_selection_action_invalid"
+    if str(inputs.get("confidence_level") or "") not in {"high", "medium", "low"}:
+        return None, "ranking_input_confidence_invalid"
+    if str(inputs.get("market_state_tag") or "") not in {"neutral", "defensive", "offensive"}:
+        return None, "ranking_input_market_state_invalid"
+    rank_no = _as_float(row.get("rank_no"))
+    if rank_no is None or rank_no <= 0:
+        return None, "stored_rank_no_invalid"
+
+    comparisons = (
+        (row.get("up_prob"), fused.get("up_prob")),
+        (row.get("dd_prob"), fused.get("dd_prob")),
+        (row.get("raw_total"), ranking.get("raw_total")),
+        (row.get("total"), ranking.get("total")),
+    )
+    if any(not _e3_numbers_match(left, right) for left, right in comparisons):
+        return None, "stored_trace_value_mismatch"
+    return {
+        "row": row,
+        "symbol": str(row.get("symbol") or ""),
+        "rank_no": int(rank_no),
+        "rule": {field: float(rule[field]) for field in ("up_prob", "dd_prob", "total_score")},
+        "fused": {field: float(fused[field]) for field in ("up_prob", "dd_prob", "total_score")},
+        "ranking_total": float(ranking["total"]),
+        "inputs": {
+            "selection_action": str(inputs["selection_action"]),
+            "confidence_level": str(inputs["confidence_level"]),
+            "expected_edge_pct": float(inputs["expected_edge_pct"]),
+            "profit_factor_proxy": float(inputs["profit_factor_proxy"]),
+            "risk_adjusted_score": float(inputs["risk_adjusted_score"]),
+            "main_net_inflow_yi": float(inputs["main_net_inflow_yi"]),
+            "market_state_tag": str(inputs["market_state_tag"]),
+        },
+    }, None
+
+
+def _e3_rank_records(records: Sequence[Dict[str, Any]], source: str) -> List[Dict[str, Any]]:
+    raw_values = sorted(record[source]["total_score"] for record in records)
+    count = len(raw_values)
+    ranked = []
+    for record in records:
+        raw_total = record[source]["total_score"]
+        less = sum(value < raw_total for value in raw_values)
+        equal = sum(value == raw_total for value in raw_values)
+        relative_score = 48.0 + ((less + 0.5 * equal) / count if count > 1 else 0.5) * 24.0
+        inputs = record["inputs"]
+        up_prob = record[source]["up_prob"]
+        dd_prob = record[source]["dd_prob"]
+        edge_score = _e3_clamp(48.0 + inputs["expected_edge_pct"] * 6.5, 0.0, 100.0)
+        pf_score = _e3_clamp(45.0 + (inputs["profit_factor_proxy"] - 1.0) * 22.0, 0.0, 100.0)
+        quality_score = (
+            up_prob * 100.0 * 0.22
+            + (1.0 - dd_prob) * 100.0 * 0.20
+            + inputs["risk_adjusted_score"] * 0.20
+            + edge_score * 0.24
+            + pf_score * 0.14
+        )
+        bonus = _e3_calibration_bonus(inputs, dd_prob)
+        state_adjust = -2.0 if inputs["market_state_tag"] == "defensive" else (1.0 if inputs["market_state_tag"] == "offensive" else 0.0)
+        display_total = _e3_clamp(raw_total * 0.34 + quality_score * 0.46 + relative_score * 0.20 + bonus + state_adjust, 0.0, 100.0)
+        rank_edge = _e3_clamp(50.0 + inputs["expected_edge_pct"] * 6.0, 0.0, 100.0)
+        rank_pf = _e3_clamp(45.0 + (inputs["profit_factor_proxy"] - 1.0) * 22.0, 0.0, 100.0)
+        rank_score = (
+            up_prob * 100.0 * 0.20
+            + (1.0 - dd_prob) * 100.0 * 0.20
+            + rank_edge * 0.28
+            + rank_pf * 0.14
+            + display_total * 0.18
+        )
+        ranked.append(dict(record, display_total=round(display_total, 2), rank_score=rank_score))
+    return sorted(ranked, key=lambda record: (-record["rank_score"], record["rank_no"], record["symbol"]))
+
+
+def _e3_calibration_bonus(inputs: Dict[str, Any], dd_prob: float) -> float:
+    bonus = 2.0 if inputs["selection_action"] == "buy" else 0.0
+    if inputs["confidence_level"] == "high":
+        bonus += 4.0
+    elif inputs["confidence_level"] == "medium":
+        bonus += 2.0
+    flow_yi = inputs["main_net_inflow_yi"]
+    if flow_yi > 2.0:
+        bonus += 2.0
+    elif flow_yi < -1.0:
+        bonus -= 4.0
+    if dd_prob <= 0.20:
+        bonus += 1.0
+    edge_pct = inputs["expected_edge_pct"]
+    if edge_pct < 0.6:
+        bonus -= 8.0
+    elif edge_pct < 1.5:
+        bonus -= 3.0
+    profit_factor = inputs["profit_factor_proxy"]
+    if profit_factor < 1.15:
+        bonus -= 6.0
+    elif profit_factor < 1.30:
+        bonus -= 2.0
+    return bonus
+
+
+def _e3_numbers_match(left: Any, right: Any) -> bool:
+    first, second = _as_float(left), _as_float(right)
+    return first is not None and second is not None and abs(first - second) <= 0.0001
+
+
+def _e3_clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
 def _qualification_group_evidence(groups, primary_dates):
     """Descriptive subsets cannot reintroduce dates missing from primary evidence."""
     result = {}
@@ -173,20 +378,30 @@ def evaluate_swing_experiments(rows, protocol, trading_dates, e2_rows=None, e2_e
         e1.extend(dict(r,_trial_order=i) for i,r in enumerate(sorted(items,
             key=lambda r:(_number_or_inf(r.get('dd_prob')),r['rank_no'],r['symbol'])),1))
     e2_evidence = e2_evidence or {}
-    variants = {'E1':(e1,e1_reasons), 'E2':(e2_rows,e2_evidence.get('unavailable_reasons',
-        [] if e2_rows is not None else ['fixed_pool_turnover_replay_not_supplied'])),
-        'E3':(None,['complete_historical_prefusion_trace_unavailable_no_model_execution'])}
-    for name,(trial,reasons) in variants.items():
+    e3_trial = build_e3_rule_trial(rows)
+    e3_dates = set(e3_trial['trace_diagnostics']['included_dates'])
+    e3_baseline = [row for row in rows if row.get('trade_date') in e3_dates]
+    variants = {
+        'E1': (rows, e1, e1_reasons, None),
+        'E2': (rows, e2_rows, e2_evidence.get('unavailable_reasons',
+            [] if e2_rows is not None else ['fixed_pool_turnover_replay_not_supplied']), None),
+        'E3': (e3_baseline, e3_trial['rows'], e3_trial['unavailable_reasons'], e3_trial['trace_diagnostics']),
+    }
+    evaluation_rows_by_experiment = {}
+    for name,(baseline_rows, trial, reasons, trace_diagnostics) in variants.items():
         if reasons or trial is None:
             experiments[name] = dict(status='unavailable',unavailable_reasons=reasons,metrics=None,
-                paired=None,sensitivity=None,decision='insufficient_evidence')
+                paired=None,sensitivity=None,decision='insufficient_evidence',trace_diagnostics=trace_diagnostics)
             continue
-        result = _swing_pair_metrics(rows,trial,trading_dates)
+        evaluation_rows_by_experiment[name] = baseline_rows
+        result = _swing_pair_metrics(baseline_rows,trial,trading_dates)
         result.update(status='available',unavailable_reasons=[],segments={},groups={})
-        for segment, meta in swing_segments(rows,protocol).items():
+        if trace_diagnostics is not None:
+            result['trace_diagnostics'] = trace_diagnostics
+        for segment, meta in swing_segments(baseline_rows,protocol).items():
             accepted = set(meta['dates'])
             result['segments'][segment] = dict(**meta, **_swing_pair_metrics(
-                [r for r in rows if r['trade_date'] in accepted],
+                [r for r in baseline_rows if r['trade_date'] in accepted],
                 [r for r in trial if r['trade_date'] in accepted],trading_dates,False))
         dimensions = {'action':lambda r:r.get('action') or 'unknown',
             'analysis':lambda r:'full' if r.get('feature_bar_count',0)>=60 and r.get('analysis_status')!='degraded' else 'proxy_or_unknown',
@@ -195,10 +410,10 @@ def evaluate_swing_experiments(rows, protocol, trading_dates, e2_rows=None, e2_e
             'source':lambda r:'tushare_only' if str(r.get('history_source')).lower()=='tushare' else 'other'}
         for dimension,key in dimensions.items():
             # Group by baseline attributes, never trial gate outcomes: same pool.
-            names = set(map(key,rows)) | ({'buy','watch'} if dimension=='action' else set())
+            names = set(map(key,baseline_rows)) | ({'buy','watch'} if dimension=='action' else set())
             result['groups'][dimension] = {}
             for group in sorted(names):
-                base = [r for r in rows if key(r)==group]
+                base = [r for r in baseline_rows if key(r)==group]
                 ids = {(r['trade_date'],r['symbol']) for r in base}
                 result['groups'][dimension][group] = _swing_pair_metrics(base,
                     [r for r in trial if (r['trade_date'],r['symbol']) in ids],trading_dates,False)
@@ -210,6 +425,7 @@ def evaluate_swing_experiments(rows, protocol, trading_dates, e2_rows=None, e2_e
         if result['status']!='available': continue
         paired = result['paired']; primary = paired['paired_primary_metrics']
         base,trial = primary['baseline'],primary['experiment']
+        evaluation_rows = evaluation_rows_by_experiment[name]
         ci = paired['statistics_by_horizon']['10']['ci']
         q = protocol['qualification']; sensitivity = result['sensitivity']
         group_evidence = _qualification_group_evidence(result['groups'], paired['matched_dates'])
@@ -219,7 +435,7 @@ def evaluate_swing_experiments(rows, protocol, trading_dates, e2_rows=None, e2_e
         adequate_states = sorted(key for key, count in state_counts.items() if count >= q['minimum_paired_dates'])
         sparse_states = {key:count for key,count in state_counts.items() if count < q['minimum_paired_dates']}
         # No state-specific sample minimum was frozen; never invent a passing one.
-        checks = dict(signal_dates=len(set(r['trade_date'] for r in rows))>=q['minimum_signal_dates'],
+        checks = dict(signal_dates=len(set(r['trade_date'] for r in evaluation_rows))>=q['minimum_signal_dates'],
             paired_dates=paired['matched_date_count']>=q['minimum_paired_dates'],
             required_coverage=required_coverage is not None and required_coverage>=q['minimum_required_data_coverage'],
             optional_coverage=name!='E2' or e2_evidence.get('field_coverage',0)>=q['minimum_optional_field_coverage'],
@@ -266,8 +482,8 @@ def evaluate_swing_experiments(rows, protocol, trading_dates, e2_rows=None, e2_e
         historical_status='retrospective_not_independent_unseen', e2_evidence=e2_evidence,
         ui_order=_evaluate_variant(rows,'ui_order',lambda r:(r['ui_rank_no'],r['symbol']))
             if rows and all(r.get('ui_rank_no') is not None for r in rows) else dict(status='unavailable'),
-        e3_future_collection='Record rule_up/dd, pre/postfusion scores, model_up/dd/id/schema, fusion coefficients '
-            'and gates during existing inference only; separate future task; historical traces remain absent')
+        e3_future_collection='New snapshots record the trace required for E3. Existing snapshots without a complete '
+            'trace remain unavailable; no historical rule scores or model outputs are reconstructed.')
 
 
 def compare_current_and_a(rows: Sequence[Dict[str, Any]], bootstrap_iterations: int = 10000) -> Dict[str, Any]:

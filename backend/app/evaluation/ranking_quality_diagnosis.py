@@ -286,6 +286,7 @@ def _flatten_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     decision = dict(item.get("decision") or {})
     model_probability = dict(item.get("model_probability") or {})
     market_state = dict(item.get("market_state") or {})
+    ml_fusion_trace = item.get("ml_fusion_trace")
     return {
         "trade_date": _iso_date(item.get("trade_date")),
         "symbol": str(item.get("symbol") or "").strip(),
@@ -312,6 +313,7 @@ def _flatten_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "model_probability": model_probability or None,
         "model_final_score": _number(model_probability.get("final_score")),
         "ml_enrichment": item.get("ml_enrichment"),
+        "ml_fusion_trace": ml_fusion_trace if isinstance(ml_fusion_trace, dict) else None,
     }
 
 
