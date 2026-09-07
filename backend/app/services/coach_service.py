@@ -1944,6 +1944,16 @@ class CoachService:
                 "dd_prob": round(dd_prob, 4),
                 "total_score": round(total_score, 2),
             },
+            "ranking_inputs": {
+                "risk_level": risk_level,
+                "selection_action": action,
+                "confidence_level": confidence,
+                "expected_edge_pct": round(expected_edge_pct, 2),
+                "profit_factor_proxy": round(profit_factor_proxy, 3),
+                "risk_adjusted_score": round(risk_adjusted_score, 2),
+                "main_net_inflow_yi": round(main_net_inflow_yi, 3),
+                "market_state_tag": state_tag,
+            },
             "ranking": {"raw_total": None, "total": None},
             "gate_outcomes": {},
         }

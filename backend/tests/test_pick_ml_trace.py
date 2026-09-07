@@ -151,6 +151,16 @@ class PickMlFusionTraceTests(unittest.TestCase):
         self.assertEqual(trace["fused"]["dd_prob"], pick["dd_prob"])
         self.assertEqual(trace["ranking"]["raw_total"], pick["score_breakdown"]["raw_total"])
         self.assertEqual(trace["ranking"]["total"], pick["score_breakdown"]["total"])
+        self.assertEqual(trace["ranking_inputs"], {
+            "risk_level": "medium",
+            "selection_action": pick["action"],
+            "confidence_level": pick["confidence_level"],
+            "expected_edge_pct": pick["expected_edge_pct"],
+            "profit_factor_proxy": pick["profit_factor_proxy"],
+            "risk_adjusted_score": pick["score_breakdown"]["risk_adjusted"],
+            "main_net_inflow_yi": pick["market_metrics"]["main_net_inflow_yi"],
+            "market_state_tag": "neutral",
+        })
         self.assertEqual(trace["gate_outcomes"], {
             "action": pick["action"],
             "grade": pick["decision"]["grade"],

@@ -682,7 +682,7 @@ git diff --check
 
 已有 ranking 实验不能从历史快照可靠还原“规则评分”和“弱 ML 融合后的评分”，因此既不能证明 ML 改善排序，也不能证明它拖累排序。按照主计划的 E3 边界，本次只在既有候选计算中写入 `ml_fusion_trace_v1`；不改变模型模式、模型调用次数、融合系数、分数、动作、评级、仓位、止盈止损或任何策略阈值。
 
-trace 记录规则侧 `up_prob/dd_prob/total_score`、模型 ID、模型 `up/dd/final_score`、feature schema 名称、既有 0.45/0.55 与 0.65/0.35 融合权重、融合结果、横截面校准的 `raw_total/total`，以及最终的 action、grade、executable、real_money_allowed。未配置模型、预测不可用和预测异常也显式记录状态；异常只记录类型，不保存异常文本或特征值。trace 仅写入当日新候选的 JSON 快照，旧快照不伪造、不回填，也不需要数据库迁移。
+trace 记录规则侧 `up_prob/dd_prob/total_score`、模型 ID、模型 `up/dd/final_score`、feature schema 名称、既有 0.45/0.55 与 0.65/0.35 融合权重、融合结果、横截面校准的 `raw_total/total`，以及最终的 action、grade、executable、real_money_allowed。为让离线 E3 精确复放现有中风险排序，trace 还记录阈值前 `selection_action`、置信等级、赔率、盈亏比、风险调整分、资金流、市场状态与风险等级；这解决了最终 action 可能被展示阈值降级而无法倒推校准输入的问题。未配置模型、预测不可用和预测异常也显式记录状态；异常只记录类型，不保存异常文本或特征值。trace 仅写入当日新候选的 JSON 快照，旧快照不伪造、不回填，也不需要数据库迁移。
 
 ### 固定输入不变性与验证
 
