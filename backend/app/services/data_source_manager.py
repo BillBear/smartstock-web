@@ -4,7 +4,8 @@
 支持：TuShare Pro（主） -> Tencent（备用1） -> AKShare（备用2） -> Mock（可选备用）
 """
 import logging
-from typing import Optional, Dict, Any, List
+import math
+from typing import Optional, Dict, Any, List, Tuple
 import time
 import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -29,6 +30,22 @@ MINIMAL_STOCK_BASIC_MAP: Dict[str, Dict[str, str]] = {
     "601398": {"symbol": "601398", "name": "工商银行", "industry": "银行"},
     "601888": {"symbol": "601888", "name": "中国中免", "industry": "旅游零售"},
 }
+
+SNAPSHOT_NUMERIC_FIELDS = (
+    "price",
+    "change",
+    "pct_change",
+    "open",
+    "high",
+    "low",
+    "volume",
+    "amount",
+    "turnover_rate",
+    "pe",
+    "pb",
+    "total_mv",
+    "circ_mv",
+)
 
 
 class DataSourceManager:
@@ -852,12 +869,22 @@ class DataSourceManager:
 
     @staticmethod
     def _safe_float(value, default: float = 0.0) -> float:
+        return DataSourceManager._numeric_value_and_status(value, default=default)[0]
+
+    @staticmethod
+    def _numeric_value_and_status(value: Any, default: float = 0.0) -> Tuple[float, str]:
+        """Normalize snapshot numbers without conflating zero, missing, and invalid input."""
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return float(default), "missing"
+        if isinstance(value, bool):
+            return float(default), "invalid"
         try:
-            if value is None or (isinstance(value, str) and not value.strip()):
-                return float(default)
-            return float(value)
+            numeric = float(value)
         except Exception:
-            return float(default)
+            return float(default), "invalid"
+        if not math.isfinite(numeric):
+            return float(default), "invalid_non_finite"
+        return numeric, "reported"
 
     def _normalize_market_snapshot(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         normalized = []
@@ -865,24 +892,17 @@ class DataSourceManager:
             symbol = str(item.get("symbol") or item.get("code") or "").strip()
             if len(symbol) != 6 or not symbol.isdigit():
                 continue
+            values = {}
+            field_status = {}
+            for field in SNAPSHOT_NUMERIC_FIELDS:
+                values[field], field_status[field] = self._numeric_value_and_status(item.get(field))
             normalized.append(
                 {
                     "symbol": symbol,
                     "name": item.get("name") or symbol,
                     "industry": item.get("industry") or "未知行业",
-                    "price": self._safe_float(item.get("price")),
-                    "change": self._safe_float(item.get("change")),
-                    "pct_change": self._safe_float(item.get("pct_change")),
-                    "open": self._safe_float(item.get("open")),
-                    "high": self._safe_float(item.get("high")),
-                    "low": self._safe_float(item.get("low")),
-                    "volume": self._safe_float(item.get("volume")),
-                    "amount": self._safe_float(item.get("amount")),
-                    "turnover_rate": self._safe_float(item.get("turnover_rate")),
-                    "pe": self._safe_float(item.get("pe")),
-                    "pb": self._safe_float(item.get("pb")),
-                    "total_mv": self._safe_float(item.get("total_mv")),
-                    "circ_mv": self._safe_float(item.get("circ_mv")),
+                    **values,
+                    "field_status": field_status,
                     "update_time": item.get("update_time"),
                 }
             )

@@ -626,3 +626,28 @@ CAPTURE 为本节证据根；UNKNOWN_OUT/REPLAY_OUT/REPEAT_OUT 对应其 unknown
 已把“怀疑单位不对”收敛为三条可复算原始响应、一个显式假设、一个可测试修正入口；但不能据此宣称排名已改善。源码 `CoachService:669` 会保存实时 volume，关键量比在 1558-1560 用历史 analyzed_df 的 volume 自算，MLFeatureBuilder:108-109 的量比也来自历史序列。本次没有把实时成交量错尺度归因成选股不准的已证实主因。
 
 不重复失败的 T1、不新增任意第四项排序实验。后续真正有影响的生产接入应先确定单位依据和同输入推荐影响；新增字段实验应继续服从原固定成绩单和失败标准。内部回归/差分已自动完成，无需用户逐项签字；只有选择改变生产输入/策略方案及发布才需要决策。
+
+## 2026-09-07 连续推进：快照数值真实性与缺失状态
+
+### 变更范围
+
+`DataSourceManager._normalize_market_snapshot` 现在为 13 个既有数值字段附加 `field_status`：`reported`、`missing`、`invalid` 或 `invalid_non_finite`。有效有限数值（包括真实 `0`）的既有数值投影不变；`None`、空字符串、非法字符串、布尔值、`NaN` 与正负无穷不再都表现为可用的 `0`。缺失或非法字段的兼容数值仍为 `0`，但状态元数据可让后续研究或 UI 区分“真实零值”和“没有可信输入”。
+
+本次没有把腾讯成交量的 100 倍研究假设接入实时 getter，也没有把 `field_status` 接入候选、排序、概率、动作、仓位、止盈止损或 ML。它是输入真实性修复，不是策略变化。
+
+### 同输入影响边界
+
+对固定的 500 股票 TuShare 目录加腾讯报价测试，原有 `price=10.0`、`amount=1000.0`、`volume=100.0`、`turnover_rate=0.0` 与 `circ_mv=0.0` 完全保留；新增状态为 `price/amount/volume=reported`、未由该路径提供的 `turnover_rate/circ_mv=missing`。源码消费检查中，`field_status` 只出现在该适配器和测试，当前 CoachService、评分、排序、动作和 ML 均不读取它。
+
+当前正式候选预筛只读取价格、成交额、换手率、涨跌幅与日内高低价；实时 `volume` 仅随增量快照保存。个股量比仍来自 `CoachService._build_pick` 的历史 `analyzed_df.volume`，ML 量比也来自历史日线。因此这项元数据不会改变有效输入下的当前排名；当上游传来非有限数值时，修复的行为是拒绝其参与数值计算，而不是把它当作真实行情。
+
+### 验证与限制
+
+先新增两条失败测试，确认旧实现没有 `field_status`；最小实现后运行：
+
+```bash
+"$PY" -B -m unittest tests.test_data_sources tests.test_tencent_quote_contract tests.test_quote_field_diagnostics tests.test_provider_contract_check tests.test_swing_dataset -v
+git diff --check
+```
+
+结果为 109 项通过、0 失败；仅有现有 LibreSSL/urllib3 警告，以及注入的 provider 负例日志。没有启动 FastAPI、访问 PostgreSQL、生成候选、运行模型、训练或回测。该测试范围不能证明腾讯单位假设为官方事实，也不能证明策略准确率提升；它只保证缺失和非法输入不再被静默伪装为有效数据，并保留后续单变量研究所需的来源状态。

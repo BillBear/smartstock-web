@@ -139,6 +139,93 @@ class DataSourceManagerTests(unittest.TestCase):
         self.assertEqual(normalized["medium_net"], -10000.0)
         self.assertEqual(normalized["small_net"], -40000.0)
 
+    def test_snapshot_marks_missing_invalid_and_reported_zero_numeric_fields(self):
+        manager = DataSourceManager()
+
+        normalized = manager._normalize_market_snapshot(
+            [
+                {
+                    "symbol": "000001",
+                    "price": 0,
+                    "change": None,
+                    "pct_change": "",
+                    "open": "not-a-number",
+                    "high": float("nan"),
+                    "low": float("inf"),
+                    "volume": 100,
+                    "amount": 200,
+                    "turnover_rate": -1.5,
+                }
+            ]
+        )[0]
+
+        self.assertEqual(normalized["price"], 0)
+        self.assertEqual(normalized["volume"], 100)
+        self.assertEqual(normalized["amount"], 200)
+        self.assertEqual(normalized["turnover_rate"], -1.5)
+        self.assertEqual(
+            normalized["field_status"],
+            {
+                "price": "reported",
+                "change": "missing",
+                "pct_change": "missing",
+                "open": "invalid",
+                "high": "invalid_non_finite",
+                "low": "invalid_non_finite",
+                "volume": "reported",
+                "amount": "reported",
+                "turnover_rate": "reported",
+                "pe": "missing",
+                "pb": "missing",
+                "total_mv": "missing",
+                "circ_mv": "missing",
+            },
+        )
+        for field in ("open", "high", "low"):
+            self.assertEqual(normalized[field], 0)
+
+    def test_tushare_tencent_snapshot_preserves_legacy_values_and_marks_omitted_fields(self):
+        class FakeTuShare:
+            def get_stock_basic_map(self):
+                return {
+                    f"{index:06}": {"name": f"测试{index}", "industry": "测试行业"}
+                    for index in range(1, 501)
+                }
+
+        class FakeTencent:
+            def get_realtime_quotes_batch(self, symbols):
+                return {
+                    symbol: {
+                        "name": f"测试{index}",
+                        "price": 10,
+                        "change": 0.1,
+                        "pct_change": 1,
+                        "open": 9.9,
+                        "high": 10.2,
+                        "low": 9.8,
+                        "volume": 100,
+                        "amount": 1000,
+                        "update_time": "2026-09-07 10:00:00",
+                    }
+                    for index, symbol in enumerate(symbols, start=1)
+                }
+
+        snapshot = DataSourceManager(
+            tushare_service=FakeTuShare(), tencent_service=FakeTencent()
+        ).get_a_share_snapshot()
+
+        self.assertEqual(len(snapshot), 500)
+        first = snapshot[0]
+        self.assertEqual(
+            {field: first[field] for field in ("price", "amount", "volume", "turnover_rate", "circ_mv")},
+            {"price": 10.0, "amount": 1000.0, "volume": 100.0, "turnover_rate": 0.0, "circ_mv": 0.0},
+        )
+        self.assertEqual(first["field_status"]["price"], "reported")
+        self.assertEqual(first["field_status"]["amount"], "reported")
+        self.assertEqual(first["field_status"]["volume"], "reported")
+        self.assertEqual(first["field_status"]["turnover_rate"], "missing")
+        self.assertEqual(first["field_status"]["circ_mv"], "missing")
+
 
 if __name__ == "__main__":
     unittest.main()
