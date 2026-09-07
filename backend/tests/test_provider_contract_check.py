@@ -3,7 +3,9 @@ import importlib.util
 import json
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
+import os
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -79,6 +81,280 @@ def write_capture(root, captures):
 
 
 class ProviderContractCheckTests(unittest.TestCase):
+    def test_research_rows_use_existing_join_once_without_adjusting_prices(self):
+        result = provider_contract_probe.analyze_captures(captures_fixture(), provider_contract_probe.FIELD_MAP)
+        rows = result["stage_diff"].get("research_rows", [])
+        self.assertEqual(len(rows), 6)
+        row = rows[0]
+        for field, value in {"volume": 200, "amount": 3000, "circ_mv": 40000,
+                             "turnover_rate": 0, "volume_ratio": 1.5, "adj_factor": 2,
+                             "open": 10, "close": 11, "pct_change": 10}.items():
+            self.assertEqual(row[field], value)
+        self.assertIsNone(row["available_at"])
+        self.assertIn("capture_refs", row)
+        self.assertEqual(result["stage_diff"]["rows"][0]["fields"]["pct_change"]["status"], "retained")
+
+    def test_research_missing_supplements_stay_null(self):
+        captures = captures_fixture()
+        for capture in captures:
+            if capture["endpoint"] != "daily":
+                capture.update(rows=[], status="unavailable")
+        result = provider_contract_probe.analyze_captures(captures, provider_contract_probe.FIELD_MAP)
+        rows = result["stage_diff"].get("research_rows", [])
+        self.assertEqual(len(rows), 6)
+        for row in rows:
+            self.assertIsNone(row["turnover_rate"])
+            self.assertIsNone(row["adj_factor"])
+
+    def test_probe_refuses_platform_without_safe_alarm(self):
+        with patch.object(provider_contract_probe, "signal", spec=[]):
+            with self.assertRaises(provider_contract_probe.ProbeError):
+                provider_contract_probe._run_with_timeout(15, lambda: "must_not_run")
+
+    def test_selected_records_reject_wrong_date_before_filtering(self):
+        rows = pd.DataFrame([{"ts_code": "000651.SZ", "trade_date": "20260721"}])
+        with self.assertRaises(ValueError):
+            provider_contract_probe._selected_records(rows, "20260720")
+
+    def test_selected_records_reject_duplicate_even_outside_selected_pool(self):
+        rows = pd.DataFrame([{"ts_code": "600000.SH", "trade_date": "20260720"}] * 2)
+        with self.assertRaises(ValueError):
+            provider_contract_probe._selected_records(rows, "20260720")
+
+    def test_supplement_cannot_overwrite_daily_fields_during_merge(self):
+        captures = captures_fixture()
+        captures[1]["rows"][0]["close"] = 999
+        result = provider_contract_probe.analyze_captures(captures, provider_contract_probe.FIELD_MAP)
+        first = next(row for row in result["stage_diff"]["rows"] if row["symbol"] == "000651")
+        self.assertEqual(first["fields"]["price"]["raw"], 11)
+
+    def test_raw_rows_marker_cannot_bypass_endpoint_validation(self):
+        captures = captures_fixture()
+        captures[0]["raw_rows"] = []
+        with self.assertRaises(ValueError):
+            provider_contract_probe.analyze_captures(captures, provider_contract_probe.FIELD_MAP)
+
+    def test_real_snapshot_path_drops_fields_before_normalization(self):
+        directory = {f"{i:06}": {"industry": "synthetic"} for i in range(1, 501)}
+        quotes = {symbol: {"code": symbol, "price": 10, "volume": 2, "amount": 3,
+                           "circ_mv": 40000, "pe": 5, "pb": 2, "total_mv": 60000,
+                           "volume_ratio": 1.5} for symbol in directory}
+        ts, tx, ak = Mock(), Mock(), Mock()
+        ts.get_stock_basic_map.return_value = directory
+        tx.get_realtime_quotes_batch.return_value = quotes
+        manager = DataSourceManager(tushare_service=ts, tencent_service=tx, akshare_service=ak)
+        with patch("requests.Session.request", side_effect=AssertionError("network forbidden")), \
+                patch("tushare.pro_api", side_effect=AssertionError("SDK forbidden")):
+            rows = manager.get_a_share_snapshot()
+        self.assertEqual(len(rows), 500)
+        for name in ("circ_mv", "pe", "pb", "total_mv", "turnover_rate"):
+            self.assertEqual(rows[0][name], 0)
+        self.assertNotIn("volume_ratio", rows[0])
+        self.assertEqual(rows[0]["amount"], 3)
+        self.assertEqual(rows[0]["volume"], 2)
+        ak.get_a_share_spot_snapshot.assert_not_called()
+        ts.get_stock_basic_map.assert_called_once_with()
+        tx.get_realtime_quotes_batch.assert_called_once_with(list(directory))
+        direct = manager._normalize_market_snapshot([quotes["000001"]])[0]
+        self.assertEqual(direct["circ_mv"], 40000)
+        self.assertEqual(direct["turnover_rate"], 0)
+
+    def test_tencent_parser_synthetic_boundary_and_now_fallback(self):
+        from app.services.tencent_service import TencentService
+        service = object.__new__(TencentService)
+        self.assertIsNone(service._parse_quote_payload("000651", "~".join([""] * 34)))
+        fixed_clock = Mock()
+        fixed_clock.now.return_value = datetime(2026, 9, 7, 10)
+        fixed_clock.strptime = datetime.strptime
+        with patch("app.services.tencent_service.datetime", fixed_clock):
+            for size in (35, 36):
+                with self.subTest(size=size), self.assertRaises(IndexError):
+                    service._parse_quote_payload("000651", "~".join([""] * size))
+            parts = [""] * 37
+            quote = service._parse_quote_payload("000651", "~".join(parts))
+            self.assertEqual(quote["price"], 0)
+            self.assertEqual(quote["update_time"], "2026-09-07 10:00:00")
+            parts[3], parts[30], parts[35], parts[36] = "0", "20260720150000", "x/y/3", "2"
+            quote = service._parse_quote_payload("000651", "~".join(parts))
+            self.assertEqual(quote["volume"], 2)
+            self.assertEqual(quote["amount"], 3)
+            self.assertEqual(quote["update_time"], "2026-07-20 15:00:00")
+            self.assertNotIn("turnover_rate", quote)
+            self.assertNotIn("amount_unit", quote)
+
+    def test_akshare_synthetic_spot_missing_nonfinite_and_time_do_not_change_proxy(self):
+        from app.services.akshare_service import AKShareService
+        before = dict(os.environ)
+        service = object.__new__(AKShareService)
+        frame = pd.DataFrame([{"代码": "000651", "名称": "synthetic", "最新价": float("nan"),
+                               "涨跌额": 0, "涨跌幅": 0, "最高": 11, "最低": 9, "今开": 10,
+                               "成交量": 2, "成交额": 3}])
+        with patch("app.services.akshare_service.ak.stock_zh_a_spot_em", return_value=frame), \
+                patch("requests.Session.request", side_effect=AssertionError("network forbidden")):
+            quote = service.get_realtime_quote("000651")
+            rows = service.get_a_share_spot_snapshot()
+        self.assertNotEqual(quote["price"], quote["price"])
+        self.assertEqual(quote["turnover_rate"], 0)
+        self.assertIsNotNone(quote["update_time"])
+        self.assertEqual(rows[0]["price"], 0)
+        self.assertEqual(rows[0]["circ_mv"], 0)
+        with patch("app.services.akshare_service.ak.stock_zh_a_spot_em", return_value=frame.drop(columns=["最新价"])):
+            self.assertIsNone(service.get_realtime_quote("000651"))
+        self.assertEqual(dict(os.environ), before)
+
+    def test_fake_probe_six_calls_and_secret_reflection_in_success_payload(self):
+        token = "synthetic-secret-never-a-real-token"
+        pro = Mock()
+        data = captures_fixture()
+        for endpoint in provider_contract_probe.TUSHARE_FIELDS:
+            def result(endpoint=endpoint, **kwargs):
+                rows = next(item["rows"] for item in data if item["endpoint"] == endpoint and item["trade_date"] == kwargs["trade_date"])
+                return pd.DataFrame([dict(row, provider_note=token) for row in rows])
+            getattr(pro, endpoint).side_effect = result
+        bounds = []
+        def timeout(seconds, operation):
+            bounds.append(seconds)
+            return operation()
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(provider_contract_probe, "_load_token", return_value=token), \
+                patch("tushare.pro_api", return_value=pro), \
+                patch.object(provider_contract_probe, "_run_with_timeout", side_effect=timeout), \
+                patch.object(provider_contract_probe, "_probe_tencent", return_value={"status": "unavailable", "rows": []}), \
+                patch.object(provider_contract_probe, "_probe_akshare", return_value={"status": "unavailable", "rows": []}), \
+                patch("requests.Session.request", side_effect=AssertionError("network forbidden")):
+            output = Path(temporary) / "out"
+            provider_contract_probe.probe(Path("synthetic.env"), output)
+            self.assertEqual(sum(getattr(pro, name).call_count for name in provider_contract_probe.TUSHARE_FIELDS), 6)
+            self.assertEqual(bounds, [1, 180] + [15] * 7 + [60])
+            for path in output.rglob("*.json"):
+                self.assertNotIn(token, path.read_text())
+            capture = json.loads((output / "raw/20260720/tushare-daily.json").read_text())
+            self.assertEqual(capture["evidence_level"], "selected_sdk_rows")
+            self.assertEqual(capture["response_metadata"]["returned_rows_before_filter"], 3)
+            self.assertEqual(capture["response_metadata"]["http_status"], "unknown")
+            self.assertEqual(capture["request"]["fields"], provider_contract_probe.TUSHARE_FIELDS["daily"])
+            self.assertIn("sdk_version", capture)
+
+    def test_fake_probe_stops_failed_source_and_does_not_leak_exception(self):
+        token = "synthetic-secret-in-exception"
+        pro = Mock()
+        pro.daily.side_effect = ValueError(token)
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(provider_contract_probe, "_load_token", return_value=token), \
+                patch("tushare.pro_api", return_value=pro), \
+                patch.object(provider_contract_probe, "_run_with_timeout", side_effect=lambda seconds, operation: operation()), \
+                patch.object(provider_contract_probe, "_probe_tencent", return_value={"status": "unavailable", "rows": []}), \
+                patch.object(provider_contract_probe, "_probe_akshare", return_value={"status": "unavailable", "rows": []}), \
+                patch("requests.Session.request", side_effect=AssertionError("network forbidden")):
+            output = Path(temporary) / "out"
+            result = provider_contract_probe.probe(Path("synthetic.env"), output)
+            self.assertEqual(result["status"], "partial")
+            self.assertEqual(pro.daily.call_count, 1)
+            pro.daily_basic.assert_not_called()
+            pro.adj_factor.assert_not_called()
+            for path in output.rglob("*.json"):
+                self.assertNotIn(token, path.read_text())
+
+    def test_fake_clock_exhausts_total_budget_before_any_provider_request(self):
+        pro = Mock()
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(provider_contract_probe, "_load_token", return_value="synthetic-token"), \
+                patch("tushare.pro_api", return_value=pro), \
+                patch.object(provider_contract_probe, "_run_with_timeout", side_effect=lambda seconds, operation: operation()), \
+                patch.object(provider_contract_probe.time, "monotonic", side_effect=[0] + [181] * 30), \
+                patch.object(provider_contract_probe, "_probe_tencent") as tx, \
+                patch.object(provider_contract_probe, "_probe_akshare") as ak:
+            result = provider_contract_probe.probe(Path("synthetic.env"), Path(temporary) / "out")
+        self.assertEqual(result["status"], "partial")
+        pro.daily.assert_not_called()
+        tx.assert_not_called()
+        ak.assert_not_called()
+
+    def test_timeout_alarm_is_bounded_and_restores_existing_timer(self):
+        alarm = Mock(SIGALRM=14, ITIMER_REAL=0)
+        alarm.getitimer.return_value = (180, 0)
+        previous = object()
+        alarm.signal.return_value = previous
+        with patch.object(provider_contract_probe, "signal", alarm), \
+                patch.object(provider_contract_probe.time, "monotonic", side_effect=[10, 12]):
+            def operation():
+                handler = alarm.signal.call_args_list[0].args[1]
+                handler(14, None)
+            with self.assertRaises(provider_contract_probe._Timeout):
+                provider_contract_probe._run_with_timeout(15, operation)
+        self.assertEqual(alarm.setitimer.call_args_list[0].args, (0, 15))
+        self.assertEqual(alarm.setitimer.call_args_list[-1].args, (0, 178, 0))
+        self.assertEqual(alarm.signal.call_args_list[-1].args, (14, previous))
+
+    def test_akshare_child_60_second_limit_and_owned_process_cleanup(self):
+        from queue import Empty
+        context = Mock()
+        context.Queue.return_value.get.side_effect = Empty()
+        context.Process.return_value.is_alive.side_effect = [True, False]
+        with patch.object(provider_contract_probe.multiprocessing, "get_context", return_value=context):
+            result = provider_contract_probe._probe_akshare()
+        context.Queue.return_value.get.assert_called_once_with(timeout=60)
+        context.Process.return_value.terminate.assert_called_once_with()
+        context.Process.return_value.join.assert_called_once_with(timeout=1)
+        context.Queue.return_value.close.assert_called_once_with()
+        self.assertEqual(result["status"], "timeout")
+
+    def test_akshare_raw_fields_and_missing_stages_are_not_silently_discarded(self):
+        captures = captures_fixture() + [{"source": "akshare", "status": "partial", "rows": [
+            {"代码": "000651", "最新价": 10, "换手率": 0, "流通市值": 40000}]}]
+        before = dict(os.environ)
+        with patch("requests.Session.request", side_effect=AssertionError("network forbidden")):
+            first = provider_contract_probe.analyze_captures(captures, provider_contract_probe.FIELD_MAP)
+            second = provider_contract_probe.analyze_captures(captures, provider_contract_probe.FIELD_MAP)
+        self.assertEqual(first["stage_diff"], second["stage_diff"])
+        stats = first["coverage"]["akshare"]["stages"]
+        self.assertEqual(stats["raw"]["fields"]["circ_mv"]["valid_count"], 1)
+        self.assertEqual(stats["normalized"]["fields"]["turnover_rate"]["zero_count"], 1)
+        self.assertIsNone(first["stage_diff"]["realtime_stages"]["akshare"]["adapted"][0]["update_time"])
+        self.assertEqual(before, dict(os.environ))
+
+    def test_tencent_fake_response_preserves_payload_and_parse_error(self):
+        from app.services.tencent_service import TencentService
+        response = Mock()
+        response.content = ('v_sz000651="' + "~".join([""] * 35) + '";').encode("gbk")
+        response.status_code = 200
+        session = Mock()
+        session.get.return_value = response
+        with patch("app.services.tencent_service.requests.Session", return_value=session):
+            result = provider_contract_probe._probe_tencent()
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["evidence_level"], "raw_payload_and_adapted")
+        self.assertIn("v_sz000651", result["raw_payload"])
+        self.assertEqual(result["parse_errors"][0]["status"], "parser_error")
+        self.assertEqual(session.get.call_count, 1)
+        self.assertEqual(session.get.call_args.kwargs["timeout"], 15)
+        session.close.assert_called_once_with()
+
+    def test_known_return_limit_checked_before_selected_rows_hide_truncation(self):
+        selected = pd.DataFrame(captures_fixture()[0]["rows"])
+        frame = Mock()
+        frame.to_dict.return_value = selected.to_dict("records")
+        frame.columns = selected.columns
+        # A DataFrame with 6000 rows but only three targets must not be complete.
+        from unittest.mock import MagicMock
+        frame = MagicMock(wraps=frame)
+        frame.__len__.return_value = 6000
+        pro = Mock()
+        pro.daily.return_value = frame
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(provider_contract_probe, "_load_token", return_value="synthetic-token"), \
+                patch("tushare.pro_api", return_value=pro), \
+                patch.object(provider_contract_probe, "_run_with_timeout", side_effect=lambda seconds, operation: operation()), \
+                patch.object(provider_contract_probe, "_probe_tencent", return_value={"status": "unavailable", "rows": []}), \
+                patch.object(provider_contract_probe, "_probe_akshare", return_value={"status": "unavailable", "rows": []}):
+            output = Path(temporary) / "out"
+            result = provider_contract_probe.probe(Path("synthetic.env"), output)
+            item = json.loads((output / "raw/20260720/tushare-daily.json").read_text())
+            self.assertEqual(item["status"], "partial")
+            self.assertTrue(item["response_metadata"]["at_limit"])
+            self.assertEqual(result["capture_status"], "partial")
+            pro.daily_basic.assert_not_called()
+
     def test_circ_mv_requires_declared_conversion(self):
         rows = [record(circ_mv=4)]
         result = compare_field_stages(rows, rows, rows, {"circ_mv": FIELD_MAP["circ_mv"]})

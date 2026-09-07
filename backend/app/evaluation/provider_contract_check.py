@@ -271,6 +271,8 @@ def build_verified_replay(input_dir, output_dir, field_map, analyzer):
         "legacy_manifest": manifest.get("schema_version") != "provider-field-probe-v2",
         "raw_file_count": len(captures), "raw_files": [item["_capture"] for item in captures],
         **{key: result[key] for key in ("replay_completed", "capture_status", "contract_status", "statuses")},
+        "replay_code_provenance": result.get("code_provenance", {}),
+        "capture_metadata": result.get("capture_metadata", []),
     }
     (output_dir / "replay-manifest.json").write_bytes(_canonical_bytes(replay_manifest))
     return result
