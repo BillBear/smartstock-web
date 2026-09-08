@@ -702,3 +702,46 @@ trace 记录规则侧 `up_prob/dd_prob/total_score`、模型 ID、模型 `up/dd/
 离线 `evaluate_swing_experiments` 现在可以消费完整 `ml_fusion_trace_v2`，但只针对 trace 出现后的新快照和已成熟标签。它以 trace 中的融合后输入复放当前中风险横截面校准及排序，先与已保存 `rank_no` 和 `raw_total/total` 核对；只要任一候选缺 trace、schema/status 不匹配、字段不一致或复放排名不一致，整日排除并给出原因，不丢行、不补位、不用其他日期凑样本。
 
 只有融合后复放一致的整日，才用同一候选池、同一标签和同一后处理，将 `rule.up_prob/dd_prob/total_score` 替换进排序以形成 E3 规则侧对照。该工具不读取数据库、不调用 provider、不执行模型、不生成候选，也不将较优离线结果写回生产。当前尚未运行真实 E3：在没有足够的 v2 前向快照及 10 日成熟标签前，结论仍是 `insufficient_evidence`，不是 ML 改善或拖累的判断。
+
+## 2026-09-08 主线 E3：修正反事实证据校验
+
+### 发现与修正
+
+本节修正上一节“精确复放”的过强表述。旧消费端没有验证模型 ID、特征 schema、融合权重及算术一致性；其合成正例甚至没有 model/fusion 部分。旧程序还直接使用最终展示池重新计算横截面百分位，而实际校准发生在展示截断之前。仅复现最终排名不能证明两个池相同。
+
+本次独立分支 `fix/e3-trace-verification`，起点 `8162c96`：
+
+- `46e0786`：只新增校准旁路元数据，保存截断前完整 symbol 集合、校准时实际 action 和市场状态。没有改变分数、排序、融合、买卖、仓位或阈值。
+- `6b5baa8`：消费端要求每行模型身份、特征 schema、融合权重、模型数值和融合结果可核验，同一天使用同一模型/schema；评分池与当前完整候选池不同则整日排除。没有保存这些信息的旧 v2 也不能自动通过。
+- 消费端拒绝重复 symbol/rank、小数名次、布尔数值、缺失/越界概率，以及结构错误的校准元数据，不静默去重或补位。
+- 校准动作使用校准时记录，不使用此前 `_build_pick` 时的动作。排序使用已经保留两位小数的展示分，与当前 Coach 排序顺序一致。
+
+### 验证
+
+先写失败测试，实际观察到缺少 calibration scope 的 1 项失败；消费端 4 个测试累计暴露 19 个断言失败，覆盖不完整模型仍被接受、重复主键和舍入顺序不一致。最小实现后通过。对抗性检查又复现列表/字典型校准状态导致 TypeError 的两种情况，已修正为整日拒绝。
+
+从研究 worktree 的 `backend` 目录执行，`PY` 指向现有运行环境的 Python：
+
+```bash
+"$PY" -B -m unittest tests.test_pick_ml_trace tests.test_ranking_quality_experiments tests.test_ranking_quality_diagnosis tests.test_ranking_quality_inputs tests.test_swing_replay tests.test_swing_benchmark_cli -v
+```
+
+结果：`Ran 108 tests in 86.189s / OK`。最后补充的异常结构校验另跑 `"$PY" -B -m unittest tests.test_ranking_quality_experiments -k e3 -v`，`Ran 7 tests / OK`。`git diff --check` 无输出。CLI 测试中的预期 blocked/usage 输出属于失败路径断言，不是忽略失败。
+
+真实 Coach 代码配合本地合成行情、假模型服务的链路测试验证：完整 trace 可被离线消费；展示截断后明确返回 `calibration_population_mismatch`；校准时 action/state 已变化也可复放；没有 trace 与带 trace 的候选除旁路字段外逐项相等，输入 rows 不被改写。未使用真实模型推理、数据库、网络行情或真实策略回测。本轮未改前端，未运行前端构建或后端全量测试。
+
+### 冻结真实快照复核
+
+只读取既有 `runtime/strategy-quality/swing-quality-v1/baseline-20260906/observed_production.json`，没有重新生成候选或补写旧数据。文件 SHA-256：`1f88a63d5b3623845cf02b4c8ec98b1fd3c971aa6ac812ce962e7acc5e1fc767`。
+
+将该文件 JSON 列表直接传入 `build_e3_rule_trial`，结果：11 个日期、256 条候选；0 个可纳入日期、0 条可纳入候选；`trace_missing=256`；`no_complete_ml_fusion_trace_dates`。这是先前冻结输入的核验，不是对当前 PostgreSQL 全量状态的重新审计。
+
+### 结论与后续边界
+
+- E3 仍为证据不足，不能判定弱 ML 改善或拖累排序，也没有产生新的 Shadow 候选。此前 E1/T1 实验结论不变。
+- 可用 E3 仅代表固定最终池、动作和其他因子下的条件排序对照，不是“整个系统关闭 ML”的因果效果。规则侧只保存 4 位概率与 2 位总分，融合算术校验采用其舍入误差容限；不能声称恢复了引擎内部未舍入值，临界阈值附近仍有限制。
+- 完整评分池缺失时不重建隐藏候选、不猜测其分数。当前方案宁可 unavailable，也不以最终展示池冒充评分池。
+- 这些修改只在研究分支，未合并到部署分支、未重启服务。当前页面不会因此更换股票，线上不会凭研究分支代码自动积累新 trace。
+- 下一步落地依赖是对这套旁路记录进行单独的行为中性发布核验，再消费自然产生、具有成熟标签的同口径快照；发布不能整分支带入其他未验收研究改动。历史缺失记录不能通过补字段伪造成模型效果证据，不以重复等待或另起调参实验替代这项依赖。
+
+本次交付价值是排除错误的 ML 效果结论，而不是已证明选股收益提升。主线目标仍是同候选池下可重复的波段 Top5 净收益与风险优势。
