@@ -226,3 +226,28 @@ class PickMlFusionTraceTests(unittest.TestCase):
         # A later display cap must not rewrite the original calibration scope.
         self.assertEqual(picks[:1][0]["ml_fusion_trace"]["ranking"]["calibration_population_symbols"],
                          ["000001", "000002"])
+
+    def test_actual_pick_trace_can_be_consumed_but_display_capped_pool_cannot(self):
+        from app.evaluation.ranking_quality_diagnosis import _flatten_snapshot
+        from app.evaluation.ranking_quality_experiments import build_e3_rule_trial
+
+        pick = self._build_and_finalize()
+        pick["score_breakdown"]["total"] = pick["score_breakdown"]["raw_total"]
+        second = copy.deepcopy(pick)
+        second["symbol"] = "000002"
+        # Action has changed since _build_pick; replay must use calibration-time state.
+        second["action"] = "buy"
+        picks = [pick, second]
+        self.service._calibrate_pick_scores(picks, {"state_tag": "defensive"})
+        picks.sort(key=lambda item: self.service._rank_score(item, "medium"), reverse=True)
+        rows = [_flatten_snapshot(dict(item, trade_date="2026-04-10", rank_no=rank))
+                for rank, item in enumerate(picks, 1)]
+        before = copy.deepcopy(rows)
+        result = build_e3_rule_trial(rows)
+        self.assertEqual(result["trace_diagnostics"]["included_dates"], ["2026-04-10"])
+        self.assertEqual(len(result["rows"]), 2)
+        self.assertEqual(rows, before)
+        capped = build_e3_rule_trial(rows[:1])
+        self.assertEqual(capped["rows"], [])
+        self.assertEqual(capped["trace_diagnostics"]["excluded_dates"][0]["reason"],
+                         "calibration_population_mismatch")

@@ -59,7 +59,7 @@ class RankingQualityExperimentTests(unittest.TestCase):
                 row = dict(
                     _row(trade_date, str(rank), rank, dd_prob, 50.0, float(rank)),
                     baseline_kind="observed_production",
-                    probability_source="ml_fusion_trace_v1",
+                    probability_source="ml_fusion_trace_v2",
                     market_state_tag="neutral",
                     label_end_dates={"20": trade_date},
                     raw_total=raw_total,
@@ -73,9 +73,21 @@ class RankingQualityExperimentTests(unittest.TestCase):
                         "schema_version": "ml_fusion_trace_v2",
                         "status": "applied",
                         "rule": {
-                            "up_prob": 0.42 + rank * 0.04,
-                            "dd_prob": 0.42 - rank * 0.025,
-                            "total_score": 44.0 + rank,
+                            "up_prob": 0.60 + rank * 0.01,
+                            "dd_prob": 0.28 - rank * 0.01,
+                            "total_score": 66.0 + rank,
+                        },
+                        "model": {
+                            "model_id": "test-v1", "model_version_id": "test-v1",
+                            "feature_schema": ["return_5d_pct"],
+                            "model_up_prob": (up_prob - (0.60 + rank * 0.01) * 0.45) / 0.55,
+                            "model_dd_prob": (dd_prob - (0.28 - rank * 0.01) * 0.45) / 0.55,
+                            "model_final_score": (raw_total - (66.0 + rank) * 0.65) / 0.35,
+                        },
+                        "fusion": {
+                            "up_prob": {"rule_weight": 0.45, "model_weight": 0.55},
+                            "dd_prob": {"rule_weight": 0.45, "model_weight": 0.55},
+                            "total_score": {"rule_weight": 0.65, "model_weight": 0.35},
                         },
                         "fused": {"up_prob": up_prob, "dd_prob": dd_prob, "total_score": raw_total},
                         "ranking_inputs": {
@@ -88,11 +100,69 @@ class RankingQualityExperimentTests(unittest.TestCase):
                             "main_net_inflow_yi": 0.0,
                             "market_state_tag": "neutral",
                         },
-                        "ranking": {"raw_total": raw_total, "total": total},
+                        "ranking": {
+                            "raw_total": raw_total, "total": total,
+                            "calibration_population_symbols": [str(n) for n in range(1, 7)],
+                            "calibration_action": "watch", "calibration_market_state": "neutral",
+                        },
                     },
                 )
                 rows.append(row)
         return rows
+
+    def test_e3_rejects_unverifiable_model_and_calibration_evidence(self):
+        from app.evaluation.ranking_quality_experiments import build_e3_rule_trial
+
+        cases = [
+            ("model", "model_id", None),
+            ("model", "model_version_id", "different-model"),
+            ("model", "feature_schema", []),
+            ("model", "model_up_prob", 2.0),
+            ("model", "model_dd_prob", True),
+            ("model", "model_final_score", 1.0),
+            ("fusion", "up_prob", {"rule_weight": 0.5, "model_weight": 0.5}),
+            ("ranking", "calibration_population_symbols", None),
+            ("ranking", "calibration_population_symbols", ["1", "2", "3", "4", "5", "6", "7"]),
+            ("ranking", "calibration_action", None),
+            ("ranking", "calibration_action", []),
+            ("ranking", "calibration_market_state", None),
+            ("ranking", "calibration_market_state", {}),
+            ("fused", "total_score", 75.0),
+            ("rule", "up_prob", True),
+        ]
+        for section, field, value in cases:
+            with self.subTest(section=section, field=field, value=value):
+                rows = self._e3_trace_rows(dates=("2026-07-01",))
+                rows[0]["ml_fusion_trace"][section][field] = value
+                result = build_e3_rule_trial(rows)
+                self.assertEqual(len(result["rows"]), 0)
+                self.assertEqual(len(result["trace_diagnostics"]["excluded_dates"]), 1)
+
+    def test_e3_rejects_duplicate_or_fractional_snapshot_keys(self):
+        from app.evaluation.ranking_quality_experiments import build_e3_rule_trial
+
+        for field, value in (("rank_no", 1.5), ("rank_no", True), ("rank_no", 2), ("symbol", "2"), ("symbol", "")):
+            with self.subTest(field=field, value=value):
+                rows = self._e3_trace_rows(dates=("2026-07-01",))
+                rows[0][field] = value
+                self.assertEqual(len(build_e3_rule_trial(rows)["rows"]), 0)
+
+    def test_e3_rejects_mixed_models_even_when_each_row_replays(self):
+        from app.evaluation.ranking_quality_experiments import build_e3_rule_trial
+
+        rows = self._e3_trace_rows(dates=("2026-07-01",))
+        rows[0]["ml_fusion_trace"]["model"].update(model_id="test-v2", model_version_id="test-v2")
+        self.assertEqual(len(build_e3_rule_trial(rows)["rows"]), 0)
+
+    def test_e3_rank_score_uses_rounded_display_score_like_coach(self):
+        from app.evaluation.ranking_quality_experiments import _e3_trace_record, _e3_rank_records
+
+        records = [_e3_trace_record(row)[0] for row in self._e3_trace_rows(dates=("2026-07-01",))]
+        ranked = _e3_rank_records(records, "fused")
+        first = ranked[0]
+        expected = (.72 * 100 * .20 + (1 - .16) * 100 * .20 + 62 * .28
+                    + 53.8 * .14 + first["display_total"] * .18)
+        self.assertAlmostEqual(first["rank_score"], expected, places=10)
 
     def test_e3_replays_rule_ranking_only_for_whole_dates_with_complete_trace(self):
         from app.evaluation.ranking_quality_experiments import build_e3_rule_trial

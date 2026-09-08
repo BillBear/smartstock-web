@@ -166,6 +166,12 @@ def build_e3_rule_trial(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
             )
             continue
 
+        scope_error = _e3_scope_error(records)
+        if scope_error:
+            excluded_dates.append({"trade_date": trade_date, "reason": scope_error,
+                                   "candidate_count": len(items)})
+            continue
+
         fused = _e3_rank_records(records, "fused")
         stored_symbols = [record["symbol"] for record in sorted(records, key=lambda record: (record["rank_no"], record["symbol"]))]
         fused_symbols = [record["symbol"] for record in fused]
@@ -197,7 +203,9 @@ def build_e3_rule_trial(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "included_dates": included_dates,
         "excluded_dates": excluded_dates,
         "included_row_count": len(trial_rows),
-        "whole_date_policy": "require_complete_trace_and_fused_rank_replay_no_row_drop_or_refill",
+        "whole_date_policy": "require_full_calibration_pool_model_trace_and_fused_rank_replay_no_refill",
+        "interpretation": "conditional_ranking_only_fixed_pool_actions_and_other_factors",
+        "rule_precision": "saved_4dp_probabilities_and_2dp_score_not_unrounded_engine_replay",
     }
     return {
         "rows": trial_rows,
@@ -224,13 +232,18 @@ def _e3_trace_record(row: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Opt
         return None, "risk_level_not_medium"
     for name, values in (("rule", rule), ("fused", fused)):
         for field in ("up_prob", "dd_prob", "total_score"):
-            if _as_float(values.get(field)) is None:
+            number = _e3_float(values.get(field))
+            if number is None:
                 return None, f"{name}_{field}_missing"
+            if not 0 <= number <= (100 if field == "total_score" else 1):
+                return None, f"{name}_{field}_out_of_range"
+        if float(values["dd_prob"]) == 0:
+            return None, f"{name}_zero_dd_legacy_default_ambiguous"
     for field in ("raw_total", "total"):
-        if _as_float(ranking.get(field)) is None:
+        if _e3_float(ranking.get(field)) is None:
             return None, f"ranking_{field}_missing"
     for field in ("expected_edge_pct", "profit_factor_proxy", "risk_adjusted_score", "main_net_inflow_yi"):
-        if _as_float(inputs.get(field)) is None:
+        if _e3_float(inputs.get(field)) is None:
             return None, f"ranking_input_{field}_missing"
     if str(inputs.get("selection_action") or "") not in {"buy", "watch"}:
         return None, "ranking_input_selection_action_invalid"
@@ -238,15 +251,57 @@ def _e3_trace_record(row: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Opt
         return None, "ranking_input_confidence_invalid"
     if str(inputs.get("market_state_tag") or "") not in {"neutral", "defensive", "offensive"}:
         return None, "ranking_input_market_state_invalid"
-    rank_no = _as_float(row.get("rank_no"))
-    if rank_no is None or rank_no <= 0:
+    rank_no = _e3_float(row.get("rank_no"))
+    if rank_no is None or rank_no <= 0 or not rank_no.is_integer():
         return None, "stored_rank_no_invalid"
+    if not isinstance(row.get("symbol"), str) or not row["symbol"].strip():
+        return None, "stored_symbol_invalid"
+
+    population = ranking.get("calibration_population_symbols")
+    if (not isinstance(population, list) or not population
+            or any(not isinstance(symbol, str) or not symbol.strip() for symbol in population)):
+        return None, "calibration_population_missing"
+    if ranking.get("calibration_action") not in ("buy", "watch"):
+        return None, "calibration_action_missing"
+    if ranking.get("calibration_market_state") not in ("neutral", "defensive", "offensive"):
+        return None, "calibration_market_state_missing"
+
+    model = trace.get("model")
+    fusion = trace.get("fusion")
+    if not isinstance(model, dict) or not isinstance(fusion, dict):
+        return None, "model_or_fusion_missing"
+    model_id = model.get("model_id")
+    if not isinstance(model_id, str) or not model_id.strip() or model_id != model.get("model_version_id"):
+        return None, "model_identity_invalid"
+    schema = model.get("feature_schema")
+    if (not isinstance(schema, list) or not schema
+            or any(not isinstance(name, str) or not name.strip() for name in schema)
+            or len(set(schema)) != len(schema)):
+        return None, "model_feature_schema_invalid"
+    # Recorded rule values are rounded before storage; allow only their rounding envelope.
+    for field, model_field, weight, low, high, tolerance in (
+        ("up_prob", "model_up_prob", .45, .05, .90, .0001),
+        ("dd_prob", "model_dd_prob", .45, .05, .85, .0001),
+        ("total_score", "model_final_score", .65, 0, 100, .01),
+    ):
+        weights = fusion.get(field)
+        if (not isinstance(weights, dict)
+                or _e3_float(weights.get("rule_weight")) != weight
+                or _e3_float(weights.get("model_weight")) != round(1 - weight, 2)):
+            return None, "unsupported_fusion_weights"
+        model_value = _e3_float(model.get(model_field))
+        if model_value is None or not 0 <= model_value <= (100 if field == "total_score" else 1):
+            return None, f"{model_field}_invalid"
+        expected = _e3_clamp(float(rule[field]) * weight + model_value * (1 - weight), low, high)
+        if abs(expected - float(fused[field])) > tolerance + 1e-12:
+            return None, "fusion_arithmetic_mismatch"
 
     comparisons = (
         (row.get("up_prob"), fused.get("up_prob")),
         (row.get("dd_prob"), fused.get("dd_prob")),
         (row.get("raw_total"), ranking.get("raw_total")),
         (row.get("total"), ranking.get("total")),
+        (ranking.get("raw_total"), fused.get("total_score")),
     )
     if any(not _e3_numbers_match(left, right) for left, right in comparisons):
         return None, "stored_trace_value_mismatch"
@@ -257,16 +312,38 @@ def _e3_trace_record(row: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Opt
         "rule": {field: float(rule[field]) for field in ("up_prob", "dd_prob", "total_score")},
         "fused": {field: float(fused[field]) for field in ("up_prob", "dd_prob", "total_score")},
         "ranking_total": float(ranking["total"]),
+        "population": population,
+        "model_identity": (model_id, tuple(schema)),
         "inputs": {
-            "selection_action": str(inputs["selection_action"]),
+            "selection_action": ranking["calibration_action"],
             "confidence_level": str(inputs["confidence_level"]),
             "expected_edge_pct": float(inputs["expected_edge_pct"]),
             "profit_factor_proxy": float(inputs["profit_factor_proxy"]),
             "risk_adjusted_score": float(inputs["risk_adjusted_score"]),
             "main_net_inflow_yi": float(inputs["main_net_inflow_yi"]),
-            "market_state_tag": str(inputs["market_state_tag"]),
+            "market_state_tag": ranking["calibration_market_state"],
         },
     }, None
+
+
+def _e3_float(value: Any) -> Optional[float]:
+    return None if isinstance(value, bool) else _as_float(value)
+
+
+def _e3_scope_error(records: Sequence[Dict[str, Any]]) -> Optional[str]:
+    symbols = sorted(record["symbol"] for record in records)
+    ranks = [record["rank_no"] for record in records]
+    if len(set(symbols)) != len(symbols) or len(set(ranks)) != len(ranks):
+        return "duplicate_snapshot_keys"
+    if sorted(ranks) != list(range(1, len(records) + 1)):
+        return "incomplete_stored_rank_sequence"
+    if any(sorted(record["population"]) != symbols for record in records):
+        return "calibration_population_mismatch"
+    if len({record["model_identity"] for record in records}) != 1:
+        return "mixed_model_identity"
+    if len({record["inputs"]["market_state_tag"] for record in records}) != 1:
+        return "mixed_calibration_market_state"
+    return None
 
 
 def _e3_rank_records(records: Sequence[Dict[str, Any]], source: str) -> List[Dict[str, Any]]:
@@ -293,6 +370,7 @@ def _e3_rank_records(records: Sequence[Dict[str, Any]], source: str) -> List[Dic
         bonus = _e3_calibration_bonus(inputs, dd_prob)
         state_adjust = -2.0 if inputs["market_state_tag"] == "defensive" else (1.0 if inputs["market_state_tag"] == "offensive" else 0.0)
         display_total = _e3_clamp(raw_total * 0.34 + quality_score * 0.46 + relative_score * 0.20 + bonus + state_adjust, 0.0, 100.0)
+        display_total = round(display_total, 2)
         rank_edge = _e3_clamp(50.0 + inputs["expected_edge_pct"] * 6.0, 0.0, 100.0)
         rank_pf = _e3_clamp(45.0 + (inputs["profit_factor_proxy"] - 1.0) * 22.0, 0.0, 100.0)
         rank_score = (
@@ -333,7 +411,7 @@ def _e3_calibration_bonus(inputs: Dict[str, Any], dd_prob: float) -> float:
 
 
 def _e3_numbers_match(left: Any, right: Any) -> bool:
-    first, second = _as_float(left), _as_float(right)
+    first, second = _e3_float(left), _e3_float(right)
     return first is not None and second is not None and abs(first - second) <= 0.0001
 
 
