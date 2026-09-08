@@ -201,3 +201,28 @@ class PickMlFusionTraceTests(unittest.TestCase):
             "decision_grade": "C",
             "decision_executable": False,
         })
+
+    def test_calibration_records_full_population_and_actual_action_without_changing_scores(self):
+        pick = self._build_and_finalize()
+        pick["score_breakdown"]["total"] = pick["score_breakdown"]["raw_total"]
+        second = copy.deepcopy(pick)
+        second["symbol"] = "000002"
+        second["action"] = "buy"
+        picks = [second, pick]
+        untraced = copy.deepcopy(picks)
+        for item in untraced:
+            del item["ml_fusion_trace"]
+        self.service._calibrate_pick_scores(picks, {"state_tag": "defensive"})
+        self.service._calibrate_pick_scores(untraced, {"state_tag": "defensive"})
+
+        for traced, baseline in zip(picks, untraced):
+            ranking = traced["ml_fusion_trace"]["ranking"]
+            self.assertEqual(ranking.get("calibration_population_symbols"), ["000001", "000002"])
+            self.assertEqual(ranking.get("calibration_action"), traced["action"])
+            self.assertEqual(ranking.get("calibration_market_state"), "defensive")
+            projected = copy.deepcopy(traced)
+            del projected["ml_fusion_trace"]
+            self.assertEqual(projected, baseline)
+        # A later display cap must not rewrite the original calibration scope.
+        self.assertEqual(picks[:1][0]["ml_fusion_trace"]["ranking"]["calibration_population_symbols"],
+                         ["000001", "000002"])

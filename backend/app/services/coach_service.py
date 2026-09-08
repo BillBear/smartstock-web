@@ -2345,6 +2345,7 @@ class CoachService:
         if not picks:
             return
 
+        calibration_symbols = sorted(str(pick.get("symbol") or "") for pick in picks)
         raw_scores: List[float] = []
         for pick in picks:
             breakdown = pick.get("score_breakdown") or {}
@@ -2424,6 +2425,10 @@ class CoachService:
                 trace["ranking"] = {
                     "raw_total": breakdown.get("raw_total"),
                     "total": breakdown["total"],
+                    # Preserve the pre-display-cap cross section for offline replay.
+                    "calibration_population_symbols": list(calibration_symbols),
+                    "calibration_action": pick.get("action"),
+                    "calibration_market_state": state_tag,
                 }
 
     def _build_pick_decision(
