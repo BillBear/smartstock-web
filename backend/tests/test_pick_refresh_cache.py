@@ -121,3 +121,19 @@ class PickRefreshCacheTests(unittest.TestCase):
     def test_successful_snapshot_save_is_reported(self):
         result = self.service.get_today_picks()
         self.assertEqual(result.get("snapshot_persistence", {}).get("status"), "saved")
+
+    def test_ml_trace_survives_snapshot_storage_and_cache_without_rebuilding(self):
+        self.pick["ml_fusion_trace"] = {
+            "schema_version": "ml_fusion_trace_v2", "status": "not_configured",
+            "rule": {"up_prob": .55, "dd_prob": .25, "total_score": 80},
+        }
+        result = self.service.get_today_picks()
+        saved = self.store.list_pick_snapshots(user_id="default", trade_date="2026-07-20",
+                                              strategy_code="trend_breakout", risk_level="medium")
+        self.assertEqual(len(saved), 1)
+        trace = result["picks"][0]["ml_fusion_trace"]
+        self.assertEqual(saved[0]["ml_fusion_trace"], trace)
+        self.assertEqual(trace["ranking"]["calibration_population_symbols"], ["000001"])
+        self.assertIn("executable", trace["gate_outcomes"])
+        self.service._build_pick = lambda *args: self.fail("cache unexpectedly rebuilt")
+        self.assertEqual(self.service.get_today_picks()["picks"], result["picks"])
