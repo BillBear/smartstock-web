@@ -1,6 +1,6 @@
 # ML 旁路记录本地发布候选核验
 
-日期：2026-09-09。状态：最小补丁验证通过，**未部署**。这不是策略效果报告或新的准入门禁。
+日期：2026-09-09。状态：最小补丁验证通过；随后获用户授权完成本地部署，结果见文末。这不是策略效果报告或新的准入门禁。以下候选核验部分保留部署前的时间口径。
 
 ## 范围与起点
 
@@ -63,3 +63,28 @@ PYTHONPATH=. "$PY" -B "$EVIDENCE/verify_parity.py"
 后续本地部署需明确授权，只引入 `77abc0e` 这一最小代码提交，而不是整个研究分支。部署时应先固定 cached-only 响应，避免启动预热或 force refresh 触发新候选；发布前后对比既有候选的完整投影、健康状态与读取来源。自然生成新候选后，再只读核对 PostgreSQL 中真实 trace。新候选被展示截断、模型字段缺失或尚无成熟标签时，E3 仍应 unavailable，不能补造隐藏候选或旧融合记录。
 
 回滚仅需在发布分支反向 revert 此代码提交；JSON 新字段向后兼容，不删除已保存证据，不改数据库结构，不改模型配置。尚未执行任何合并、部署或回滚。
+
+## 2026-09-09 授权后的实际本地部署
+
+用户明确要求部署前述补丁。本次将代码提交 `77abc0e` fast-forward 接入干净的本地运行分支 `docs/local-core-ml-v1-plan-revision`；没有合并完整研究分支。随后同步本文件的候选核验与部署记录，代码仍为同一版本。
+
+部署前重新运行上述 74 项测试，`Ran 74 tests in 12.963s / OK`；固定 baseline 对照再次为 108 情形、0 mismatches，相同结果 hash。`git diff e441b17..77abc0e --check` 通过。
+
+先固定只读 `GET /api/coach/picks/today?max_count=80&risk_level=medium&user_id=default&cached_only=true`，再优雅停止已核对路径的后端 PID 50293。新后端 PID 69802，仍在主仓库 backend、8000 端口，沿用原虚拟环境和 `.local-secrets/smartstock.env`。未输出或变更密钥。
+
+本次启动沿用 `--lifespan off`，不执行 startup 候选预热；响应头改为 `X-SmartStock-Release:77abc0e`。没有修改 start.sh 或 app.main.py；以后使用普通 start.sh 仍有其原来的预热行为。应用正常导入沿用原 CoachStore 初始化流程，没有改 schema 或执行独立迁移。
+
+| 实际检查 | 结果 |
+|---|---|
+| `/health` | HTTP 200，healthy，版本头为 77abc0e |
+| `/smart-screen`（3601） | HTTP 200，原前端 PID 50334 未改变 |
+| PostgreSQL | 原服务保持运行，未重启 |
+| 部署前后候选日期/条数 | 2026-09-09 / 50，均相同 |
+| 全部候选字段与完整响应 | 完全相等，无 metadata 差异 |
+| picks 规范 JSON SHA-256 | 5205a47fec8ed97e3cf680636719feb425a864689ace14fb0ce96907b39b8252，前后相同 |
+| 旧快照含 trace 条数 | 0，未回填；这是预期，不是假装记录已齐全 |
+| 新后端日志 | 已启动，无 traceback 或 warmup 日志；验收只读请求均 200 |
+
+响应、headers 和后端启动日志保存在项目外层 `runtime/ml-trace-deploy-20260909/`，未进入 Git。未强制刷新选股、未主动生成正式候选、未训练或额外运行模型推理、未交易或回测，前端无改动故没有重建。
+
+这次可以确认补丁代码已经运行、已有结果未改变；尚不能确认真实新生成快照的 trace 完整性，需要在下一次正常生成后只读核对。此后 E3 仍须满足同池、模型身份和成熟标签等校验，不因部署完成就宣称模型有效或排序准确率提升。
