@@ -8,6 +8,18 @@ import {
   shouldRefreshCurrentTradingPicks,
 } from '../src/pages/smartScreenData.mjs'
 
+test('empty and unverified current session refresh once, current verified session does not', () => {
+  for (const freshness_status of ['missing', 'stale', 'unverified']) {
+    assert.equal(shouldRefreshCurrentTradingPicks({calendarContext: {mode: 'trading', freshness_status}}), true)
+  }
+  assert.equal(shouldRefreshCurrentTradingPicks({calendarContext: {
+    mode: 'trading', freshness_status: 'current', snapshot_trade_date: '2026-10-09',
+  }}), false)
+  assert.equal(shouldRefreshCurrentTradingPicks({calendarContext: {
+    mode: 'preparation', freshness_status: 'stale',
+  }, canRefresh: true}), false)
+})
+
 test('trading day stale snapshot triggers background refresh', () => {
   assert.equal(
     shouldRefreshCurrentTradingPicks({

@@ -227,6 +227,7 @@ const SmartScreen = () => {
           }
         }).catch((refreshErr) => {
           console.warn('自动刷新当前交易日候选池失败', refreshErr)
+          if (mountedRef.current) setError(refreshErr?.response?.data?.detail || refreshErr?.message || '更新失败，旧候选未替换')
         })
       }
       const nextRisk = data?.risk_profile?.risk_level
@@ -280,9 +281,10 @@ const SmartScreen = () => {
   const isHistoricalMode = calendarMode === 'historical'
   const isObservationMode = isPreparationMode || isHistoricalMode
   const snapshotDates = result?.snapshot_dates || []
-  const canRefresh = calendarActions.can_refresh !== false && calendarMode === 'trading'
+  const canRefresh = calendarActions.can_refresh === true && !isHistoricalMode
   const canPaperBuy = calendarActions.can_paper_buy !== false
-  const candidateDate = calendarContext?.effective_trade_date || result?.trade_date || '-'
+  const candidateDate = result?.trade_date || calendarContext?.snapshot_trade_date || '-'
+  const staleSnapshot = calendarContext?.freshness_status !== 'current'
   const signalAge = calendarContext?.signal_age_days
   const signalAgeText = signalAge === null || signalAge === undefined ? '-' : `${signalAge} 天`
   const heroKicker = isPreparationMode ? '备战观察' : (isHistoricalMode ? '历史快照' : '今日行动')
@@ -332,7 +334,7 @@ const SmartScreen = () => {
 
   const triggerRefresh = async () => {
     if (!canRefresh) {
-      message.warning('非交易日不生成交易计划')
+      message.warning('交易日历不可用或正在查看历史快照，不能更新候选')
       return
     }
     setLoading(true)
@@ -343,7 +345,7 @@ const SmartScreen = () => {
         risk_level: riskLevel,
       })
       if (response?.accepted === false) {
-        message.warning(response?.calendar_context?.message || '非交易日不生成交易计划')
+        message.warning(response?.calendar_context?.message || '当前无法更新候选')
         setResult((prev) => ({
           ...(prev || {}),
           calendar_context: response?.calendar_context || prev?.calendar_context,
@@ -351,12 +353,14 @@ const SmartScreen = () => {
         }))
         return
       }
-      message.success('后台刷新完成')
+      message.success(`已更新 ${response?.result?.trade_date || ''} 行情对应的候选`)
       setSelectedSnapshotDate(null)
       await loadPicks(riskLevel, null)
     } catch (err) {
       console.error('刷新智能选股失败', err)
-      message.error(err?.response?.data?.message || err?.message || '刷新失败')
+      const errorMessage = err?.response?.data?.detail || err?.response?.data?.message || err?.message || '刷新失败'
+      message.error(errorMessage)
+      setError(`${errorMessage}；旧快照未替换，不应作为最新推荐。`)
     } finally {
       setLoading(false)
     }
@@ -550,10 +554,10 @@ const SmartScreen = () => {
       </div>
 
       {error && <Alert style={{ marginBottom: 16 }} type="error" showIcon message={error} />}
-      {isObservationMode && (
+      {(isObservationMode || staleSnapshot) && (
         <Alert
           style={{ marginBottom: 16 }}
-          type={isPreparationMode ? 'info' : 'success'}
+          type={staleSnapshot ? 'warning' : 'info'}
           showIcon
           message={calendarContext?.message || `以下为 ${candidateDate} 候选池，仅供观察准备。`}
         />
@@ -669,6 +673,11 @@ const SmartScreen = () => {
           <Card className="stat-card">
             <Statistic title={isObservationMode ? '候选池日期' : '交易日'} value={candidateDate} />
             <div className="stat-extra">信号年龄：{signalAgeText}</div>
+            <div className="stat-extra">最近有效交易日：{calendarContext.latest_trade_date || '未确认'}</div>
+            <div className="stat-extra">行情时间：{result?.universe_meta?.quote_time_max || '未验证'}</div>
+            <div className="stat-extra">候选生成：{result?.generated_at || '未记录'}</div>
+            {result?.generated_at && <div className="stat-extra">按最近交易日行情重算，不是历史事前推荐</div>}
+            <div className="stat-extra">{staleSnapshot ? '旧数据或时效未验证，不能作为最新推荐' : '行情日期已验证；不代表策略收益已验证'}</div>
           </Card>
         </Col>
         <Col xs={24} sm={6}>
@@ -706,9 +715,9 @@ const SmartScreen = () => {
                   <Option value={dateText} key={dateText}>{dateText}</Option>
                 ))}
               </Select>
-              <Tooltip title={!canRefresh ? '非交易日不生成交易计划' : '刷新当前交易日候选池'}>
+              <Tooltip title={!canRefresh ? '正式交易日历不可用或正在查看历史快照' : `重新取数并计算 ${calendarContext.latest_trade_date || ''} 候选；旧行情将被拒绝`}>
                 <Button icon={<ReloadOutlined />} loading={loading} disabled={!canRefresh} onClick={triggerRefresh}>
-                  后台刷新
+                  更新最近交易日候选
                 </Button>
               </Tooltip>
             </Space>

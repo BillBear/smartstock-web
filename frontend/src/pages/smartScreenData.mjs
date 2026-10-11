@@ -3,7 +3,10 @@ export function shouldRefreshCurrentTradingPicks({
   canRefresh = true,
   isRefreshing = false,
 } = {}) {
-  const hasStaleTradingSnapshot = calendarContext?.mode === 'trading' && Boolean(calendarContext?.snapshot_trade_date)
+  const needsRefresh = calendarContext.freshness_status
+    ? ['stale', 'missing', 'unverified'].includes(calendarContext.freshness_status)
+    : Boolean(calendarContext?.snapshot_trade_date)
+  const hasStaleTradingSnapshot = calendarContext?.mode === 'trading' && needsRefresh
   return Boolean(canRefresh && !isRefreshing && hasStaleTradingSnapshot)
 }
 
