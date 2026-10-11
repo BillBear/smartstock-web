@@ -135,6 +135,24 @@ class PickFreshnessTests(unittest.TestCase):
         result = service._build_dynamic_candidates("medium")
         self.assertEqual(result["meta"]["market_snapshot_trade_date"], "2026-10-09")
 
+    def test_expired_full_candidate_cache_is_not_reused(self):
+        store, cal = Mock(), Mock()
+        store.list_pick_snapshot_dates.return_value = []
+        cal.resolve.return_value = {"latest_trade_date": "2026-10-09", "open_dates": ["2026-10-09"],
+                                    "is_open": True, "source": "test_calendar"}
+        service = CoachService(Mock(), store, trading_calendar=cal)
+        service.get_active_strategy_config = Mock(return_value={"config": {}})
+        service.get_risk_profile = Mock(return_value={"risk_level": "medium"})
+        service._today_picks_cache["2026-10-09:default:medium:trend_breakout:0"] = {
+            "ts": service._now_ts() - 1000,
+            "data": {"universe_meta": {"source": "a_share_snapshot"}, "picks": [], "trade_plan": {}},
+        }
+        service._get_universe_snapshot = Mock(side_effect=FreshnessError("fresh fetch reached"))
+        with patch("app.services.coach_service.beijing_now", return_value=datetime(2026, 10, 9, 16)):
+            with self.assertRaisesRegex(FreshnessError, "fresh fetch reached"):
+                service.get_today_picks()
+        service._get_universe_snapshot.assert_called_once()
+
     def test_refresh_endpoint_calls_explicit_refresh_and_returns_conflict_for_stale_quotes(self):
         import asyncio
         import os
