@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import {
   getRankingEvidenceStatus,
@@ -7,6 +8,12 @@ import {
   getUniverseFunnelSummary,
   shouldRefreshCurrentTradingPicks,
 } from '../src/pages/smartScreenData.mjs'
+
+test('page load timestamp is not labelled as market data time', () => {
+  const page = readFileSync(new URL('../src/pages/SmartScreen.jsx', import.meta.url), 'utf8')
+  assert.ok(page.includes('页面读取时间：'))
+  assert.ok(!page.includes('当前数据时间：'))
+})
 
 test('empty and unverified current session refresh once, current verified session does not', () => {
   for (const freshness_status of ['missing', 'stale', 'unverified']) {

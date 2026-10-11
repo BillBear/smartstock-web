@@ -770,12 +770,12 @@ const SmartScreen = () => {
             行业覆盖：{result?.universe_meta?.industry_count ?? '-'}
           </Tag>
           {result?.universe_meta?.full_refresh_at && (
-            <Tag color="orange">全量刷新：{result.universe_meta.full_refresh_at}</Tag>
+            <Tag color="orange">快照保存时间：{result.universe_meta.full_refresh_at}</Tag>
           )}
           {result?.universe_meta?.incremental_refresh_at && (
             <Tag color="magenta">增量刷新：{result.universe_meta.incremental_refresh_at}</Tag>
           )}
-          <Tag color="blue">当前数据时间：{loadedAt || '-'}</Tag>
+          <Tag color="blue">页面读取时间：{loadedAt || '-'}</Tag>
           <Tag color={result?.market_state?.news_context?.risk_bias === 'positive' ? 'green' : result?.market_state?.news_context?.risk_bias === 'negative' ? 'red' : 'blue'}>
             资讯温度：{Number(result?.market_state?.news_context?.policy_score || 50).toFixed(1)}
           </Tag>
