@@ -371,6 +371,14 @@ class DataSourceManager:
         logger.error(f"所有数据源均失败: {symbol}")
         return None
 
+    def invalidate_pick_data_cache(self):
+        """An explicit refresh must reach providers, not re-use a dated snapshot."""
+        self._result_cache.clear()
+        for _, service in self.sources:
+            cache = getattr(service, "_cache", None)
+            if isinstance(cache, dict):
+                cache.clear()
+
     def get_a_share_snapshot(self) -> List[Dict[str, Any]]:
         """获取全A实时快照（优先快速 TuShare+Tencent，必要时回退 AKShare）。"""
         cache_key = "market:a_share_snapshot"

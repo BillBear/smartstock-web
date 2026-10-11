@@ -49,6 +49,7 @@ from app.services.coach_service import CoachService
 from app.services.coach_store import CoachStore
 from app.services.news_factor_service import NewsFactorService
 from app.services.ml_model_service import MLModelService
+from app.services.pick_freshness import FreshnessError
 from app.services.ml_explain_service import MLExplainService
 import logging
 from datetime import datetime
@@ -1136,7 +1137,7 @@ async def coach_picks_refresh(
     user_id: str = "default",
     requested_date: str = None,
 ):
-    """刷新今日候选池；非交易日备战观察模式拒绝生成新交易计划。"""
+    """Explicitly refresh the latest verified session; weekends remain observation-only."""
     try:
         calendar_context = await run_in_threadpool(
             coach_service.resolve_pick_calendar_context,
@@ -1150,14 +1151,14 @@ async def coach_picks_refresh(
                 message="success",
                 data={
                     "accepted": False,
-                    "reason": "non_trading_day",
+                    "reason": "calendar_unavailable" if calendar_context.get("freshness_status") == "calendar_unavailable" else "non_trading_day",
                     "calendar_context": calendar_context,
                     "snapshot_dates": snapshot_dates,
                 },
             )
 
         data = await run_in_threadpool(
-            coach_service.get_today_picks,
+            coach_service.refresh_today_picks,
             max_count=max_count,
             user_id=user_id,
             risk_level=risk_level,
@@ -1174,6 +1175,8 @@ async def coach_picks_refresh(
                 "result": data,
             },
         )
+    except FreshnessError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         logger.error(f"刷新今日推荐失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

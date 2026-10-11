@@ -5,7 +5,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 import pandas as pd
 
@@ -463,6 +463,11 @@ class CoachServiceObservabilityTests(unittest.TestCase):
                 news_service=None,
             )
 
+            service.trading_calendar = Mock()
+            service.trading_calendar.resolve.return_value = {
+                "latest_trade_date": "2026-07-03", "open_dates": ["2026-07-03"],
+                "is_open": False, "source": "explicit_test_calendar",
+            }
             report = service.get_universe_funnel_diagnostics(
                 risk_level="medium",
                 user_id="default",
@@ -616,6 +621,7 @@ class SmartScreenRefreshDegradationTests(unittest.TestCase):
                 {
                     "symbol": symbol,
                     "name": f"样本{index + 1}",
+                    "update_time": "2026-07-02 10:00:00",
                     "price": 10.0 + index * 0.05,
                     "open": 9.9 + index * 0.05,
                     "high": 10.3 + index * 0.05,
@@ -640,8 +646,13 @@ class SmartScreenRefreshDegradationTests(unittest.TestCase):
                 news_service=None,
             )
             service._today_picks_cache_ttl_seconds = 0
+            service.trading_calendar = Mock()
+            service.trading_calendar.resolve.return_value = {
+                "latest_trade_date": "2026-07-02", "open_dates": ["2026-07-02"],
+                "is_open": True, "source": "explicit_test_calendar",
+            }
             service._get_universe_snapshot = lambda force=False: entries
-            service.get_market_state_today = lambda: {
+            service.get_market_state_today = lambda **kwargs: {
                 "state_tag": "neutral",
                 "summary": "测试市场状态",
                 "reasons": [],
@@ -652,12 +663,16 @@ class SmartScreenRefreshDegradationTests(unittest.TestCase):
             def mark_all_pending(futures, timeout=None):
                 return set(), set(futures)
 
-            with patch("app.services.coach_service.datetime", FixedDatetime), patch(
+            with patch("app.services.coach_service.beijing_now", return_value=FixedDatetime.now()), patch(
+                "app.services.coach_service.datetime", FixedDatetime
+            ), patch(
                 "app.services.coach_service.wait", side_effect=mark_all_pending
             ):
                 result = service.get_today_picks(max_count=30, user_id="default", risk_level="medium")
 
         self.assertFalse(result["no_trade"])
+        self.assertEqual(result["data_freshness"]["quote_trade_date"], "2026-07-02")
+        self.assertTrue(all(p["pick_id"].startswith("2026-07-02-") for p in result["picks"]))
         self.assertEqual(result["trade_plan"]["primary_action"], "watch")
         self.assertGreaterEqual(len(result["picks"]), 12)
         self.assertEqual(result["universe_meta"]["analysis_status"], "degraded_timeout")

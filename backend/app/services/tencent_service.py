@@ -77,7 +77,7 @@ class TencentService:
         if len(update_time) == 14:
             update_time = datetime.strptime(update_time, "%Y%m%d%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
         else:
-            update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            update_time = None
 
         return {
             "code": symbol,

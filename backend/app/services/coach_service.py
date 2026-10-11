@@ -18,6 +18,7 @@ import pandas as pd
 from app.services.coach_store import CoachStore
 from app.services.numeric_utils import clamp, safe_float
 from app.services.technical_analyzer import TechnicalAnalyzer
+from app.services.pick_freshness import TradingCalendar, FreshnessError, beijing_now, validate_quote_dates
 
 
 logger = logging.getLogger(__name__)
@@ -213,12 +214,16 @@ class CoachService:
         universe_max_analyze_count: int = 60,
         universe_industry_cap: int = 3,
         universe_min_price: float = 2.0,
+        trading_calendar=None,
     ):
         self.data_source_manager = data_source_manager
         self.store = store
         self.news_service = news_service
         self.ml_model_service = ml_model_service
         self.ml_explain_service = ml_explain_service
+        provider = getattr(getattr(data_source_manager, "tushare", None), "pro", None)
+        self.trading_calendar = trading_calendar or TradingCalendar(provider)
+        self._picks_refresh_lock = RLock()
         self._pick_history: Dict[str, List[Dict[str, Any]]] = {}
         self._daily_snapshots: Dict[str, Dict[str, Any]] = {}
         self._backtest_runs: Dict[str, Dict[str, Any]] = {}
@@ -296,7 +301,7 @@ class CoachService:
                 dates = self.store.list_pick_snapshot_dates(user_id=user_id, limit=limit)
             except Exception:
                 dates = []
-        return [date_text for date_text in dates if self._is_weekday_date(date_text)]
+        return dates
 
     def _market_snapshot_diagnostics(self, trade_date: Optional[str]) -> Dict[str, Any]:
         target_date = self._normalize_trade_date(trade_date)
@@ -331,6 +336,9 @@ class CoachService:
                 "market_snapshot_quality_status": quality_status,
                 "market_snapshot_created_at": snapshot.get("created_at"),
                 "full_refresh_at": snapshot.get("created_at"),
+                "quote_trade_date": (snapshot.get("meta") or {}).get("quote_trade_date"),
+                "quote_time_min": (snapshot.get("meta") or {}).get("quote_time_min"),
+                "quote_time_max": (snapshot.get("meta") or {}).get("quote_time_max"),
             }
         )
         return diagnostic
@@ -400,36 +408,9 @@ class CoachService:
         target_date = self._normalize_trade_date(date_text)
         if not target_date:
             return False
-        if not self._is_weekday_date(target_date):
-            return False
-        if self.store and hasattr(self.store, "get_latest_valid_market_snapshot"):
-            try:
-                snapshot = self.store.get_latest_valid_market_snapshot(trade_date=target_date, min_count=1)
-                snapshot_trade_date = self._normalize_trade_date((snapshot or {}).get("trade_date"))
-                if snapshot_trade_date == target_date:
-                    return True
-            except Exception:
-                pass
-        return self._is_current_weekday_refresh_candidate(target_date)
-
-    @staticmethod
-    def _is_current_weekday_refresh_candidate(target_date: str) -> bool:
-        current_date = datetime.now().strftime("%Y-%m-%d")
-        if target_date != current_date:
-            return False
         try:
-            return datetime.strptime(target_date, "%Y-%m-%d").date().weekday() < 5
-        except Exception:
-            return False
-
-    @staticmethod
-    def _is_weekday_date(date_text: Optional[str]) -> bool:
-        normalized = CoachService._normalize_trade_date(date_text)
-        if not normalized:
-            return False
-        try:
-            return datetime.strptime(normalized, "%Y-%m-%d").date().weekday() < 5
-        except Exception:
+            return self.trading_calendar.resolve(target_date)["is_open"]
+        except FreshnessError:
             return False
 
     def resolve_pick_calendar_context(
@@ -438,48 +419,29 @@ class CoachService:
         requested_date: Optional[str] = None,
         trade_date: Optional[str] = None,
     ) -> Dict[str, Any]:
-        requested = self._normalize_trade_date(requested_date) or datetime.now().strftime("%Y-%m-%d")
+        requested = self._normalize_trade_date(requested_date) or beijing_now().strftime("%Y-%m-%d")
         explicit_trade_date = self._normalize_trade_date(trade_date)
         snapshot_dates = self.list_pick_snapshot_dates(user_id=user_id, limit=365)
-        has_requested_snapshot = requested in snapshot_dates
-        valid_prior_dates = [
-            date_text for date_text in snapshot_dates
-            if date_text <= requested and self._is_weekday_date(date_text)
-        ]
-        is_requested_trading_day = self._is_recommendation_trading_day(requested)
-        displayed_snapshot_date = None
-
-        if explicit_trade_date:
-            mode = "historical"
-            effective_trade_date = explicit_trade_date
-        elif has_requested_snapshot and self._is_weekday_date(requested):
-            mode = "trading"
-            effective_trade_date = requested
-        elif is_requested_trading_day:
-            mode = "trading"
-            displayed_snapshot_date = valid_prior_dates[0] if valid_prior_dates else None
-            effective_trade_date = requested
-        else:
-            mode = "preparation"
-            effective_trade_date = valid_prior_dates[0] if valid_prior_dates else None
-
-        is_trading_day = mode == "trading"
-        signal_age_days = self._date_age_days(requested, effective_trade_date)
-        snapshot_age_days = self._date_age_days(requested, displayed_snapshot_date)
-        can_paper_buy = mode == "trading" and has_requested_snapshot
-
-        if mode == "trading" and has_requested_snapshot:
-            message = "展示当前交易日候选池。"
-        elif mode == "trading" and displayed_snapshot_date:
-            message = f"今日为交易日，当前暂无 {requested} 候选快照，可后台刷新生成；暂展示最近快照 {displayed_snapshot_date} 仅供参考。"
-        elif mode == "trading":
-            message = f"今日为交易日，当前暂无 {requested} 候选快照，可后台刷新生成。"
-        elif mode == "historical":
-            message = f"展示 {effective_trade_date or explicit_trade_date} 历史候选池，仅供复盘观察。"
-        elif effective_trade_date:
-            message = f"今日非交易日，展示最近有效交易日 {effective_trade_date} 候选池，仅供观察准备。"
-        else:
-            message = "暂无候选池快照。非交易日不会生成新的交易计划。"
+        try:
+            calendar = self.trading_calendar.resolve(requested)
+            latest = calendar["latest_trade_date"]
+            valid_dates = [d for d in snapshot_dates if d in calendar["open_dates"]]
+            displayed = explicit_trade_date or (valid_dates[0] if valid_dates else None)
+            mode = "historical" if explicit_trade_date else ("trading" if calendar["is_open"] else "preparation")
+            freshness = "current" if displayed == latest else ("stale" if displayed else "missing")
+            message = (f"最近有效交易日：{latest}；候选快照：{displayed or '暂无'}。"
+                       + ("旧候选已过期，请更新后再判断。" if freshness != "current" else "请同时核对行情时间；非实时推荐。"))
+            can_refresh = not explicit_trade_date and requested == beijing_now().strftime("%Y-%m-%d")
+        except (FreshnessError, ValueError):
+            latest, calendar = None, {"is_open": False, "source": "unavailable"}
+            displayed = explicit_trade_date or next((d for d in snapshot_dates if d <= requested), None)
+            mode, freshness, can_refresh = "historical" if explicit_trade_date else "preparation", "calendar_unavailable", False
+            message = "正式交易日历不可用，无法确认快照时效；禁止刷新和模拟买入，仅供历史观察。"
+        effective_trade_date = displayed
+        is_trading_day = bool(calendar["is_open"])
+        signal_age_days = self._date_age_days(requested, displayed)
+        snapshot_age_days = signal_age_days
+        can_paper_buy = mode == "trading" and displayed == requested and freshness == "current"
 
         return {
             "mode": mode,
@@ -487,11 +449,15 @@ class CoachService:
             "effective_trade_date": effective_trade_date,
             "is_trading_day": is_trading_day,
             "signal_age_days": signal_age_days,
-            "snapshot_trade_date": displayed_snapshot_date,
+            "snapshot_trade_date": displayed,
+            "latest_trade_date": latest,
+            "refresh_trade_date": latest,
+            "freshness_status": freshness,
+            "calendar_source": calendar["source"],
             "snapshot_age_days": snapshot_age_days,
             "message": message,
             "actions": {
-                "can_refresh": is_trading_day,
+                "can_refresh": can_refresh,
                 "can_paper_buy": can_paper_buy,
                 "can_add_watch": True,
             },
@@ -555,6 +521,7 @@ class CoachService:
 
     def _get_universe_snapshot(self, force: bool = False) -> List[Dict[str, Any]]:
         now_ts = self._now_ts()
+        target_date = self.trading_calendar.resolve(beijing_now().strftime("%Y-%m-%d"))["latest_trade_date"]
         with self._universe_lock:
             cache_ok = (
                 not force
@@ -562,9 +529,11 @@ class CoachService:
                 and (now_ts - float(self._universe_state.get("last_full_refresh_ts") or 0) < self._universe_refresh_seconds)
             )
             if cache_ok:
+                validate_quote_dates(self._universe_state["entries"], target_date)
                 return copy.deepcopy(self._universe_state["entries"])
             recent_attempt = now_ts - float(self._universe_state.get("last_refresh_attempt_ts") or 0) < 120
-            if recent_attempt and self._universe_state["entries"]:
+            if recent_attempt and not force and self._universe_state["entries"]:
+                validate_quote_dates(self._universe_state["entries"], target_date)
                 return copy.deepcopy(self._universe_state["entries"])
             if recent_attempt and not force:
                 return []
@@ -584,20 +553,22 @@ class CoachService:
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
         if not items:
-            with self._universe_lock:
-                return copy.deepcopy(self._universe_state["entries"])
+            raise FreshnessError("quote_empty: 行情获取失败，保留旧快照，未生成新候选")
 
+        freshness = validate_quote_dates(items, target_date)
+        if len(items) < 500:
+            raise FreshnessError("quote_coverage_insufficient: 全市场行情覆盖不足，未更新候选")
         entry_map = {item["symbol"]: item for item in items if item.get("symbol")}
-        refresh_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        refresh_at = beijing_now().strftime("%Y-%m-%d %H:%M:%S")
         if self.store and hasattr(self.store, "save_market_snapshot"):
             try:
                 self.store.save_market_snapshot(
-                    trade_date=datetime.now().strftime("%Y-%m-%d"),
+                    trade_date=target_date,
                     source="a_share_snapshot",
                     items=items,
                     min_reliable_count=500,
                     created_at=refresh_at,
-                    meta={"created_by": "CoachService._get_universe_snapshot"},
+                    meta={"created_by": "CoachService._get_universe_snapshot", **freshness},
                 )
             except Exception:
                 logger.exception("保存全A市场快照失败")
@@ -1281,12 +1252,15 @@ class CoachService:
             return self.get_risk_profile("default")
         return self.DEFAULT_RISK_PROFILE.copy()
 
-    def get_market_state_today(self) -> Dict[str, Any]:
+    def get_market_state_today(self, quotes_override=None) -> Dict[str, Any]:
         quotes = []
-        for symbol in self.MARKET_SAMPLE_POOL:
-            quote = self.data_source_manager.get_realtime_quote(symbol)
-            if quote:
-                quotes.append(quote)
+        if quotes_override is not None:
+            quotes = quotes_override
+        else:
+            for symbol in self.MARKET_SAMPLE_POOL:
+                quote = self.data_source_manager.get_realtime_quote(symbol)
+                if quote:
+                    quotes.append(quote)
 
         news_context = {
             "policy_score": 50.0,
@@ -1407,6 +1381,13 @@ class CoachService:
         history_df = self.data_source_manager.get_history_data(symbol, days=120)
         if history_df.empty:
             return None
+
+        required_date = quote.get("_required_quote_date")
+        if required_date:
+            validate_quote_dates([quote], required_date)
+            dates = pd.to_datetime(history_df["date"], errors="coerce")
+            if dates.isna().any() or dates.max().strftime("%Y-%m-%d") != required_date:
+                raise FreshnessError(f"history_date_mismatch: {symbol} 日K线未对齐 {required_date}")
 
         analyzed_df = TechnicalAnalyzer.analyze_all_indicators(history_df)
         indicators = TechnicalAnalyzer.get_latest_indicators(analyzed_df)
@@ -2726,6 +2707,12 @@ class CoachService:
             return self._empty_cached_picks_result(user_id, max_count, risk_level, calendar_context, snapshot_dates)
 
         picks = copy.deepcopy(snapshot_result.get("picks") or [])
+        verified = bool(picks) and all(p.get("quote_trade_date") == effective_trade_date for p in picks)
+        if not verified:
+            calendar_context["actions"]["can_paper_buy"] = False
+            if calendar_context.get("freshness_status") == "current":
+                calendar_context["freshness_status"] = "unverified"
+            calendar_context["message"] += " 此快照缺少行情日期验证，不可作为当前交易推荐。"
         self._attach_user_actions(picks, user_id)
         self._normalize_cached_decision_display(picks)
         risk_profile = self.get_risk_profile(user_id).copy()
@@ -2738,6 +2725,7 @@ class CoachService:
             "status": snapshot_result.get("status") or "cached_from_store",
             "trade_date": snapshot_result.get("trade_date") or effective_trade_date,
             "updated_at": snapshot_result.get("updated_at"),
+            "generated_at": picks[0].get("generated_at") if picks else None,
             "market_state": self._market_state_from_cached_picks(picks),
             "risk_profile": risk_profile,
             "universe_meta": self._cached_universe_meta(picks, max_count, snapshot_result, effective_trade_date),
@@ -2795,6 +2783,18 @@ class CoachService:
             "no_trade_reason": data.get("no_trade_reason"),
         }
 
+    def refresh_today_picks(self, **kwargs):
+        with self._picks_refresh_lock:
+            context = self.resolve_pick_calendar_context(user_id=kwargs.get("user_id", "default"))
+            if not context["actions"]["can_refresh"]:
+                raise FreshnessError(context["message"])
+            self._today_picks_cache.clear()
+            self.data_source_manager.invalidate_pick_data_cache()
+            with self._universe_lock:
+                self._universe_state.update(entries=[], entry_map={}, last_full_refresh_ts=0.0,
+                                            last_refresh_attempt_ts=0.0, last_incremental_refresh_ts=0.0)
+            return self.get_today_picks(**kwargs, force_refresh=True)
+
     def get_today_picks(
         self,
         max_count: int = 5,
@@ -2803,6 +2803,7 @@ class CoachService:
         cached_only: bool = False,
         requested_date: Optional[str] = None,
         trade_date: Optional[str] = None,
+        force_refresh: bool = False,
     ) -> Dict[str, Any]:
         if cached_only:
             return self.get_cached_today_picks(
@@ -2817,7 +2818,8 @@ class CoachService:
             requested_date=requested_date,
             trade_date=trade_date,
         )
-        if not ((calendar_context.get("actions") or {}).get("can_refresh")):
+        if (not ((calendar_context.get("actions") or {}).get("can_refresh"))
+                or (calendar_context.get("mode") != "trading" and not force_refresh)):
             return self.get_cached_today_picks(
                 max_count=max_count,
                 user_id=user_id,
@@ -2839,13 +2841,13 @@ class CoachService:
         if strategy_config.get("max_position_pct"):
             risk_profile["max_position_pct"] = float(strategy_config["max_position_pct"])
 
-        trade_date = datetime.now().strftime("%Y-%m-%d")
+        trade_date = calendar_context["refresh_trade_date"]
         level = risk_profile.get("risk_level", "medium")
         score_threshold = self._safe_float(strategy_config.get("score_threshold"), 0)
         cache_key = f"{trade_date}:{user_id}:{level}:{strategy_code}:{int(score_threshold)}"
         now_ts = datetime.now().timestamp()
 
-        cache_item = self._today_picks_cache.get(cache_key)
+        cache_item = None if force_refresh else self._today_picks_cache.get(cache_key)
         if cache_item:
             cached_source = str(
                 (((cache_item.get("data") or {}).get("universe_meta") or {}).get("source") or "")
@@ -2856,7 +2858,9 @@ class CoachService:
                 and self._today_picks_cache_ttl_seconds > 0
                 and cache_age <= self._today_picks_cache_ttl_seconds
             )
-            full_cache_usable = bool(cached_source and not cached_source.startswith("fallback_"))
+            full_cache_usable = bool(cached_source and not cached_source.startswith("fallback_")
+                                     and self._today_picks_cache_ttl_seconds > 0
+                                     and cache_age <= self._today_picks_cache_ttl_seconds)
             if not (full_cache_usable or fallback_cache_still_usable):
                 cache_item = None
 
@@ -2880,7 +2884,10 @@ class CoachService:
             self._attach_user_actions(cached_result["picks"], user_id)
             return cached_result
 
-        market_state = self.get_market_state_today()
+        input_snapshot = self._get_universe_snapshot(force=force_refresh)
+        freshness = validate_quote_dates(input_snapshot, trade_date)
+        market_quotes = [q for q in input_snapshot if q.get("symbol") in self.MARKET_SAMPLE_POOL]
+        market_state = self.get_market_state_today(quotes_override=market_quotes)
         picks: List[Dict[str, Any]] = []
         target_universe_size = int(self._safe_float(strategy_config.get("universe_size"), 120))
         universe_result = self._build_dynamic_candidates(
@@ -2889,6 +2896,10 @@ class CoachService:
             strategy_code=strategy_code,
         )
         candidate_rows = universe_result.get("candidates", [])
+        if candidate_rows:
+            validate_quote_dates(candidate_rows, trade_date)
+        for row in candidate_rows:
+            row["_required_quote_date"] = trade_date
         universe_meta = universe_result.get("meta", {})
 
         # 根据策略配置扩大深度分析池，避免只分析过小样本导致高分不够可靠。
@@ -2907,6 +2918,7 @@ class CoachService:
         futures = []
         future_rows: Dict[Any, Dict[str, Any]] = {}
         pending_rows: List[Dict[str, Any]] = []
+        freshness_errors = []
         executor = ThreadPoolExecutor(max_workers=max_workers)
         try:
             for row in candidate_rows:
@@ -2932,7 +2944,11 @@ class CoachService:
                 try:
                     pick = future.result()
                     if pick:
+                        suffix = str(pick["pick_id"]).split("-", 3)[-1]
+                        pick["pick_id"] = f"{trade_date}-{suffix}"
                         picks.append(pick)
+                except FreshnessError as exc:
+                    freshness_errors.append(str(exc))
                 except Exception:
                     # 单票失败不影响整体结果（容错）
                     continue
@@ -2943,6 +2959,9 @@ class CoachService:
                 future.cancel()
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
+
+        if freshness_errors:
+            raise FreshnessError(f"输入日期校验失败，未更新候选：{freshness_errors[0]}")
 
         picks = self._apply_risk_specific_selection(picks, level)
 
@@ -3008,6 +3027,8 @@ class CoachService:
                     strategy_code=strategy_code,
                 )
                 if degraded:
+                    suffix = str(degraded["pick_id"]).split("-", 3)[-1]
+                    degraded["pick_id"] = f"{trade_date}-{suffix}"
                     degraded_picks.append(degraded)
                     existing_symbols.add(symbol)
                 if len(all_picks) + len(degraded_picks) >= display_cap:
@@ -3019,6 +3040,10 @@ class CoachService:
                 all_picks.extend(degraded_picks[: max(0, display_cap - len(all_picks))])
         for i, item in enumerate(all_picks, start=1):
             item["rank_no"] = i
+            item["quote_trade_date"] = trade_date
+            item["generated_at"] = beijing_now().strftime("%Y-%m-%d %H:%M:%S")
+            item["created_at"] = item["generated_at"]
+            item["generation_mode"] = "latest_session_recalculation"
 
         self._pick_history[trade_date] = copy.deepcopy(all_picks)
         strategy_health = {
@@ -3074,12 +3099,15 @@ class CoachService:
                 risk_level=level,
                 picks=all_picks,
             )
-        except Exception:
-            # 推荐快照落库失败不能阻断页面，但后续会在验证阶段暴露。
-            pass
+        except Exception as exc:
+            logger.exception("候选快照保存失败")
+            raise FreshnessError("snapshot_save_failed: 候选未成功保存，请勿视为已更新") from exc
 
         full_result = {
             "trade_date": trade_date,
+            "generated_at": beijing_now().strftime("%Y-%m-%d %H:%M:%S"),
+            "data_freshness": freshness,
+            "calendar_context": self.resolve_pick_calendar_context(user_id=user_id),
             "market_state": market_state,
             "risk_profile": risk_profile,
             "universe_meta": universe_meta,

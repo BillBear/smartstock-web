@@ -14,9 +14,21 @@ from app.services.coach_service import CoachService
 from app.services.coach_store import CoachStore
 
 
+class FixtureCalendar:
+    # Explicit test sessions, including the Dragon Boat holiday gap. No network.
+    sessions = ["2026-06-17", "2026-06-18", "2026-06-22", "2026-06-29",
+                "2026-06-30", "2026-07-01", "2026-07-02", "2026-07-03"]
+
+    def resolve(self, requested):
+        dates = [d for d in self.sessions if d <= requested]
+        return {"latest_trade_date": dates[-1], "open_dates": dates,
+                "is_open": requested in dates, "source": "explicit_test_calendar"}
+
+
 def sample_pick(trade_date="2026-06-18", symbol="000001", rank_no=1):
     return {
         "pick_id": f"{trade_date}-{symbol}-S1",
+        "quote_trade_date": trade_date,
         "symbol": symbol,
         "name": "平安银行" if symbol == "000001" else symbol,
         "rank_no": rank_no,
@@ -39,7 +51,10 @@ class NonTradingPreparationModeTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.store = CoachStore(str(Path(self.temp_dir.name) / "coach.sqlite3"))
-        self.service = CoachService(data_source_manager=None, store=self.store)
+        self.service = CoachService(data_source_manager=None, store=self.store, trading_calendar=FixtureCalendar())
+        self.clock = patch("app.services.coach_service.beijing_now", return_value=datetime(2026, 6, 18, 16))
+        self.clock.start()
+        self.addCleanup(self.clock.stop)
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -126,7 +141,7 @@ class NonTradingPreparationModeTests(unittest.TestCase):
         self.assertFalse(context["is_trading_day"])
         self.assertFalse(context["actions"]["can_refresh"])
         self.assertFalse(context["actions"]["can_paper_buy"])
-        self.assertEqual(result["snapshot_dates"], ["2026-07-03"])
+        self.assertEqual(result["snapshot_dates"], ["2026-07-04", "2026-07-03"])
 
     def test_non_cached_today_picks_uses_preparation_snapshot_on_non_trading_day(self):
         self.save_snapshot("2026-07-03")
@@ -233,7 +248,7 @@ class NonTradingPreparationModeTests(unittest.TestCase):
         self.assertEqual(result["universe_meta"]["risk_snapshot_fallback"], "same_day_complete_pool")
 
     def test_cached_only_trading_day_without_current_snapshot_allows_refresh_but_blocks_stale_paper_buy(self):
-        self.service._is_recommendation_trading_day = lambda date_text: date_text == "2026-06-22"
+        self.clock.target.beijing_now.return_value = datetime(2026, 6, 22, 16)
         self.save_snapshot("2026-06-17")
 
         result = self.service.get_cached_today_picks(
@@ -247,7 +262,8 @@ class NonTradingPreparationModeTests(unittest.TestCase):
         context = result["calendar_context"]
         self.assertEqual(context["mode"], "trading")
         self.assertEqual(context["requested_date"], "2026-06-22")
-        self.assertEqual(context["effective_trade_date"], "2026-06-22")
+        self.assertEqual(context["effective_trade_date"], "2026-06-17")
+        self.assertEqual(context["latest_trade_date"], "2026-06-22")
         self.assertEqual(context["snapshot_trade_date"], "2026-06-17")
         self.assertTrue(context["is_trading_day"])
         self.assertTrue(context["actions"]["can_refresh"])
@@ -262,7 +278,7 @@ class NonTradingPreparationModeTests(unittest.TestCase):
 
         self.save_snapshot("2026-06-29")
 
-        with patch("app.services.coach_service.datetime", FixedDatetime):
+        with patch("app.services.coach_service.beijing_now", return_value=FixedDatetime.now()):
             result = self.service.get_cached_today_picks(
                 max_count=5,
                 user_id="default",
@@ -271,7 +287,8 @@ class NonTradingPreparationModeTests(unittest.TestCase):
         context = result["calendar_context"]
         self.assertEqual(context["mode"], "trading")
         self.assertEqual(context["requested_date"], "2026-06-30")
-        self.assertEqual(context["effective_trade_date"], "2026-06-30")
+        self.assertEqual(context["effective_trade_date"], "2026-06-29")
+        self.assertEqual(context["latest_trade_date"], "2026-06-30")
         self.assertEqual(context["snapshot_trade_date"], "2026-06-29")
         self.assertTrue(context["actions"]["can_refresh"])
         self.assertFalse(context["actions"]["can_paper_buy"])
@@ -288,7 +305,7 @@ class NonTradingPreparationModeTests(unittest.TestCase):
         self.assertEqual(result["snapshot_dates"], [])
         self.assertEqual(result["calendar_context"]["mode"], "preparation")
         self.assertIsNone(result["calendar_context"]["effective_trade_date"])
-        self.assertIn("暂无候选池快照", result["calendar_context"]["message"])
+        self.assertIn("候选快照：暂无", result["calendar_context"]["message"])
 
     def test_smart_screen_summary_exposes_calendar_context_and_snapshot_dates(self):
         self.save_snapshot("2026-06-18")
