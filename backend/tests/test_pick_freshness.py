@@ -122,6 +122,19 @@ class PickFreshnessTests(unittest.TestCase):
         result = service._parse_quote_payload("601600", "~".join(fields))
         self.assertIsNone(result["update_time"])
 
+    def test_dynamic_metadata_uses_quote_date_not_generation_date(self):
+        cal, _ = self.calendar()
+        manager = Mock()
+        manager.get_stock_industry_map.return_value = {"601600": "有色金属"}
+        service = CoachService(manager, Mock(), trading_calendar=cal)
+        service._get_universe_snapshot = Mock(return_value=[{
+            "symbol": "601600", "name": "中国铝业", "price": 9, "pct_change": 2,
+            "amount": 900000000, "turnover_rate": 3, "update_time": "2026-10-09 16:15:00",
+        }])
+        service._refresh_intraday_candidates = Mock()
+        result = service._build_dynamic_candidates("medium")
+        self.assertEqual(result["meta"]["market_snapshot_trade_date"], "2026-10-09")
+
     def test_refresh_endpoint_calls_explicit_refresh_and_returns_conflict_for_stale_quotes(self):
         import asyncio
         import os
