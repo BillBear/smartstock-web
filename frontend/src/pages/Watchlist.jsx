@@ -142,19 +142,19 @@ const Watchlist = () => {
       render: (v) => v ? `¥${Number(v).toFixed(2)}` : '-',
     },
     {
-      title: '入选时上涨概率',
+      title: '推荐快照上涨概率',
       dataIndex: 'up_prob',
       key: 'up_prob',
       render: (v) => v !== undefined && v !== null ? `${(Number(v) * 100).toFixed(1)}%` : '-',
     },
     {
-      title: '入选时回撤概率',
+      title: '推荐快照回撤概率',
       dataIndex: 'dd_prob',
       key: 'dd_prob',
       render: (v) => v !== undefined && v !== null ? `${(Number(v) * 100).toFixed(1)}%` : '-',
     },
     {
-      title: '入选时综合分',
+      title: '推荐快照综合分',
       dataIndex: 'score',
       key: 'score',
       render: (v) => (v !== undefined && v !== null ? `${Number(v).toFixed(1)}分` : '-'),
@@ -343,7 +343,7 @@ const Watchlist = () => {
       </div>
 
       {error && <Alert type="error" showIcon style={{ marginBottom: 16 }} message={error} />}
-      <Alert type="info" showIcon style={{ marginBottom: 16 }} message="建仓时间来自原始持仓；行情时间来自数据源。价格和浮盈亏在页面可见时每60秒刷新，入选时评分不会随行情改写。" />
+      <Alert type="info" showIcon style={{ marginBottom: 16 }} message="建仓时间来自原始持仓；行情时间来自数据源。价格和浮盈亏在页面可见时每60秒刷新。评分和概率来自已保存推荐快照，不是实时预测；旧持仓缺少对应快照时会参考最近保存快照。" />
       {portfolio?.summary?.unpriced_position_count > 0 && (
         <Alert type="warning" showIcon style={{ marginBottom: 16 }} message={`有 ${portfolio.summary.unpriced_position_count} 个持仓行情未核验，总市值与总盈亏暂不完整；未知不按0计算。`} />
       )}
