@@ -130,6 +130,7 @@ class DataSourceManager:
 
                 if data:
                     data = self._normalize_realtime_quote(data, symbol)
+                    data["source"] = source_name
                     self._record_success(source_name, "realtime")
                     self._set_cache(cache_key, data)
                     logger.info(f"✅ 成功从 {source_name} 获取数据: {symbol}")
@@ -188,6 +189,7 @@ class DataSourceManager:
                         if not quote:
                             continue
                         normalized = self._normalize_realtime_quote(quote, symbol)
+                        normalized["source"] = "Tencent"
                         result[symbol] = normalized
                         self._set_cache(f"realtime:{symbol}", normalized)
                     self._record_success("Tencent", "realtime")

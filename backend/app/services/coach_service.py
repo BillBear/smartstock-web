@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timedelta
@@ -18,7 +19,7 @@ import pandas as pd
 from app.services.coach_store import CoachStore
 from app.services.numeric_utils import clamp, safe_float
 from app.services.technical_analyzer import TechnicalAnalyzer
-from app.services.pick_freshness import TradingCalendar, FreshnessError, beijing_now, validate_quote_dates
+from app.services.pick_freshness import TradingCalendar, FreshnessError, beijing_now, quote_timestamp, validate_quote_dates
 
 
 logger = logging.getLogger(__name__)
@@ -3544,7 +3545,7 @@ class CoachService:
                 continue
 
             existing = by_symbol.get(symbol)
-            if existing and existing.get("created_at", "") >= action.get("created_at", ""):
+            if existing and existing["action"].get("created_at", "") >= action.get("created_at", ""):
                 continue
             by_symbol[symbol] = {"pick_id": pick_id, "action": action}
 
@@ -3591,7 +3592,7 @@ class CoachService:
                 }
             )
 
-        portfolio = self.get_paper_portfolio(user_id=user_id, refresh_quotes=False)
+        portfolio = self.get_paper_portfolio(user_id=user_id, refresh_quotes=True)
         position_rows = {row["symbol"]: row for row in portfolio.get("positions", [])}
         merged: List[Dict[str, Any]] = []
         seen = set()
@@ -3611,6 +3612,10 @@ class CoachService:
                 item["take_profit"] = pos.get("take_profit")
                 item["risk_status"] = pos.get("risk_status")
                 item["risk_message"] = pos.get("risk_message")
+                item["created_at"] = pos.get("opened_at")
+                item["opened_at"] = pos.get("opened_at")
+                for field in ("quote_time", "quote_source", "quote_status", "last_known_price", "mark_updated_at"):
+                    item[field] = pos.get(field)
             merged.append(item)
             seen.add(symbol)
 
@@ -3631,7 +3636,13 @@ class CoachService:
                     "action_type": "paper_buy",
                     "action_price": pos.get("avg_price"),
                     "action_qty": pos.get("qty"),
-                    "created_at": pos.get("updated_at"),
+                    "created_at": pos.get("opened_at"),
+                    "opened_at": pos.get("opened_at"),
+                    "quote_time": pos.get("quote_time"),
+                    "quote_source": pos.get("quote_source"),
+                    "quote_status": pos.get("quote_status"),
+                    "last_known_price": pos.get("last_known_price"),
+                    "mark_updated_at": pos.get("mark_updated_at"),
                     "score": (snap.get("score_breakdown") or {}).get("total"),
                     "up_prob": snap.get("up_prob"),
                     "dd_prob": snap.get("dd_prob"),
@@ -3658,11 +3669,14 @@ class CoachService:
             if item.get("score") is None:
                 item["score"] = None
 
-        items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
-        return {"items": items, "portfolio_summary": portfolio.get("summary", {})}
+        items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+        result = {"items": items, "portfolio_summary": portfolio.get("summary", {})}
+        # One valuation snapshot powers both the holdings table and the review.
+        result["review"] = self.get_paper_review(user_id=user_id, watchlist=result)
+        return result
 
     def get_paper_portfolio(self, user_id: str = "default", refresh_quotes: bool = True) -> Dict[str, Any]:
-        rows = self.store.list_open_positions(user_id=user_id)
+        rows = [row for row in self.store.list_open_positions(user_id=user_id) if float(row.get("qty") or 0) > 0]
         latest_actions = self.store.list_pick_actions(user_id=user_id, limit=500)
         latest_action_by_symbol: Dict[str, Dict[str, Any]] = {}
         for action in latest_actions:
@@ -3676,9 +3690,20 @@ class CoachService:
         total_market_value = 0.0
         total_unrealized = 0.0
         positions: List[Dict[str, Any]] = []
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = beijing_now()
+        now_str = now.strftime("%Y-%m-%d %H:%M:%S")
         symbols = [str(row.get("symbol") or "") for row in rows if row.get("symbol")]
-        quote_map = self.data_source_manager.get_realtime_quotes_batch(symbols) if symbols and refresh_quotes else {}
+        quote_map = {}
+        latest_trade_date = None
+        if symbols and refresh_quotes:
+            try:
+                latest_trade_date = self.trading_calendar.resolve(now.strftime("%Y-%m-%d"))["latest_trade_date"]
+            except FreshnessError:
+                logger.warning("Portfolio calendar unavailable; current valuation remains unknown")
+            try:
+                quote_map = self.data_source_manager.get_realtime_quotes_batch(symbols) or {}
+            except Exception:
+                logger.warning("Portfolio quote batch unavailable; retaining positions without new valuation")
         active_strategy = self.get_active_strategy_config(user_id=user_id)
         active_config = active_strategy.get("config") or {}
         default_stop_loss_ratio = self._clamp(self._safe_float(active_config.get("stop_loss_pct"), 8), 2, 25) / 100.0
@@ -3691,18 +3716,34 @@ class CoachService:
             cost_amount = float(row.get("cost_amount") or (qty * avg_price))
 
             quote = quote_map.get(symbol) if symbol else None
-            if symbol and not quote and refresh_quotes:
-                quote = self.data_source_manager.get_realtime_quote(symbol)
             previous_mark = float(row.get("market_value") or 0)
             marked_price = previous_mark / qty if qty > 0 and previous_mark > 0 else 0
-            current_price = float((quote or {}).get("price") or marked_price or avg_price or 0)
+            current_price = None
+            quote_status = "unavailable" if refresh_quotes else "not_refreshed"
+            quote_time = None
+            if quote:
+                try:
+                    stamp = quote_timestamp(quote.get("update_time"))
+                    quote_time = str(quote.get("update_time"))
+                    price = float(quote.get("price"))
+                    if not math.isfinite(price) or price <= 0:
+                        quote_status = "invalid_price"
+                    elif not latest_trade_date:
+                        quote_status = "calendar_unavailable"
+                    elif stamp.date().isoformat() != latest_trade_date or stamp > now.replace(tzinfo=None):
+                        quote_status = "stale_or_future"
+                    else:
+                        quote_status = "latest_session"
+                        current_price = price
+                except (FreshnessError, TypeError, ValueError):
+                    quote_status = "unverified"
             name = (quote or {}).get("name") or row.get("name") or symbol
 
-            market_value = round(current_price * qty, 4)
-            unrealized = round(market_value - cost_amount, 4)
-            unrealized_pct = round((unrealized / cost_amount * 100) if cost_amount > 0 else 0.0, 4)
+            market_value = round(current_price * qty, 4) if current_price is not None else None
+            unrealized = round(market_value - cost_amount, 4) if market_value is not None else None
+            unrealized_pct = round(unrealized / cost_amount * 100, 4) if unrealized is not None and cost_amount > 0 else None
 
-            if row.get("id"):
+            if row.get("id") and current_price is not None:
                 self.store.update_position_mark(
                     position_id=int(row["id"]),
                     market_value=market_value,
@@ -3718,16 +3759,19 @@ class CoachService:
             planned_take_profit = round(avg_price * (1 + default_take_profit_ratio), 4) if avg_price > 0 else 0
             risk_status = "normal"
             risk_message = "未触发止损/止盈"
-            if planned_stop_loss > 0 and current_price <= planned_stop_loss:
+            if current_price is None:
+                risk_status = "unknown"
+                risk_message = "行情未核验或非最近交易日，当前盈亏与风险未知；不以成本价代替现价"
+            elif planned_stop_loss > 0 and current_price <= planned_stop_loss:
                 risk_status = "stop_loss"
                 risk_message = f"已跌破止损位 {planned_stop_loss:.2f}，应评估平仓纪律"
             elif planned_take_profit > 0 and current_price >= planned_take_profit:
                 risk_status = "take_profit"
                 risk_message = f"已达到止盈位 {planned_take_profit:.2f}，应评估兑现收益"
-            elif unrealized_pct <= -5:
+            elif unrealized_pct is not None and unrealized_pct <= -5:
                 risk_status = "warning"
                 risk_message = "浮亏超过5%，需复核推荐逻辑与持仓理由"
-            elif unrealized_pct >= 8:
+            elif unrealized_pct is not None and unrealized_pct >= 8:
                 risk_status = "profit_watch"
                 risk_message = "浮盈较高，需跟踪回撤保护"
             positions.append(
@@ -3738,7 +3782,12 @@ class CoachService:
                     "name": name,
                     "qty": round(qty, 4),
                     "avg_price": round(avg_price, 4),
-                    "current_price": round(current_price, 4),
+                    "current_price": round(current_price, 4) if current_price is not None else None,
+                    "last_known_price": round(marked_price, 4) if marked_price > 0 else None,
+                    "quote_time": quote_time,
+                    "quote_source": (quote or {}).get("source"),
+                    "quote_status": quote_status,
+                    "mark_updated_at": now_str if current_price is not None else row.get("updated_at"),
                     "cost_amount": round(cost_amount, 4),
                     "market_value": market_value,
                     "unrealized_pnl": unrealized,
@@ -3748,22 +3797,28 @@ class CoachService:
                     "risk_status": risk_status,
                     "risk_message": risk_message,
                     "opened_at": row.get("opened_at"),
-                    "updated_at": now_str,
+                    "updated_at": now_str if current_price is not None else row.get("updated_at"),
                 }
             )
             total_cost += cost_amount
-            total_market_value += market_value
-            total_unrealized += unrealized
+            total_market_value += market_value or 0
+            total_unrealized += unrealized or 0
 
         total_pnl_pct = (total_unrealized / total_cost * 100) if total_cost > 0 else 0.0
-        positions.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+        unpriced_count = sum(pos["current_price"] is None for pos in positions)
+        positions.sort(key=lambda x: x.get("opened_at") or "", reverse=True)
         return {
             "summary": {
                 "position_count": len(positions),
                 "total_cost": round(total_cost, 4),
-                "total_market_value": round(total_market_value, 4),
-                "total_unrealized_pnl": round(total_unrealized, 4),
-                "total_unrealized_pnl_pct": round(total_pnl_pct, 4),
+                "total_market_value": round(total_market_value, 4) if not unpriced_count else None,
+                "total_unrealized_pnl": round(total_unrealized, 4) if not unpriced_count else None,
+                "total_unrealized_pnl_pct": round(total_pnl_pct, 4) if not unpriced_count else None,
+                "known_market_value": round(total_market_value, 4),
+                "known_unrealized_pnl": round(total_unrealized, 4),
+                "priced_position_count": len(positions) - unpriced_count,
+                "unpriced_position_count": unpriced_count,
+                "latest_trade_date": latest_trade_date,
             },
             "positions": positions,
             "updated_at": now_str,
@@ -3795,9 +3850,10 @@ class CoachService:
             "items": items,
         }
 
-    def get_paper_review(self, user_id: str = "default") -> Dict[str, Any]:
+    def get_paper_review(self, user_id: str = "default", watchlist: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """复盘用户根据智能选股产生的观察和模拟交易结果。"""
-        watchlist = self.get_watchlist(user_id=user_id)
+        if watchlist is None:
+            watchlist = self.get_watchlist(user_id=user_id)
         items = watchlist.get("items") or []
         portfolio_summary = watchlist.get("portfolio_summary") or {}
         trades = self.store.list_paper_trades(user_id=user_id, limit=500)
@@ -3823,7 +3879,7 @@ class CoachService:
         avg_unrealized_pct = (
             sum(float(item.get("unrealized_pnl_pct") or 0) for item in evaluated_positions) / len(evaluated_positions)
             if evaluated_positions
-            else 0.0
+            else None
         )
 
         sell_trades = [row for row in trades if row.get("side") == "sell"]
@@ -3852,7 +3908,10 @@ class CoachService:
             reverse=True,
         )[:8]:
             pnl_pct = float(item.get("unrealized_pnl_pct") or 0)
-            if item.get("risk_status") == "stop_loss":
+            if item.get("unrealized_pnl_pct") is None:
+                verdict = "行情待更新"
+                suggestion = "当前行情缺失或未核验，不计入胜率和收益统计，也不代表收益为零。"
+            elif item.get("risk_status") == "stop_loss":
                 verdict = "必须复核"
                 suggestion = "已触发止损线，应优先检查是否执行平仓纪律。"
             elif item.get("risk_status") == "warning" or pnl_pct <= -3:
@@ -3882,7 +3941,7 @@ class CoachService:
             )
 
         reviewed_count = len(evaluated_positions)
-        win_rate = round(win_count / reviewed_count, 4) if reviewed_count else 0.0
+        win_rate = round(win_count / reviewed_count, 4) if reviewed_count else None
         snapshot_coverage = round(len(covered_items) / len(items), 4) if items else 0.0
 
         if reviewed_count <= 0:
@@ -3909,9 +3968,9 @@ class CoachService:
                 "win_count": win_count,
                 "loss_count": loss_count,
                 "flat_count": flat_count,
-                "avg_unrealized_pnl_pct": round(avg_unrealized_pct, 4),
-                "total_unrealized_pnl": portfolio_summary.get("total_unrealized_pnl") or 0,
-                "total_unrealized_pnl_pct": portfolio_summary.get("total_unrealized_pnl_pct") or 0,
+                "avg_unrealized_pnl_pct": round(avg_unrealized_pct, 4) if avg_unrealized_pct is not None else None,
+                "total_unrealized_pnl": portfolio_summary.get("total_unrealized_pnl"),
+                "total_unrealized_pnl_pct": portfolio_summary.get("total_unrealized_pnl_pct"),
                 "risk_flag_count": len(risk_items),
                 "missing_snapshot_count": len(missing_snapshot_items),
                 "buy_trade_count": len(buy_trades),
@@ -3919,6 +3978,7 @@ class CoachService:
             },
             "items": review_rows,
             "warnings": [
+                f"已核验行情覆盖 {reviewed_count}/{len(paper_items)} 个持仓；缺失部分不按零收益处理。",
                 "复盘仅基于当前模拟交易和推荐快照，不代表实盘可用性。",
                 "胜率样本低于10笔时，只能作为策略早期反馈，不能作为最终结论。",
             ],
