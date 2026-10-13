@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Col, Row, Space, Statistic, Table, Tag, Tooltip, message } from 'antd'
 import {
   AuditOutlined,
@@ -10,6 +10,7 @@ import {
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { coachApi } from '../services/api'
+import { formatOptionalNumber, quoteDescription } from './watchlistPresentation.mjs'
 import './Watchlist.css'
 
 const ACTION_META = {
@@ -18,6 +19,7 @@ const ACTION_META = {
 }
 
 const RISK_META = {
+  unknown: { text: '行情待更新', color: 'default' },
   normal: { text: '正常', color: 'green' },
   warning: { text: '浮亏警戒', color: 'orange' },
   stop_loss: { text: '跌破止损', color: 'red' },
@@ -34,20 +36,22 @@ const Watchlist = () => {
   const [portfolio, setPortfolio] = useState(null)
   const [trades, setTrades] = useState([])
   const [review, setReview] = useState(null)
+  const loadingRef = useRef(false)
 
   const loadWatchlist = async () => {
+    if (loadingRef.current) return
+    loadingRef.current = true
     setLoading(true)
     setError('')
     try {
-      const [watchlistData, tradeData, reviewData] = await Promise.all([
+      const [watchlistData, tradeData] = await Promise.all([
         coachApi.getWatchlist({ user_id: 'default' }),
         coachApi.getPaperTrades({ user_id: 'default', limit: 50 }),
-        coachApi.getPaperReview({ user_id: 'default' }),
       ])
       setRows(watchlistData?.items || [])
       setPortfolio({ summary: watchlistData?.portfolio_summary || {} })
       setTrades(tradeData?.items || [])
-      setReview(reviewData || null)
+      setReview(watchlistData?.review || null)
     } catch (err) {
       console.error('加载自选池失败', err)
       setError(err?.response?.data?.message || err?.message || '加载失败')
@@ -56,23 +60,37 @@ const Watchlist = () => {
       setTrades([])
       setReview(null)
     } finally {
+      loadingRef.current = false
       setLoading(false)
     }
   }
 
   useEffect(() => {
     loadWatchlist()
+    const refreshVisible = () => {
+      if (document.visibilityState === 'visible') loadWatchlist()
+    }
+    const timer = window.setInterval(refreshVisible, 60000)
+    window.addEventListener('focus', refreshVisible)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refreshVisible)
+    }
   }, [])
 
   const handleRemove = async (record, isClosePosition = false) => {
     setActionLoading(`${record.pick_id}-${isClosePosition ? 'closed' : 'ignored'}`)
     try {
       if (isClosePosition) {
+        if (record.quote_status !== 'latest_session' || !record.current_price) {
+          message.warning('请先取得有效行情，不能用买入价或旧估值模拟平仓')
+          return
+        }
         await coachApi.recordPickAction(
           record.pick_id,
           {
             action_type: 'closed',
-            action_price: record.current_price || record.avg_price || record.action_price,
+            action_price: record.current_price,
             action_qty: record.position_qty || record.action_qty,
             note: 'close paper position',
           },
@@ -124,19 +142,19 @@ const Watchlist = () => {
       render: (v) => v ? `¥${Number(v).toFixed(2)}` : '-',
     },
     {
-      title: '上涨概率',
+      title: '入选时上涨概率',
       dataIndex: 'up_prob',
       key: 'up_prob',
       render: (v) => v !== undefined && v !== null ? `${(Number(v) * 100).toFixed(1)}%` : '-',
     },
     {
-      title: '回撤概率',
+      title: '入选时回撤概率',
       dataIndex: 'dd_prob',
       key: 'dd_prob',
       render: (v) => v !== undefined && v !== null ? `${(Number(v) * 100).toFixed(1)}%` : '-',
     },
     {
-      title: '综合分',
+      title: '入选时综合分',
       dataIndex: 'score',
       key: 'score',
       render: (v) => (v !== undefined && v !== null ? `${Number(v).toFixed(1)}分` : '-'),
@@ -147,9 +165,17 @@ const Watchlist = () => {
       render: (_, record) => (record.position_qty ? `${Number(record.position_qty).toFixed(0)} 股` : '-'),
     },
     {
-      title: '现价',
+      title: '行情价 / 时间',
       key: 'current_price',
-      render: (_, record) => (record.current_price ? `¥${Number(record.current_price).toFixed(2)}` : '-'),
+      render: (_, record) => record.action_type !== 'paper_buy' ? '-' : (
+        <div>
+          <div>{record.current_price != null ? `¥${formatOptionalNumber(record.current_price)}` : '未知'}</div>
+          <small>{quoteDescription(record)}</small>
+          {record.current_price == null && record.last_known_price != null && (
+            <div>旧估值 ¥{formatOptionalNumber(record.last_known_price)}（非现价）</div>
+          )}
+        </div>
+      ),
     },
     {
       title: '浮盈亏',
@@ -189,9 +215,10 @@ const Watchlist = () => {
       },
     },
     {
-      title: '记录时间',
+      title: '建仓 / 加入时间',
       dataIndex: 'created_at',
       key: 'created_at',
+      render: (value) => value || '未记录',
     },
     {
       title: '操作',
@@ -212,6 +239,7 @@ const Watchlist = () => {
             size="small"
             icon={record.action_type === 'paper_buy' ? <MinusCircleOutlined /> : <DeleteOutlined />}
             loading={actionLoading === `${record.pick_id}-${record.action_type === 'paper_buy' ? 'closed' : 'ignored'}`}
+            disabled={record.action_type === 'paper_buy' && record.quote_status !== 'latest_session'}
             onClick={() => handleRemove(record, record.action_type === 'paper_buy')}
           >
             {record.action_type === 'paper_buy' ? '模拟平仓' : '移除'}
@@ -315,6 +343,10 @@ const Watchlist = () => {
       </div>
 
       {error && <Alert type="error" showIcon style={{ marginBottom: 16 }} message={error} />}
+      <Alert type="info" showIcon style={{ marginBottom: 16 }} message="建仓时间来自原始持仓；行情时间来自数据源。价格和浮盈亏在页面可见时每60秒刷新，入选时评分不会随行情改写。" />
+      {portfolio?.summary?.unpriced_position_count > 0 && (
+        <Alert type="warning" showIcon style={{ marginBottom: 16 }} message={`有 ${portfolio.summary.unpriced_position_count} 个持仓行情未核验，总市值与总盈亏暂不完整；未知不按0计算。`} />
+      )}
 
       <Card className="review-card" variant="borderless">
         <div className="review-card-main">
@@ -337,12 +369,12 @@ const Watchlist = () => {
             </div>
             <div>
               <span>持仓胜率</span>
-              <strong>{((reviewMetrics.open_win_rate || 0) * 100).toFixed(1)}%</strong>
+              <strong>{reviewMetrics.open_win_rate == null ? '未知' : `${(reviewMetrics.open_win_rate * 100).toFixed(1)}%`}</strong>
             </div>
             <div>
               <span>平均浮盈亏</span>
               <strong className={Number(reviewMetrics.avg_unrealized_pnl_pct || 0) >= 0 ? 'metric-up' : 'metric-down'}>
-                {Number(reviewMetrics.avg_unrealized_pnl_pct || 0).toFixed(2)}%
+                {reviewMetrics.avg_unrealized_pnl_pct == null ? '未知' : `${formatOptionalNumber(reviewMetrics.avg_unrealized_pnl_pct)}%`}
               </strong>
             </div>
             <div>
@@ -381,17 +413,17 @@ const Watchlist = () => {
         </Col>
         <Col xs={24} sm={12} md={6}>
           <Card>
-            <Statistic title="持仓总市值" value={portfolio?.summary?.total_market_value || 0} precision={2} prefix="¥" />
+            <Statistic title="持仓总市值" value={portfolio?.summary?.total_market_value ?? '未知'} precision={2} prefix="¥" />
           </Card>
         </Col>
         <Col xs={24} sm={12} md={6}>
           <Card>
             <Statistic
               title="浮动盈亏"
-              value={portfolio?.summary?.total_unrealized_pnl || 0}
+              value={portfolio?.summary?.total_unrealized_pnl ?? '未知'}
               precision={2}
               valueStyle={{ color: Number(portfolio?.summary?.total_unrealized_pnl || 0) >= 0 ? '#ff4d4f' : '#52c41a' }}
-              suffix={`(${Number(portfolio?.summary?.total_unrealized_pnl_pct || 0).toFixed(2)}%)`}
+              suffix={portfolio?.summary?.total_unrealized_pnl_pct == null ? '' : `(${formatOptionalNumber(portfolio.summary.total_unrealized_pnl_pct)}%)`}
             />
           </Card>
         </Col>
